@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/config",
+  "title": "session-audit config",
+  "type": "object",
+  "properties": {
+    "hooks": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}
