@@ -24,6 +24,7 @@ Dependencies: claude-session (binding A; optional for the deterministic half, re
 - **Harness snapshot**: facts copied once from claude-session when a transcript matches one of its sessions (see Harness enrichment). Tagged `source: harness`.
 - **Retro**: a stored result of `retro run`, identified by `ra-` followed by 8 lowercase base32 characters (`^ra-[a-z2-7]{8}$`; a unique prefix of at least 4 characters after `ra-` is accepted).
 - **Digest**: the bounded, redacted, fenced text built from the store and transcripts for one retro. Items have ids `s<N>.i<NNN>` (session number within the retro, item number); metrics have ids `s<N>.<metric>` and `total.<metric>`.
+- **Id grammars** (the schemas in `schemas/defs.json` are exact): a session id is a UUID; `csession_id` and agent ids are 1 to 128 characters of `[A-Za-z0-9._-]` starting with a letter or digit; `run_token` is 16 to 128 characters of `[A-Za-z0-9_-]`; `event_id` is 8 to 128 characters of `[A-Za-z0-9._:-]`; `decision_id` is 1 to 128 characters of `[A-Za-z0-9._:/@-]`; label keys are `[a-z][a-z0-9_.-]{0,63}`; actors are `human:<name>` or `auto:<name>`. Session refs within a retro are `s1`, `s2`, ... (start at 1, up to 4 digits); item numbers have 3 to 6 digits (`s1.i001`); finding ids are `f1` to `f999` and candidate ids `c1` to `c99`. A metric name is `[a-z][a-z0-9_]{0,63}` and must not look like an item id (`i` plus 3 to 6 digits), so a metric id and an item id can never collide.
 - **Store**: `state.db` (private SQLite, WAL) holding sessions, agents, usage rows, harness snapshots, retros and ingest bookkeeping. See Files.
 
 ## Global flags
@@ -42,16 +43,20 @@ Free text that could be untrusted (a retro title filter, a reason) is accepted a
 |---|---|
 | 0 | Success. `ingest` also exits 0 for a partial run that hit its budget (`complete: false`) and for "already running" |
 | 1 | Unexpected internal error |
-| 2 | Usage error, including `retro run --mode interactive` in 0.x (`details.reason: mode_unsupported`) |
+| 2 | Usage error or invalid config. Reasons with a name: `retro run --mode interactive` in 0.x (`details.reason: mode_unsupported`) and `ingest --rebuild` without a terminal and without `--yes` (`details.reason: confirmation_required`) |
 | 10 | Not found: a session, retro or artifact id |
 | 11 | A `pre-retro` hook vetoed the run |
-| 12 | The requested operation failed for a reportable reason: claude-session missing or too old, sandbox unavailable, store unwritable, every transcript root unreadable, or a retro session that never started (`details.reason`, `details.retryable`) |
-| 13 | Needs a human: a `pre-retro` hook escalated, or the retro session reported blocked or needs-input (retro state `escalated`) |
-| 14 to 18 | The retro session's outcome passed through unchanged from claude-session: 14 exited-unreported, 15 killed, 16 timeout, 17 lost, 18 reported failed |
+| 12 | The requested operation failed for a reportable reason. `details.reason` is one of `claude_session_missing`, `claude_session_too_old`, `sandbox_unavailable`, `store_unwritable`, `no_readable_roots` (every transcript root unreadable) or `session_not_started` (a retro session that never started); `details.retryable` says whether trying again can help |
+| 13 | Needs a human: a `pre-retro` hook escalated, or the retro session reported blocked or needs-input (retro state `escalated`; the retro's `reason` is `hook_escalated`, `session_blocked` or `session_needs_input`) |
+| 14 to 18 | The retro session's outcome passed through unchanged from claude-session: 14 exited-unreported, 15 killed, 16 timeout, 17 lost, 18 reported failed. `details.outcome` is the outcome token and `details.retro_id` names the retro |
 | 20 | Refused, with `details.reason` (see Refusal reasons) |
 | 21 | Ambiguous selector (a session or retro prefix) |
-| 22 | The retro session finished but its artifact is missing or invalid (retro state `failed`); `details.reason` names the failed check |
+| 22 | The retro session finished but its artifact is missing or invalid (retro state `failed`); `details.reason` is the retro's failure reason (one of the eight in Retro validation) and `details.retro_id` names the retro |
 | 130, 143 | The command was interrupted by SIGINT or SIGTERM after stopping its own work cleanly |
+
+**Error envelope** (`schemas/cli/error.json`). `code` is a closed enum mapped to the exit code: `internal` 1, `usage` 2, `config_invalid` 2, `not_found` 10, `vetoed` 11, `failed` 12, `needs_human` 13, `session_ended` 14 to 18, `refused` 20, `ambiguous` 21, `artifact_invalid` 22. `message` is a fixed string of the tool, never transcript, model or input text. `details` is a closed object that holds only ids, counts and enums, with these keys: `reason`, `retryable` (boolean), `matched` and `limit` (integers), `retro_id`, `id`, `matches` (the candidate ids of an ambiguous prefix), `field` (the config key or flag at fault, never its value), `hook` (`pre-retro`, `post-retro` or `post-attention`) and `outcome` (a claude-session outcome token). Required keys: `reason` for `refused` (a Refusal reason), `failed` (the exit 12 reasons) and `artifact_invalid` (the failure reasons); `retryable` for `failed`; `matches` for `ambiguous`; `id` for `not_found`.
+
+With `--json`, a non-zero exit prints only the envelope. This includes exits 11, 13, 14 to 18 and 22 of `retro run`, where a retro exists and `details.retro_id` names it (the retro itself is read with `retro show`). Exits 130 and 143 print no envelope.
 
 ## Refusal reasons
 
@@ -65,6 +70,9 @@ Free text that could be untrusted (a retro title filter, a reason) is accepted a
 | `store_newer` | `state.db` was written by a newer version |
 | `already_exists` | `retro run` found a stored retro with the same key and no `--again` (not an error: see `retro run`) |
 | `in_use` | `retro delete` on a retro whose run is still live |
+| `cron_block_malformed` | `cron install` or `cron uninstall` found a managed block with a start line and no end line (exit 20) |
+
+`confirmation_required` is not a refusal: it is a usage error (exit 2).
 
 ## Commands
 
@@ -82,25 +90,25 @@ Reads new transcript bytes into the store and, when claude-session is installed,
 - `--budget`: overall time budget for the run (default `ingest.budget`, 300 s). A run that hits it stops cleanly, exits 0 with `complete: false`, and the next run resumes.
 - `--dry-run`: reads and parses but writes nothing; prints what would change.
 
-`--json` output: `schemas/cli/ingest.json`. It carries `complete`, `already_running`, `files` (`seen`, `new`, `changed`, `unchanged`, `unsafe`, `excluded`, `vanished`), `lines` (`parsed`, `errors`), `sessions` (`new`, `updated`), `harness` (`enabled`, `matched`, `captured`, `errors`) and `warnings`.
+`--json` output: `schemas/cli/ingest.json`. It carries `complete`, `already_running`, `files` (`seen`, `new`, `changed`, `unchanged`, `unsafe`, `excluded`, `vanished`), `lines` (`parsed`, `errors`), `sessions` (`new`, `updated`), `harness` (`enabled`, `matched`, `captured`, `errors`), `dry_run` (boolean) and `warnings` (free strings, untrusted because they can name transcript paths). An `already_running` result has every count zero and `complete: false`. `--since` and the other time flags take an ISO 8601 time or a duration ago in the Config grammar; flags also accept `d` (days).
 
 ### `sessions`
 
 `session-audit sessions [--since WHEN] [--until WHEN] [--project PATH] [--label K=V]... [--kind K] [--outcome O] [--entrypoint interactive|headless] [--model M] [--sort start|tokens|cost|active] [--limit N] [--json]`
 
-Lists stored sessions, newest first by default. Reads the store only. `--project` is a path prefix matched on a path boundary. `--label` matches harness labels (AND across flags, a flag matches any value of its key). `--kind` and `--outcome` match harness facts. `--limit` default 100, at most 1000. Output: `{"sessions": [...], "truncated": bool}` (`schemas/cli/sessions.json`). Each row has the fields of the Session object (see `--json` outputs).
+Lists stored sessions, newest first by default. Reads the store only. `--project` is a path prefix matched on a path boundary. `--label` matches harness labels (AND across flags, a flag matches any value of its key). `--kind` and `--outcome` match harness facts. `--entrypoint` filters on two values; the Session object's `entrypoint` also has `unknown` for a transcript that does not say. `--limit` default 100, at most 1000. Output: `{"sessions": [...], "truncated": bool}` (`schemas/cli/sessions.json`). Each row has the fields of the Session object (see `--json` outputs).
 
 ### `usage`
 
 `session-audit usage --by DIM[,DIM] [filters as for sessions] [--tz ZONE] [--limit N] [--json]`
 
-Deterministic analytics over the store. Dimensions: `day`, `week`, `month`, `project`, `model`, `kind`, `entrypoint`, `tool`, `session`, `label=<key>`. At most two dimensions. `--tz` overrides `time_zone` for day, week and month bucketing. Output: `{"by": [...], "rows": [...], "totals": {...}, "truncated": bool}` (`schemas/cli/usage.json`). Each row has `key`, `sessions`, `tokens` (the four counters), `cost` (see Cost), `active_seconds`, `tool_calls`, `tool_errors`, `denials`, `interruptions`, `flags` (a list including `cost_mismatch`). A row never mixes cost bases silently.
+Deterministic analytics over the store. Dimensions: `day`, `week`, `month`, `project`, `model`, `kind`, `entrypoint`, `tool`, `session`, `label=<key>`. At most two dimensions. `--tz` overrides `time_zone` for day, week and month bucketing. Output: `{"by": [...], "rows": [...], "totals": {...}, "truncated": bool}` (`schemas/cli/usage.json`). Each row has `key`, `sessions`, `tokens` (the four counters), `cost` (see Cost), `active_seconds`, `tool_calls`, `tool_errors`, `denials`, `interruptions`, `flags` (a list from the session flag enum). `key` is an array with one entry per dimension in `by` (null when a value is missing), in the same order, never a joined string. `totals` has the row fields without `key`. A row never mixes cost bases silently.
 
 ### `show`
 
 `session-audit show SESSION_ID [--json]`
 
-One stored session: the Session object, its agents, its usage rows by day and model, and its harness snapshot. Exit 10 when unknown, 21 when the prefix is ambiguous. `--json`: `schemas/cli/show.json`.
+One stored session: the Session object, its agents, its usage rows and its harness snapshot. `harness` is returned inside `session` (the Session object carries it) and again at the top level. An agent is `{agent_id, parent_tool_call_id, agent_type, models, tokens, tool_calls, tool_errors, denials, interruptions}`. A usage row is `{day, session_id, agent_id (null for the main agent), model, tokens}` and is also the line shape of `export usage`. Exit 10 when unknown, 21 when the prefix is ambiguous. `--json`: `schemas/cli/show.json`.
 
 ### `retro run`
 
@@ -111,51 +119,51 @@ Runs one retro. Blocks until the retro is final. `SCOPE` is one or more of `--se
 - `--skill`: any skill Claude Code accepts as a slash command; default `retro.skill` (`session-audit:audit`).
 - `--mode`: only `headless` is accepted in 0.x. `interactive` exits 2 with `details.reason: mode_unsupported`.
 - `--again`: run the model even when a stored retro has the same key; the new retro records `again_of`.
-- `--dry-run`: builds the digest in memory and prints the plan (matched sessions, skipped sessions with reasons, item counts, size, the key, the claude-session command's flags without the prompt) and exits 0. Nothing is stored and no model is called. It never prints digest text.
+- `--dry-run`: builds the digest in memory and prints the plan (matched sessions, skipped sessions with reasons, item counts, size, the key, the claude-session command's flags without the prompt) and exits 0. Nothing is stored and no model is called. It never prints digest text. The plan is `{dry_run: true, scope, matched, skipped, items, items_by_kind, digest_bytes, key, skill, model, launch_flags}`: `matched` lists the full ids of the sessions that would be digested, `skipped` has the `{session_id, reason}` rows, `items_by_kind` counts items per item kind, and `launch_flags` is the list of claude-session flags without the prompt.
 
 Exit codes: see Exit codes. When a stored retro with the same key exists and `--again` is absent, the command exits 0 and prints that retro with `reused: true`.
 
-`--json` output: `schemas/cli/retro-run.json` (the Retro object plus `reused`, `phase` and `outcome` when a session ran).
+`--json` output: `schemas/cli/retro-run.json`: the Retro object plus `reused`, `already_running` and `phase` (`skipped` and `outcome` come once, from the Retro object), or the dry-run plan. `phase` is a nullable lowercase token whose values belong to claude-session. A non-zero exit prints the error envelope instead (see Exit codes).
 
 ### `retro list`
 
 `session-audit retro list [--state S]... [--since WHEN] [--limit N] [--json]`
 
-Lists retros, newest first. Reads the store only; never checks liveness. Output `{"retros": [...], "truncated": bool}` (`schemas/cli/retro-list.json`). Each row has a stable string `id`, `state`, `created_at`, `updated_at`, `finished_at`, the scope summary, `findings` and `candidates` counts and `key`. `--limit` default 100, at most 1000.
+Lists retros, newest first. Reads the store only; never checks liveness. Output `{"retros": [...], "truncated": bool}` (`schemas/cli/retro-list.json`). Each row has a stable string `id`, `state`, `reason` (null unless the retro is `failed`, `escalated` or `canceled`), `created_at`, `updated_at`, `finished_at`, the canonical `scope`, `findings` and `candidates` counts and `key`. `--limit` default 100, at most 1000.
 
 ### `retro show`
 
 `session-audit retro show RETRO_ID [--digest] [--json]`
 
-Prints one retro. Default is readable text; `--json` prints the Retro object including the artifact (`schemas/cli/retro-show.json`). This is the contract other tools read. `--digest` also prints the stored digest if it has not been pruned; the digest is untrusted text, sanitized and printed inside its fence. Exit 10 when unknown.
+Prints one retro. Default is readable text; `--json` prints the Retro object including the artifact (`schemas/cli/retro-show.json`). This is the contract other tools read. `--digest` also prints the stored digest if it has not been pruned (with `--json` the Retro object gains a `digest` string, null when pruned; without `--digest` the key is absent; the artifact fields are already in the Retro object, there is no separate `artifact` key); the digest is untrusted text, sanitized and printed inside its fence. Exit 10 when unknown.
 
 ### `retro delete`
 
 `session-audit retro delete RETRO_ID... [--yes] [--json]`
 
-Deletes retros and their digests. Confirms on a terminal; without a terminal it needs `--yes`. Exit 20 `in_use` for a retro whose run is live.
+Deletes retros and their digests. Confirms on a terminal; without a terminal it needs `--yes`. Exit 20 `in_use` for a retro whose run is live. It is all or nothing: an unknown id exits 10 before anything is deleted, so `deleted` lists exactly the ids requested.
 
 ### `prune`
 
 `session-audit prune [--dry-run] [--json]`
 
-Applies the retention keys (see Retention) in one transaction. Never touches transcripts. Retention is configured policy, so it does not ask for confirmation; automation may run it. Output `schemas/cli/prune.json`.
+Applies the retention keys (see Retention) in one transaction. Never touches transcripts. Retention is configured policy, so it does not ask for confirmation; automation may run it. Output `schemas/cli/prune.json`: `{dry_run, tables, retention}`. `tables` counts deleted rows per table (`sessions`, `agents`, `usage_rows`, `harness_snapshots`, `retros`, `digests`, `log_entries`); `retention` counts per retention key (`sessions`, `retros`, `digests`, `log`).
 
 ### `export`
 
 `session-audit export {sessions|usage|retros} [--since WHEN] [--json]`
 
-Prints store rows as JSON lines (one object per line, oldest first). Output holds the same fields as the matching read commands and no text beyond a retro's artifact. With `--json` the lines are the objects themselves (there is no wrapper object); without it the format is the same.
+Prints store rows as JSON lines (one object per line, oldest first). Output holds the same fields as the matching read commands and no text beyond a retro's artifact. `export sessions` lines are the Session object, `export usage` lines the usage row of `show`, and `export retros` lines the full Retro object with its artifact text (`schemas/cli/export-*.json`). With `--json` the lines are the objects themselves (there is no wrapper object); without it the format is the same.
 
 ### `validate`
 
 `session-audit validate [--probe] [--json]`
 
-Offline and read-only by default; never prompts. Checks the config and its ownership, the transcript roots, the store (opens read-only, migrations needed), the price table age (warns when `as_of` is older than 180 days), the permission profile file, the bundled plugin directory and whether claude-session is installed and new enough. Output `{"ok": bool, "checks": [{"name", "ok", "reason"}], "warnings": [...]}` (`schemas/cli/validate.json`). Exit 0 for ok (including warnings), 2 for an invalid config, 12 for a failed check. `--probe` additionally runs `claude-session kinds --json` and the sandbox availability check.
+Offline and read-only by default; never prompts. Checks the config and its ownership, the transcript roots, the store (opens read-only, migrations needed), the price table age (warns when `as_of` is older than 180 days), the permission profile file, the bundled plugin directory and whether claude-session is installed and new enough. Output `{"ok": bool, "checks": [{"name", "ok", "reason"}], "warnings": [...]}` (`schemas/cli/validate.json`). Check names: `config`, `config_ownership`, `transcript_roots`, `store`, `price_table`, `permission_profile`, `plugin`, `claude_session`, and under `--probe` also `probe_kinds` and `probe_sandbox`. `reason` is null when the check is ok and otherwise one of `config_invalid`, `config_unsafe`, `no_readable_roots`, `store_unreadable`, `store_newer`, `permission_profile_missing`, `plugin_missing`, `claude_session_missing`, `claude_session_too_old`, `probe_failed`, `sandbox_unavailable`; a check has no message field. `warnings` is a closed enum: `price_table_old`, `migration_pending`, `root_unusable`, `claude_session_missing`. Exit 0 for ok (including warnings), 2 for an invalid config, 12 for a failed check. `--probe` additionally runs `claude-session kinds --json` and the sandbox availability check.
 
 ### `cron`
 
-`session-audit cron install [--ingest-every DURATION] [--env-file PATH] [--dry-run] [--json]` and `session-audit cron uninstall [--dry-run] [--json]`. See Cron.
+`session-audit cron install [--ingest-every DURATION] [--env-file PATH] [--dry-run] [--json]` and `session-audit cron uninstall [--dry-run] [--json]`. See Cron. Output `schemas/cli/cron.json`: `{command, outcome, dry_run, block}`. `outcome` is `installed`, `replaced` or `unchanged` for install and `removed` or `unchanged` for uninstall; `block` is the managed block's lines (empty when there is none).
 
 ## Ingest rules
 
@@ -177,7 +185,7 @@ These rules are normative for the reader.
 3. **Days.** A usage row's day is the day of the message's own timestamp in `time_zone` (default: the machine's zone). A session that crosses midnight splits.
 4. **Time.** A session's start and end are the minimum and maximum timestamp seen, never the first and last line (timestamps can step backwards). `active_seconds` is the sum of recorded turn durations; it is null when no turn durations exist.
 5. **Tools.** `tool_calls` counts tool-use blocks, `tool_errors` counts results marked as errors, `denials` counts recorded permission denials and `interruptions` counts recorded user interruptions. Tool-use blocks are paired with their results by id; an unpaired block is counted as a call only.
-6. **Quality flags.** A session carries `parse_errors` (a count), `unknown_line_types` (a count) and `flags` such as `cost_mismatch`, `no_usage`, `no_timestamps`, `truncated_tail`. The flags are facts about the reading, not about the work.
+6. **Quality flags.** A session carries `parse_errors` (a count), `unknown_line_types` (a count) and `flags` from the closed set `cost_mismatch`, `no_usage`, `no_timestamps`, `truncated_tail`, `old_rules`. The flags are facts about the reading, not about the work.
 
 ## Cost
 
@@ -209,7 +217,7 @@ The digest is built deterministically with no model, from the store and the tran
 
 **Items**, per session, in time order (timestamps by min and max rule): `prompt` (the user's prompt, cut to `digest.prompt_chars`, default 500), `assistant` (cut to `digest.assistant_chars`, default 300), `tool_call` (tool name plus a one-line argument summary: a path, or the first `digest.arg_chars` (default 200) characters of a command), `tool_error`, `denial`, `interruption` and `rejection` (text only for these: cut to `digest.error_chars`, default 300), `compaction`, `subagent` (a summary item with the agent type, tool counts and tokens). Successful tool output is never included, only its byte size.
 
-**Budget.** A total cap (`digest.max_bytes`, default 200 KB) and a per-session cap apply. Over budget, items are dropped in this priority order: errors, denials, interruptions and rejections first; then items inside the most expensive turns; then the rest, oldest first. The manifest `coverage` states per session how many items existed, how many were kept and why the rest were dropped.
+**Budget.** A total cap (`digest.max_bytes`, default 200 KB) and a per-session cap apply. Over budget, items are dropped in this priority order: errors, denials, interruptions and rejections first; then items inside the most expensive turns; then the rest, oldest first. The manifest `coverage` is `{digest_bytes, items_total, items_kept, sessions: [{ref, items_total, items_kept, dropped: {session_cap, total_cap}}]}`: per session how many items existed, how many were kept and how many were dropped by the per-session cap and by the total cap. The stored Retro object repeats it.
 
 **Redaction**, before sanitizing and fencing, on every text part:
 
@@ -233,10 +241,11 @@ The digest hash (`digest_sha256`) is the SHA-256 of the bytes of `digest.md`. `m
 | `running` | The digest and its hash are stored and the retro session runs |
 | `validating` | The session ended; the artifact is being checked |
 | `done` | Validated and stored |
-| `failed` | A final state with `reason` (see Retro validation and below) |
+| `failed` | A final state with `reason` (see Retro validation) |
 | `escalated` | A hook escalated, or the session reported blocked or needs-input |
 | `canceled` | The command was interrupted |
 
+- **Reason.** `reason` is null when `state` is `done`. For `failed` it is one of the eight failure reasons in Retro validation. The other final states carry `hook_escalated`, `session_blocked` or `session_needs_input` (`escalated`) and `interrupted` (`canceled`); non-final states carry null.
 - **Key.** A retro key is the SHA-256 of the canonical scope, the `digest_sha256`, the skill name and the model name. A stored `done` retro with the same key is returned without a model call unless `--again`.
 - **Leases.** Each retro holds a lease (holder PID plus process start time, expiry, renewed by heartbeat). A second `retro run` with the same key while the lease is live exits 0 with the existing retro and `already_running: true`.
 - **Crash recovery.** When a run starts, `cron` runs `ingest` or `validate` is invoked, a retro in `digesting`, `running` or `validating` with an expired lease is recovered: its session is found by the label `retro=<id>` through `claude-session list --label`, stopped when live (exact id, never a pattern), its frozen artifact copied if one exists, the retro marked `failed` with `reason: runner_lost`, and the session forgotten with `--purge`.
@@ -275,7 +284,7 @@ The slot is `audit`; the default skill is `session-audit:audit`, bundled in `plu
 **Inputs** under `$CSESSION_DIR/inputs/<run>/`:
 
 - `digest.md`: the fenced digest (Digest).
-- `manifest.json`: `{"retro_id", "run_token", "digest_sha256", "sessions": [{"ref", "csession_id" or null, "project", "items": [ids], "metrics": [names]}], "coverage": {...}, "limits": {"max_findings", "max_candidates", "text_limits"}, "finding_categories", "target_classes"}` (`schemas/slot/manifest.json`).
+- `manifest.json`: `{"retro_id", "run_token", "digest_sha256", "sessions": [{"ref", "csession_id" or null, "project", "items": [ids], "metrics": [names]}], "coverage": {...}, "limits": {"max_findings", "max_candidates", "text_limits"}, "finding_categories", "target_classes"}` (`schemas/slot/manifest.json`). `coverage` is the object defined in Digest (Budget). `csession_id` is null for a session with no harness match. `items` lists the item ids of the session; `metrics` lists bare metric names (`tool_calls`, not `s1.tool_calls`). An evidence ref `s<N>.<name>` is valid when `<name>` is in that session's list, and `total.<name>` when any session lists it. `text_limits` has `summary`, `title`, `detail`, `target_hint` and `proposal`. `digest_sha256` is the SHA-256 of `digest.md` only (see Digest).
 
 **Output**: one artifact named `audit.json` in `$CSESSION_DIR/artifacts/`, attached with `claude-session report done --summary-file ... --artifact audit.json`. The skill must use literal absolute paths in the report command and must read its inputs with the Read tool (Bash is denied for anything but the report command).
 
@@ -295,7 +304,7 @@ The standard instructions, escalation and reporting come from claude-session; th
 | `findings` | array | At most `limits.max_findings` (50) |
 | `candidates` | array | At most `limits.max_candidates` (20) |
 
-A finding has `id` (`f1`, `f2`, ...), `category` (`went_well`, `went_badly`, `friction`, `cost`), `severity` (`low`, `medium`, `high`), `title` (at most 120 characters), `detail` (at most 1500 characters) and `evidence` (1 to 8 items, each `{"kind": "item"|"metric", "ref": "<id>"}`). A candidate has `id` (`c1`, ...), `target_class` (`skill`, `instructions_file`, `config`, `permission_profile`, `workflow`), `target_hint` (at most 200 characters), `proposal` (at most 1500 characters) and `findings` (ids of the findings that support it; each must exist). All model text is untrusted and marked `x-untrusted` in the schema. The whole file is at most 256 KB. No other keys are allowed at any level.
+A finding has `id` (`f1`, `f2`, ...), `category` (`went_well`, `went_badly`, `friction`, `cost`), `severity` (`low`, `medium`, `high`), `title` (at most 120 characters), `detail` (at most 1500 characters) and `evidence` (1 to 8 items, each `{"kind": "item"|"metric", "ref": "<id>"}`). A candidate has `id` (`c1`, ...), `target_class` (`skill`, `instructions_file`, `config`, `permission_profile`, `workflow`), `target_hint` (at most 200 characters), `proposal` (at most 1500 characters) and `findings` (ids of the findings that support it; each must exist). All model text is untrusted and marked `x-untrusted` in the schema. The whole file is at most 256 KB. No other keys are allowed at any level. A candidate must name at least one finding, and `title`, `detail`, `target_hint` and `proposal` must be non-empty. The schema cannot express the 256 KB cap, the equality of the identity keys with the stored values, or that `marker` is required for the bundled skill (it is optional in the schema); the tool enforces those in Retro validation.
 
 The stored Retro object adds tool-written fields the model cannot set: `scope`, `coverage` (from the manifest), `counts` and `metrics` (from the store), identity, state, `cost_usd`, `num_turns`, `outcome`, timestamps and `again_of`.
 
@@ -309,7 +318,7 @@ A retro run is a success only when all of these hold; otherwise it is `failed` (
 4. the file parses as JSON and validates against the closed artifact schema;
 5. `retro_id`, `run_token` and `digest_sha256` equal the stored values;
 6. for the bundled skill, the marker equals the plugin reference file's marker;
-7. every evidence `ref` exists in the manifest (an item id, or a metric name) and every candidate's `findings` ids exist.
+7. every evidence `ref` exists in the manifest (an item id; or, for a metric, `s<N>.<name>` or `total.<name>` as defined in Slot contract) and every candidate's `findings` ids exist.
 
 A failed check 7 drops only the findings (or candidates) with the bad reference and records `dropped` counts; any other failed check discards the whole artifact. A retro with every finding dropped is `failed` with `reason: no_valid_findings`. A run that finishes with no artifact is `failed` with `reason: skill_not_found` when the run's `skill` shows the model could not find the skill, otherwise `reason: no_artifact`. Failure reasons: `runner_lost`, `no_artifact`, `skill_not_found`, `artifact_invalid`, `identity_mismatch`, `marker_mismatch`, `no_valid_findings`, `session_failed`.
 
@@ -317,7 +326,7 @@ Numbers in the stored retro (`counts`, `metrics`, cost) come from the store and 
 
 ## `--json` outputs
 
-Schemas live in [`schemas/cli/`](../schemas/cli/), the slot schemas in [`schemas/slot/`](../schemas/slot/). Every command that prints data has one.
+Schemas live in [`schemas/cli/`](../schemas/cli/), the slot schemas in [`schemas/slot/`](../schemas/slot/). Every command that prints data has one. Definitions shared by several schemas (Session, Retro, scope, coverage, ids, the error envelope) are in [`schemas/defs.json`](../schemas/defs.json); every schema file other than `config.json` references it, and `config.json` is self-contained.
 
 | Command | Schema | Shape |
 |---|---|---|
@@ -325,25 +334,34 @@ Schemas live in [`schemas/cli/`](../schemas/cli/), the slot schemas in [`schemas
 | `sessions` | `sessions.json` | `{sessions: [Session], truncated}` |
 | `usage` | `usage.json` | `{by, rows, totals, truncated}` |
 | `show` | `show.json` | `{session, agents, usage, harness}` |
-| `retro run` | `retro-run.json` | Retro plus `reused`, `already_running`, `skipped`, `phase`, `outcome`, or the dry-run plan |
+| `retro run` | `retro-run.json` | Retro plus `reused`, `already_running`, `phase`, or the dry-run plan |
 | `retro list` | `retro-list.json` | `{retros: [RetroRow], truncated}` |
 | `retro show` | `retro-show.json` | Retro with artifact and, with `--digest`, the fenced digest |
 | `retro delete` | `retro-delete.json` | `{deleted: [ids]}` |
-| `prune` | `prune.json` | counts per table and per retention key |
+| `prune` | `prune.json` | `{dry_run, tables, retention}` |
 | `validate` | `validate.json` | `{ok, checks, warnings}` |
-| `cron install\|uninstall` | `cron.json` | the block and whether it changed |
+| `cron install\|uninstall` | `cron.json` | `{command, outcome, dry_run, block}` |
 | `export` | `export-*.json` | one object per line |
 | error | `error.json` | the envelope |
 
-**Session object**: `session_id`, `project`, `entrypoint`, `version`, `started_at`, `ended_at`, `active_seconds`, `models`, `tokens` (`input`, `output`, `cache_read`, `cache_write`, `subagents`), `cost` (`reported_usd`, `estimated_usd`, `unknown_tokens`), `tool_calls`, `tool_errors`, `denials`, `interruptions`, `subagents`, `compactions`, `parse_errors`, `flags`, `harness` (null or `{csession_id, kind, labels, outcome, end_reason, cost_usd, num_turns, skill, repo, source}`).
+**Session object**: `session_id`, `project`, `entrypoint`, `version`, `started_at`, `ended_at`, `active_seconds`, `models`, `tokens` (`input`, `output`, `cache_read`, `cache_write`, `subagents`), `cost` (`reported_usd`, `estimated_usd`, `unknown_tokens`), `tool_calls`, `tool_errors`, `denials`, `interruptions`, `subagents`, `compactions`, `parse_errors`, `flags`, `harness` (null or `{csession_id, kind, labels, outcome, end_reason, cost_usd, num_turns, skill, repo, source}`). `project`, `version`, `started_at`, `ended_at` and `active_seconds` are nullable. `entrypoint` is `interactive`, `headless` or `unknown`. `flags` is a closed enum: `cost_mismatch`, `no_usage`, `no_timestamps`, `truncated_tail`, `old_rules`. In `harness`, `outcome`, `end_reason` are lowercase tokens owned by claude-session (not enums here) and `source` is always `harness`.
 
-**Retro object**: `id`, `state`, `reason`, `key`, `scope`, `coverage`, `skipped`, `skill`, `model`, `created_at`, `updated_at`, `finished_at`, `csession_id`, `cost_usd`, `num_turns`, `outcome`, `again_of`, `counts`, `metrics`, `dropped`, `summary`, `findings`, `candidates`. Untrusted fields are `summary`, `findings[].title`, `findings[].detail`, `candidates[].target_hint`, `candidates[].proposal`.
+**Retro object**: `id`, `state`, `reason`, `key`, `scope`, `coverage`, `skipped`, `skill`, `model`, `created_at`, `updated_at`, `finished_at`, `csession_id`, `cost_usd`, `num_turns`, `outcome`, `again_of`, `counts`, `metrics`, `dropped`, `summary`, `findings`, `candidates`. `key`, `coverage`, `csession_id`, `cost_usd`, `num_turns`, `outcome`, `summary`, `model` and `finished_at` are nullable (a retro in `digesting` has no key or coverage yet); `reason` is null when `state` is `done`.
+
+- `scope` is canonical: `{sessions, labels, project, since, until, kind, outcome}` with `since` and `until` resolved to timestamps.
+- `counts` is `{sessions, skipped, items, findings, candidates}`.
+- `metrics` maps metric ids (`s1.tool_calls`, `total.denials`) to numbers.
+- `dropped` is `{findings, candidates}`: the counts removed by validation check 7.
+- `skipped` rows are `{session_id, reason}` with `reason` always `live`.
+- `outcome` is a lowercase token from claude-session.
+
+Fields that carry transcript or model text are marked `x-untrusted` in the schemas: Retro `summary`, finding `title` and `detail`, candidate `target_hint` and `proposal`, harness `labels` values, `skill` and `repo`, session `project`, `version`, agent `agent_type`, model names, usage keys, ingest `warnings`, the manifest `project` and the `retro show` `digest`. A consumer must treat all of them as untrusted.
 
 Sessions, retros and `usage` output must be validated by tests against these schemas.
 
 ## Hooks
 
-Hooks are configured in the tool's own config (and drop-ins), run via `sh -c` in their own process group, and receive a JSON payload on stdin. Environment: `SESSION_AUDIT_HOOK`, `SESSION_AUDIT_ID`, `SESSION_AUDIT_OBJECT_TYPE`. Hooks inherit the tool's environment. Default timeout 30 seconds. Payloads carry ids, counts and enums, never transcript or model text. Schemas in [`schemas/hooks/`](../schemas/hooks/).
+Hooks are configured in the tool's own config (and drop-ins), run via `sh -c` in their own process group, and receive a JSON payload on stdin. Environment: `SESSION_AUDIT_HOOK`, `SESSION_AUDIT_ID`, `SESSION_AUDIT_OBJECT_TYPE`. Hooks inherit the tool's environment. Default timeout 30 seconds. Payloads carry ids, counts and enums, never transcript or model text, and are closed objects. Schemas in [`schemas/hooks/`](../schemas/hooks/).
 
 | Hook | When | Payload (besides `tool`, `hook`, `object_type`, `object_id`, `event_id`, `labels`) | Effect |
 |---|---|---|---|
@@ -351,6 +369,7 @@ Hooks are configured in the tool's own config (and drop-ins), run via `sh -c` in
 | `post-retro` | When a retro reaches a final state | `retro_id`, `state`, `reason`, `findings`, `candidates`, `cost_usd`, `reused` | cannot undo; failure logged and warned |
 | `post-attention` | A closed `reason` | `reason` (`retro_failed`, `ingest_failing`), `object_type` (`retro` or `ingest`), `details` (a closed set of ids and enums) | cannot undo |
 
+- Payload field details: `labels` is a string map; in `pre-retro`, `sessions` is a count (never ids or text) and `scope` is the canonical scope object; `post-retro.state` is one of the four final states (`done`, `failed`, `escalated`, `canceled`) and `reason` follows the Retro lifecycle rule; `post-attention.details` is `{retro_id, failure_reason, csession_id}` for `retro_failed` and `{consecutive_failures, first_failed_at, last_failed_at}` for `ingest_failing`; `object_id` is the retro id, or the literal `ingest` for an `ingest` attention.
 - `pre-retro` stdout may be a JSON object with `decision_id`; every returned id is recorded in the retro's log entry and state.
 - `post-` hooks are best effort and at most once, may run `async: true`, and carry a unique `event_id`. There is no outbox in 0.x.
 - `post-attention` fires `retro_failed` when a retro ends `failed` and `ingest_failing` when `ingest.fail_threshold` (default 3) consecutive cron ingests failed, then at most once per day while it keeps failing. An idle or healthy result fires nothing.
@@ -400,7 +419,9 @@ A retro run refuses (exit 20, `config_unsafe`) when the config file, its directo
 | `hooks` | none | Hook lists (see Hooks) |
 | `me.name` | OS user name | Actor name |
 
-Durations accept a number of seconds or the guide's grammar; keys that name days (`retention.*`, `schedule.retro.every`) also accept `d`. Invalid config fails fast with a message naming the key and never the value.
+Durations accept a number of seconds or the guide's grammar (`ms`, `s`, `m`; no unit means seconds); only the keys that name days (`retention.*`, `schedule.retro.every`, and `since` and `until` of `schedule.retro.scope`) also accept `d`. There is no `h` unit: write `60m`. Sizes (`digest.*_bytes`) are a byte count or a number followed by `B`, `KB` or `MB` (1 KB = 1024 bytes). `digest.*_chars` accept 20 to 100000, `retro.max_sessions` 1 to 500 and `limits.retros_per_day` 1 to 1000.
+
+Shapes the table leaves out: each `hooks` entry is `{cmd, timeout, async}` (`async` only on `post-retro` and `post-attention`); `prices` is `{as_of, models: {<name>: {input, output, cache_read, cache_write}}}` and extends the bundled table; `schedule.retro` is null or absent (off) or `{every, scope}` with `every` defaulting to `7d` and `scope` keys `labels`, `project`, `since`, `until`, `kind` and `outcome` (`since` and `until` are durations ago); `retro.sandbox` is `required`, `preferred` or `off` (claude-session's levels); `retro.setting_sources` items are `user`, `project` or `local`. `retro.skill_marker` and `retro.model` have no default (absent); `transcript_roots`, `time_zone`, `prices` and `me.name` have computed defaults, shown commented out in `config.example.yaml`. Invalid config fails fast with a message naming the key and never the value.
 
 ## Environment variables
 
@@ -431,7 +452,7 @@ There is no `audit.jsonl` (see Deviations).
 
 ## Log
 
-`log.jsonl` records each completed `ingest`, `retro` state change, `retro delete` and `prune` with `ts`, `actor`, `action`, counts, ids and hashes. It never holds transcript text, model text or a path value from a transcript. Entries older than `retention.log` are removed by `prune`.
+`log.jsonl` records each completed `ingest`, each `retro` state change, each deleted retro and each `prune` with `ts` (millisecond UTC), `actor`, `action`, counts, ids and hashes. `action` is `ingest`, `retro_state`, `retro_delete` or `prune`. An `ingest` entry has `complete`, `files`, `lines`, `sessions`; a `retro_state` entry has `retro_id`, `state`, `reason`, `key`, `digest_sha256`, `again_of`, `csession_id`, `decision_ids` (the ids hooks returned), `findings` and `candidates`; a `retro_delete` entry has `retro_id` and `key`; a `prune` entry has `tables` and `retention`. There is no `tool`, `version` or `actor_source` field (`schemas/log.json`). It never holds transcript text, model text or a path value from a transcript. Entries older than `retention.log` are removed by `prune`.
 
 ## Retention
 
@@ -443,11 +464,11 @@ There is no `audit.jsonl` (see Deviations).
 
 - first line `# session-audit managed`, last line `# session-audit managed end`;
 - an explicit `PATH` including `~/.local/bin` and the directories of `claude-session` and `claude`, and an optional user-owned env-file prefix (`--env-file`);
-- `ingest --quiet` at `--ingest-every` (a duration such as `1h`; default `1h`, minimum `5m`);
+- `ingest --quiet` at `--ingest-every` (a duration such as `60m`; default `60m`, minimum `5m`);
 - a daily `prune --quiet`;
 - a retro line only when `schedule.retro` is set.
 
-`cron install --dry-run --json` prints the block and what would change (`unchanged`, `replaced`, `installed`). A block with no end line is never replaced (exit 20). `cron uninstall` removes only the managed block. awkit's `awkit cron install` runs the tool's own installer; this tool never edits the crontab outside its block.
+`cron install --dry-run --json` prints the block and what would change (`unchanged`, `replaced`, `installed`). A block with no end line is never replaced or removed: exit 20 with `details.reason: cron_block_malformed`. `cron uninstall` removes only the managed block. awkit's `awkit cron install` runs the tool's own installer; this tool never edits the crontab outside its block.
 
 ## Safety
 
