@@ -1,2 +1,130 @@
-# Example config for session-audit. Location: ~/.config/session-audit/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
+# Example config for session-audit. Location: ~/.config/session-audit/config.yaml
+# (respecting XDG_CONFIG_HOME); drop-ins in config.d/*.yaml are merged in lexical
+# order (maps merge, hook lists append). Every key is optional; the values below
+# are the defaults. Keys with no fixed default are shown commented out.
+# Durations: a number of seconds or a string such as 300s, 20m (no unit = seconds);
+# keys that name days (retention.*, schedule.retro.every) also accept d, e.g. 400d.
+# Sizes: bytes, or a number with B, KB or MB (1 KB = 1024 bytes).
+# Unknown keys are refused. Schema: schemas/config.json.
+
+# Replaces both default transcript roots (~/.claude/projects and $CLAUDE_CONFIG_DIR/projects).
+# transcript_roots:
+#   - ~/.claude/projects
+
+# IANA zone for day, week and month bucketing and the daily retro limit.
+# Default: the machine's zone.
+# time_zone: UTC
+
+ingest:
+  # Time budget per ingest run; a run that hits it stops cleanly and resumes next time.
+  budget: 300s
+  # Consecutive failed cron ingests before the ingest_failing attention hook fires.
+  fail_threshold: 3
+
+harness:
+  # auto: use claude-session when installed; on: a missing claude-session is a failed
+  # check; off: never call it.
+  enabled: auto
+  # Command name of claude-session.
+  claude_session_cmd: claude-session
+
+# Price table, USD per million tokens per model (exact name, else longest prefix).
+# Extends the bundled table; validate warns when as_of is older than 180 days.
+# Default: the bundled table with its own as_of date.
+# prices:
+#   as_of: 2026-01-01
+#   models:
+#     example-model:
+#       input: 3.0
+#       output: 15.0
+#       cache_read: 0.3
+#       cache_write: 3.75
+
+cost:
+  # Fraction by which reported and estimated cost may differ before the
+  # cost_mismatch flag is set.
+  mismatch_margin: 0.10
+
+retention:
+  # Sessions, agents, usage rows and harness snapshots (by ended_at).
+  sessions: 400d
+  # Stored retros, with their artifact and digest.
+  retros: 180d
+  # Stored digests.
+  digests: 7d
+  # log.jsonl entries.
+  log: 90d
+
+limits:
+  # Retros started per day (failed, escalated and canceled count; reused do not).
+  retros_per_day: 5
+
+retro:
+  # The slot's skill.
+  skill: session-audit:audit
+  # Marker a custom skill must write into the artifact. Default: none.
+  # skill_marker: example-marker
+  # Model for the retro session. Default: Claude Code's default. Env: SESSION_AUDIT_MODEL.
+  # model: example-model
+  # Session timeout. Env: SESSION_AUDIT_TIMEOUT.
+  timeout: 20m
+  # Session turn bound.
+  max_turns: 12
+  # Most sessions one retro may cover; more is refused (scope_too_large).
+  max_sessions: 20
+  # A session whose transcript changed within this time is skipped as live.
+  quiet_after: 30m
+  # Replaces the bundled permission profile file. Default: the bundled file.
+  # permission_profile: /path/to/profile.json
+  # Sandbox level passed per call (required, preferred or off).
+  sandbox: required
+  # Setting sources passed per call (user, project, local).
+  setting_sources: []
+  # Environment variable names passed to the retro session.
+  env_allowlist: [PATH, HOME, USER, LANG, TERM]
+  # The tools list passed to the retro session.
+  tools: [Read, Write, Bash, Skill]
+  # Remove the retro session's own transcript files after collecting the artifact.
+  remove_run_transcripts: true
+
+digest:
+  # Total digest cap.
+  max_bytes: 200KB
+  # Per-session cap.
+  session_max_bytes: 20KB
+  # Characters kept of a prompt item.
+  prompt_chars: 500
+  # Characters kept of an assistant item.
+  assistant_chars: 300
+  # Characters kept of a tool argument summary.
+  arg_chars: 200
+  # Characters kept of an error, denial, interruption or rejection item.
+  error_chars: 300
+
+redaction:
+  # Variable names whose set values are masked in the digest.
+  mask_env: []
+  # Extra regular expressions to mask.
+  extra_patterns: []
+
+# Optional weekly window retro run from cron. Default: off.
+# schedule:
+#   retro:
+#     every: 7d
+#     scope:
+#       since: 7d
+#       project: /path/to/project
+
+# Hook lists: pre-retro, post-retro, post-attention. Each entry has cmd (run via
+# sh -c, payload on stdin), timeout (default 30s) and, on post- hooks, async.
+# Default: no hooks.
 hooks: {}
+# hooks:
+#   post-retro:
+#     - cmd: "my-notifier --stdin-json"
+#       async: true
+
+# Actor name (me.name) written to log.jsonl. Default: the OS user name.
+me: {}
+# me:
+#   name: example-user

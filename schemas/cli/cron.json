@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/cron.json",
+  "title": "cron install and uninstall output",
+  "description": "Printed with --json on exit 0. outcome is what the real run does or did; dry_run true means nothing was written. A block with no end line is refused (exit 20, cron_block_malformed) with the error envelope.",
+  "type": "object",
+  "properties": {
+    "command": {
+      "enum": [
+        "install",
+        "uninstall"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "installed",
+        "replaced",
+        "unchanged",
+        "removed"
+      ]
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "block": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 4096
+      },
+      "maxItems": 64,
+      "description": "The managed block lines; empty when nothing exists."
+    }
+  },
+  "required": [
+    "command",
+    "outcome",
+    "dry_run",
+    "block"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "install"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "installed",
+              "replaced",
+              "unchanged"
+            ]
+          },
+          "block": {
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "const": "# session-audit managed"
+              }
+            ],
+            "contains": {
+              "const": "# session-audit managed end"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "uninstall"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "removed",
+              "unchanged"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

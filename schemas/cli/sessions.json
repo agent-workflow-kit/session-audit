@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/sessions.json",
+  "title": "sessions output",
+  "description": "Newest first by default. At most 1000 rows.",
+  "type": "object",
+  "properties": {
+    "sessions": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/session"
+      },
+      "maxItems": 1000
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "sessions",
+    "truncated"
+  ],
+  "additionalProperties": false
+}

@@ -29,9 +29,10 @@ It is post-v1: not part of the v1 scope.
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md` and records decisions there.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. The interface (`docs/interface.md`), the design (`docs/design.md`), the schemas and `docs/plan.md` exist; implement the plan's stages test-first, one issue at a time.
+2. `docs/interface.md` is the single normative source. When code and interface disagree, fix the interface in the same PR (and update `awkit-docs/interface-registry.md`).
+3. The retro session's safety settings (sandbox, third-party-reading kind, tool list, profile) are passed per call and must never depend on another tool's configuration.
+4. The store holds no conversation text; never add a column or log field that does.
 
 ## Repository workflow
 

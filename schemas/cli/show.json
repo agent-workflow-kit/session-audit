@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/show.json",
+  "title": "show output",
+  "description": "One stored session. harness repeats session.harness.",
+  "type": "object",
+  "properties": {
+    "session": {
+      "$ref": "../defs.json#/$defs/session"
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/agent"
+      },
+      "maxItems": 10000
+    },
+    "usage": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/usage_row"
+      },
+      "maxItems": 100000
+    },
+    "harness": {
+      "anyOf": [
+        {
+          "$ref": "../defs.json#/$defs/harness"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "session",
+    "agents",
+    "usage",
+    "harness"
+  ],
+  "additionalProperties": false
+}

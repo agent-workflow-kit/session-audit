@@ -1,0 +1,406 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/retro-run.json",
+  "title": "retro run output",
+  "description": "Printed with --json on exit 0 (a stored retro reused, an already running retro, a finished retro or the dry-run plan). Any non-zero exit prints the error envelope (details.retro_id names a retro that exists).",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "../defs.json#/$defs/retro_id"
+        },
+        "state": {
+          "$ref": "../defs.json#/$defs/retro_state"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/retro_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "../defs.json#/$defs/scope"
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/coverage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "$ref": "../defs.json#/$defs/skipped"
+          },
+          "maxItems": 1000
+        },
+        "skill": {
+          "$ref": "../defs.json#/$defs/skill"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "$ref": "../defs.json#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "../defs.json#/$defs/timestamp"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "csession_id": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/csession_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "num_turns": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/token"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "again_of": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/retro_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counts": {
+          "$ref": "../defs.json#/$defs/retro_counts"
+        },
+        "metrics": {
+          "$ref": "../defs.json#/$defs/retro_metrics"
+        },
+        "dropped": {
+          "type": "object",
+          "properties": {
+            "findings": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "candidates": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "findings",
+            "candidates"
+          ],
+          "additionalProperties": false
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "x-untrusted": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "../defs.json#/$defs/finding"
+          },
+          "maxItems": 50
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "../defs.json#/$defs/candidate"
+          },
+          "maxItems": 20
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "already_running": {
+          "type": "boolean"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/token"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "reason",
+        "key",
+        "scope",
+        "coverage",
+        "skipped",
+        "skill",
+        "model",
+        "created_at",
+        "updated_at",
+        "finished_at",
+        "csession_id",
+        "cost_usd",
+        "num_turns",
+        "outcome",
+        "again_of",
+        "counts",
+        "metrics",
+        "dropped",
+        "summary",
+        "findings",
+        "candidates",
+        "reused",
+        "already_running",
+        "phase"
+      ],
+      "additionalProperties": false,
+      "description": "The Retro object plus reused, already_running and phase.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "done"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "runner_lost",
+                  "no_artifact",
+                  "skill_not_found",
+                  "artifact_invalid",
+                  "identity_mismatch",
+                  "marker_mismatch",
+                  "no_valid_findings",
+                  "session_failed"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "dry_run": {
+          "const": true
+        },
+        "scope": {
+          "$ref": "../defs.json#/$defs/scope"
+        },
+        "matched": {
+          "type": "array",
+          "items": {
+            "$ref": "../defs.json#/$defs/session_id"
+          },
+          "maxItems": 1000
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "$ref": "../defs.json#/$defs/skipped"
+          },
+          "maxItems": 1000
+        },
+        "items": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "items_by_kind": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "assistant": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_call": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_error": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "denial": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "interruption": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rejection": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "compaction": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "subagent": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "digest_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "key": {
+          "$ref": "../defs.json#/$defs/sha256"
+        },
+        "skill": {
+          "$ref": "../defs.json#/$defs/skill"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "launch_flags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "maxItems": 200
+        }
+      },
+      "required": [
+        "dry_run",
+        "scope",
+        "matched",
+        "skipped",
+        "items",
+        "items_by_kind",
+        "digest_bytes",
+        "key",
+        "skill",
+        "model",
+        "launch_flags"
+      ],
+      "additionalProperties": false,
+      "description": "The dry-run plan. Never holds digest text."
+    }
+  ]
+}

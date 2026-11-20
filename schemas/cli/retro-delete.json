@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/retro-delete.json",
+  "title": "retro delete output",
+  "description": "Ids of the retros deleted (all or nothing).",
+  "type": "object",
+  "properties": {
+    "deleted": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/retro_id"
+      },
+      "maxItems": 1000,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "deleted"
+  ],
+  "additionalProperties": false
+}

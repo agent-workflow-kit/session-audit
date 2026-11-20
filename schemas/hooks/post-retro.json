@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/hooks/post-retro.json",
+  "title": "post-retro hook payload",
+  "description": "Stdin JSON of the post-retro hook, fired when a retro reaches a final state. Cannot undo; best effort, at most once.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "session-audit"
+    },
+    "hook": {
+      "const": "post-retro"
+    },
+    "object_type": {
+      "const": "retro"
+    },
+    "object_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\\s\\S])"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]{8,128}(?![\\s\\S])"
+    },
+    "labels": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "../defs.json#/$defs/label_key"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 256
+      },
+      "maxProperties": 64
+    },
+    "retro_id": {
+      "$ref": "../defs.json#/$defs/retro_id"
+    },
+    "state": {
+      "enum": [
+        "done",
+        "failed",
+        "escalated",
+        "canceled"
+      ]
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "$ref": "../defs.json#/$defs/retro_reason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "findings": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 50
+    },
+    "candidates": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20
+    },
+    "cost_usd": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reused": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "event_id",
+    "labels",
+    "retro_id",
+    "state",
+    "reason",
+    "findings",
+    "candidates",
+    "cost_usd",
+    "reused"
+  ],
+  "additionalProperties": false
+}
