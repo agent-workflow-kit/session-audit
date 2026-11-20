@@ -37,9 +37,11 @@
       "additionalProperties": {
         "type": "string",
         "minLength": 0,
-        "maxLength": 256
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
       },
-      "maxProperties": 64
+      "maxProperties": 0,
+      "description": "Always {}: retros have no labels."
     },
     "reason": {
       "enum": [
@@ -58,13 +60,14 @@
             "failure_reason": {
               "enum": [
                 "runner_lost",
+                "session_not_started",
+                "claude_session_error",
+                "session_failed",
                 "no_artifact",
-                "skill_not_found",
                 "artifact_invalid",
                 "identity_mismatch",
                 "marker_mismatch",
-                "no_valid_findings",
-                "session_failed"
+                "no_valid_findings"
               ]
             },
             "csession_id": {

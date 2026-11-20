@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/cli/usage.json",
   "title": "usage output",
-  "description": "Deterministic analytics over the store. Each cost basis is shown separately.",
+  "description": "Aggregation of counted events. Order: by key ascending when the first dimension is day, week or month, else by total tokens descending (null last), then key. With the tool dimension, tokens, cost, active_seconds and interruptions are null. Each cost basis is shown separately.",
   "type": "object",
   "properties": {
     "by": {
@@ -11,7 +11,7 @@
         "type": "string",
         "minLength": 3,
         "maxLength": 80,
-        "pattern": "^(day|week|month|project|model|kind|entrypoint|tool|session|label=[A-Za-z0-9][A-Za-z0-9_.-]{0,63})(?![\\s\\S])"
+        "pattern": "^(day|week|month|project|model|kind|entrypoint|tool|session|label=[a-z0-9][a-z0-9_.-]{0,63})(?![\\s\\S])"
       },
       "minItems": 1,
       "maxItems": 2
@@ -44,14 +44,35 @@
             "minimum": 0
           },
           "tokens": {
-            "$ref": "../defs.json#/$defs/tokens4"
+            "anyOf": [
+              {
+                "$ref": "../defs.json#/$defs/tokens4"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "cost": {
-            "$ref": "../defs.json#/$defs/cost"
+            "anyOf": [
+              {
+                "$ref": "../defs.json#/$defs/cost"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "active_seconds": {
-            "type": "number",
-            "minimum": 0
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "tool_calls": {
             "type": "integer",
@@ -66,8 +87,15 @@
             "minimum": 0
           },
           "interruptions": {
-            "type": "integer",
-            "minimum": 0
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "flags": {
             "type": "array",
@@ -103,14 +131,35 @@
           "minimum": 0
         },
         "tokens": {
-          "$ref": "../defs.json#/$defs/tokens4"
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/tokens4"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "cost": {
-          "$ref": "../defs.json#/$defs/cost"
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/cost"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "active_seconds": {
-          "type": "number",
-          "minimum": 0
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "tool_calls": {
           "type": "integer",
@@ -125,8 +174,15 @@
           "minimum": 0
         },
         "interruptions": {
-          "type": "integer",
-          "minimum": 0
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "flags": {
           "type": "array",
@@ -152,13 +208,17 @@
     },
     "truncated": {
       "type": "boolean"
+    },
+    "store": {
+      "$ref": "../defs.json#/$defs/store_fresh"
     }
   },
   "required": [
     "by",
     "rows",
     "totals",
-    "truncated"
+    "truncated",
+    "store"
   ],
   "additionalProperties": false
 }

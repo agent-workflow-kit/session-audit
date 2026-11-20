@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/cli/cron.json",
   "title": "cron install and uninstall output",
-  "description": "Printed with --json on exit 0. outcome is what the real run does or did; dry_run true means nothing was written. A block with no end line is refused (exit 20, cron_block_malformed) with the error envelope.",
+  "description": "Printed with --json on exit 0. outcome is what the real run does or did; dry_run true means nothing was written. The end line is the last item of a non-empty install block (tool-enforced; a schema cannot say 'last'). A block that is not exactly one start line followed by exactly one end line is refused (exit 20, cron_block_malformed) with the error envelope.",
   "type": "object",
   "properties": {
     "command": {
@@ -70,7 +70,9 @@
             ],
             "contains": {
               "const": "# session-audit managed end"
-            }
+            },
+            "minContains": 1,
+            "maxContains": 1
           }
         }
       }

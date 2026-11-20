@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/slot/artifact.json",
   "title": "retro artifact",
-  "description": "audit.json, the closed shape the model writes (at most 256 KB as a file, checked by the tool). All model text is untrusted. marker is required for the bundled skill and for a custom skill with retro.skill_marker, absent otherwise (checked by the tool).",
+  "description": "audit.json, the closed shape the model writes (at most 256 KB as a file, checked by the tool). All model text is untrusted. marker is required whenever an expected marker exists (bundled skill, or a custom skill with retro.skill_marker), absent otherwise; uniqueness of finding and candidate ids is tool-enforced (checked by the tool).",
   "type": "object",
   "properties": {
     "retro_id": {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/config.json",
   "title": "session-audit config",
-  "description": "Merged config after config.yaml and config.d/*.yaml. Self-contained (no external $ref). Every key is optional and takes its default. Unknown keys are refused. Range checks of durations and cross-key checks are made by the tool. Only retro.timeout and retro.model have environment variables.",
+  "description": "Merged config after config.yaml and config.d/*.yaml. Self-contained (no external $ref). Every key is optional and takes its default. Unknown keys are refused. Range checks of string durations (the stated maxima) and cross-key checks are made by the tool. Only retro.timeout and retro.model have environment variables.",
   "type": "object",
   "properties": {
     "transcript_roots": {
@@ -27,9 +27,38 @@
       "type": "object",
       "properties": {
         "budget": {
-          "$ref": "#/$defs/duration",
-          "default": "300s",
-          "description": "Time budget per ingest run."
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 3600
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
+            }
+          ],
+          "description": "Time budget per ingest run, at most 3600 s.",
+          "default": "300s"
+        },
+        "file_budget": {
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 600
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
+            }
+          ],
+          "description": "Time budget per file, at most 600 s.",
+          "default": "60s"
         },
         "fail_threshold": {
           "type": "integer",
@@ -59,7 +88,7 @@
           "minLength": 1,
           "maxLength": 256,
           "pattern": "^[A-Za-z0-9._/+-]{1,256}(?![\\s\\S])",
-          "description": "Binding B command name.",
+          "description": "Binding A command name.",
           "default": "claude-session"
         }
       },
@@ -102,6 +131,10 @@
               "cache_write": {
                 "type": "number",
                 "minimum": 0
+              },
+              "cache_write_1h": {
+                "type": "number",
+                "minimum": 0
               }
             },
             "required": [
@@ -111,7 +144,7 @@
               "cache_write"
             ],
             "additionalProperties": false,
-            "description": "USD per million tokens."
+            "description": "USD per million tokens. cache_write_1h defaults to cache_write."
           },
           "maxProperties": 256,
           "description": "Model name (exact or prefix; longest prefix wins) to prices. Extends the bundled table."
@@ -140,7 +173,7 @@
         "sessions": {
           "$ref": "#/$defs/duration_d",
           "default": "400d",
-          "description": "Sessions, agents, usage rows, harness snapshots."
+          "description": "Sessions, agents, events, harness snapshots (at most 3650 d)."
         },
         "retros": {
           "$ref": "#/$defs/duration_d",
@@ -182,7 +215,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}(?![\\s\\S])",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])",
           "default": "session-audit:audit",
           "description": "The slot's skill."
         },
@@ -192,6 +225,19 @@
           "maxLength": 256,
           "description": "Marker a custom skill must write. Default: none."
         },
+        "plugin_dirs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^/[^\\x00]{0,4095}(?![\\s\\S])"
+          },
+          "maxItems": 8,
+          "uniqueItems": true,
+          "default": [],
+          "description": "Extra plugin directories (absolute paths) for a custom skill; each passed with --plugin-dir."
+        },
         "model": {
           "type": "string",
           "minLength": 1,
@@ -199,9 +245,21 @@
           "description": "Default: Claude Code's default."
         },
         "timeout": {
-          "$ref": "#/$defs/duration",
-          "default": "20m",
-          "description": "Session timeout."
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 7200
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
+            }
+          ],
+          "description": "Session timeout, 1 s to 2 h.",
+          "default": "20m"
         },
         "max_turns": {
           "type": "integer",
@@ -218,9 +276,21 @@
           "description": "Sessions per retro."
         },
         "quiet_after": {
-          "$ref": "#/$defs/duration",
-          "default": "30m",
-          "description": "Minimum age since a transcript last changed."
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 604800
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(?!0+(\\.0+)?(ms|s|m|d)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m|d)?(?![\\s\\S])"
+            }
+          ],
+          "description": "Minimum age since a transcript last changed, at most 7 d.",
+          "default": "30m"
         },
         "permission_profile": {
           "type": "string",
@@ -249,7 +319,7 @@
           "maxItems": 3,
           "uniqueItems": true,
           "default": [],
-          "description": "Setting sources passed per call."
+          "description": "Must stay [] for a third-party-reading run; kept because the design guide requires the key."
         },
         "env_allowlist": {
           "type": "array",
@@ -359,16 +429,17 @@
           "default": [],
           "description": "Variable names whose set values are masked."
         },
-        "extra_patterns": {
+        "extra_token_prefixes": {
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 512
+            "minLength": 3,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
           },
           "maxItems": 64,
           "default": [],
-          "description": "Extra regular expressions (compiled by the tool with a length and time guard)."
+          "description": "Token prefixes; <prefix>[A-Za-z0-9_-]{8,256} is redacted."
         }
       },
       "required": [],
@@ -382,10 +453,19 @@
             {
               "type": "object",
               "properties": {
-                "every": {
-                  "$ref": "#/$defs/duration_d",
-                  "default": "7d",
-                  "description": "Interval of the cron retro run."
+                "weekday": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 6,
+                  "default": 1,
+                  "description": "Cron weekday, 0 Sunday."
+                },
+                "hour": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 23,
+                  "default": 9,
+                  "description": "Cron hour; the minute is 23."
                 },
                 "scope": {
                   "type": "object",
@@ -396,7 +476,7 @@
                         "type": "string",
                         "minLength": 3,
                         "maxLength": 400,
-                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}=[^\\n\\r]{0,256}(?![\\s\\S])"
+                        "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
                       },
                       "maxItems": 64,
                       "uniqueItems": true
@@ -424,10 +504,11 @@
                       "pattern": "^[a-z][a-z0-9_-]{0,63}(?![\\s\\S])"
                     }
                   },
-                  "required": [],
+                  "required": [
+                    "since"
+                  ],
                   "additionalProperties": false,
-                  "description": "Scope flags of retro run; since and until are durations ago.",
-                  "minProperties": 1
+                  "description": "Scope flags of retro run; since (required) and until are durations ago."
                 }
               },
               "required": [
@@ -440,7 +521,7 @@
             }
           ],
           "default": null,
-          "description": "Optional weekly window retro run from cron. Off when null or absent."
+          "description": "Optional weekly retro from cron. Off when null or absent."
         }
       },
       "required": [],
@@ -461,8 +542,20 @@
                 "description": "Run via sh -c in its own process group."
               },
               "timeout": {
-                "$ref": "#/$defs/duration",
-                "description": "Default 30 seconds."
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 600
+                  },
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
+                  }
+                ],
+                "description": "Default 30 seconds, at most 600 s."
               }
             },
             "required": [
@@ -485,8 +578,20 @@
                 "description": "Run via sh -c in its own process group."
               },
               "timeout": {
-                "$ref": "#/$defs/duration",
-                "description": "Default 30 seconds."
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 600
+                  },
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
+                  }
+                ],
+                "description": "Default 30 seconds, at most 600 s."
               },
               "async": {
                 "type": "boolean"
@@ -512,8 +617,20 @@
                 "description": "Run via sh -c in its own process group."
               },
               "timeout": {
-                "$ref": "#/$defs/duration",
-                "description": "Default 30 seconds."
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 600
+                  },
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
+                  }
+                ],
+                "description": "Default 30 seconds, at most 600 s."
               },
               "async": {
                 "type": "boolean"
@@ -554,32 +671,32 @@
         {
           "type": "number",
           "exclusiveMinimum": 0,
-          "maximum": 3153600000
+          "maximum": 7200
         },
         {
           "type": "string",
           "minLength": 1,
           "maxLength": 32,
-          "pattern": "^[0-9]{1,10}(\\.[0-9]{1,9})?(ms|s|m)?(?![\\s\\S])"
+          "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
         }
       ],
-      "description": "Seconds, or a string [0-9]+(.[0-9]+)?(ms|s|m)? (no unit means seconds)."
+      "description": "Seconds, or a string [0-9]+(.[0-9]+)?(ms|s|m)? (no unit means seconds; zero is refused). Maximum 7200 s."
     },
     "duration_d": {
       "anyOf": [
         {
           "type": "number",
           "exclusiveMinimum": 0,
-          "maximum": 3153600000
+          "maximum": 315360000
         },
         {
           "type": "string",
           "minLength": 1,
           "maxLength": 32,
-          "pattern": "^[0-9]{1,10}(\\.[0-9]{1,9})?(ms|s|m|d)?(?![\\s\\S])"
+          "pattern": "^(?!0+(\\.0+)?(ms|s|m|d)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m|d)?(?![\\s\\S])"
         }
       ],
-      "description": "As duration, and a d suffix (days) is also accepted."
+      "description": "Seconds, or a string [0-9]+(.[0-9]+)?(ms|s|m|d)? (no unit means seconds; zero is refused). Maximum 315360000 s."
     },
     "size": {
       "type": "string",

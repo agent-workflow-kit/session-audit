@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/cli/show.json",
   "title": "show output",
-  "description": "One stored session. harness repeats session.harness.",
+  "description": "One stored session. The harness snapshot is inside session.",
   "type": "object",
   "properties": {
     "session": {
@@ -22,22 +22,15 @@
       },
       "maxItems": 100000
     },
-    "harness": {
-      "anyOf": [
-        {
-          "$ref": "../defs.json#/$defs/harness"
-        },
-        {
-          "type": "null"
-        }
-      ]
+    "store": {
+      "$ref": "../defs.json#/$defs/store_fresh"
     }
   },
   "required": [
     "session",
     "agents",
     "usage",
-    "harness"
+    "store"
   ],
   "additionalProperties": false
 }

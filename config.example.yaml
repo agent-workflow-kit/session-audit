@@ -2,8 +2,9 @@
 # (respecting XDG_CONFIG_HOME); drop-ins in config.d/*.yaml are merged in lexical
 # order (maps merge, hook lists append). Every key is optional; the values below
 # are the defaults. Keys with no fixed default are shown commented out.
-# Durations: a number of seconds or a string such as 300s, 20m (no unit = seconds);
-# keys that name days (retention.*, schedule.retro.every) also accept d, e.g. 400d.
+# Durations: a number of seconds or a string such as 300s, 20m (no unit = seconds,
+# zero is refused); keys that name days (retention.*, and since/until of
+# schedule.retro.scope) also accept d, e.g. 400d. There is no h unit: write 60m.
 # Sizes: bytes, or a number with B, KB or MB (1 KB = 1024 bytes).
 # Unknown keys are refused. Schema: schemas/config.json.
 
@@ -16,16 +17,18 @@
 # time_zone: UTC
 
 ingest:
-  # Time budget per ingest run; a run that hits it stops cleanly and resumes next time.
+  # Time budget per ingest run (at most 3600s); a run that hits it stops cleanly and resumes next time.
   budget: 300s
-  # Consecutive failed cron ingests before the ingest_failing attention hook fires.
+  # Time budget per transcript file (at most 600s).
+  file_budget: 60s
+  # Consecutive failed full ingests before the ingest_failing attention hook fires.
   fail_threshold: 3
 
 harness:
   # auto: use claude-session when installed; on: a missing claude-session is a failed
   # check; off: never call it.
   enabled: auto
-  # Command name of claude-session.
+  # Command name of claude-session (binding A).
   claude_session_cmd: claude-session
 
 # Price table, USD per million tokens per model (exact name, else longest prefix).
@@ -46,7 +49,7 @@ cost:
   mismatch_margin: 0.10
 
 retention:
-  # Sessions, agents, usage rows and harness snapshots (by ended_at).
+  # Sessions, agents, events and harness snapshots (by ended_at).
   sessions: 400d
   # Stored retros, with their artifact and digest.
   retros: 180d
@@ -56,29 +59,35 @@ retention:
   log: 90d
 
 limits:
-  # Retros started per day (failed, escalated and canceled count; reused do not).
+  # Retros started per day (every retro that reached running counts; vetoed, refused and reused runs do not).
   retros_per_day: 5
 
 retro:
-  # The slot's skill.
+  # The slot's skill, as plugin:skill (a bare name is refused).
   skill: session-audit:audit
   # Marker a custom skill must write into the artifact. Default: none.
   # skill_marker: example-marker
+  # Extra plugin directories (absolute paths, at most 8) for a custom skill; each is
+  # passed with --plugin-dir.
+  # plugin_dirs: []
   # Model for the retro session. Default: Claude Code's default. Env: SESSION_AUDIT_MODEL.
   # model: example-model
-  # Session timeout. Env: SESSION_AUDIT_TIMEOUT.
+  # Session timeout (1s to 2h). Env: SESSION_AUDIT_TIMEOUT.
   timeout: 20m
   # Session turn bound.
   max_turns: 12
-  # Most sessions one retro may cover; more is refused (scope_too_large).
+  # Most sessions one retro may cover. An explicit --session list over this is refused
+  # (scope_too_large); a filter scope keeps the newest sessions and skips the rest.
   max_sessions: 20
   # A session whose transcript changed within this time is skipped as live.
   quiet_after: 30m
   # Replaces the bundled permission profile file. Default: the bundled file.
   # permission_profile: /path/to/profile.json
-  # Sandbox level passed per call (required, preferred or off).
+  # Sandbox level passed per call (required, preferred or off). A lower level makes
+  # validate warn, and a scheduled retro refuses to run with it.
   sandbox: required
-  # Setting sources passed per call (user, project, local).
+  # Setting sources passed per call. Must stay empty for a retro (claude-session
+  # refuses the launch otherwise).
   setting_sources: []
   # Environment variable names passed to the retro session.
   env_allowlist: [PATH, HOME, USER, LANG, TERM]
@@ -104,13 +113,17 @@ digest:
 redaction:
   # Variable names whose set values are masked in the digest.
   mask_env: []
-  # Extra regular expressions to mask.
-  extra_patterns: []
+  # Token prefixes to mask, such as an organization's token prefix; a prefix followed by
+  # 8 to 256 token characters is redacted (3 to 64 characters each).
+  extra_token_prefixes: []
 
-# Optional weekly window retro run from cron. Default: off.
+# Optional weekly retro run from cron (cron install adds the line). Default: absent (off).
+# weekday is 0 to 6 (0 Sunday, default 1), hour is 0 to 23 (default 9). scope.since is
+# required and is a duration ago (a number of days such as 7d).
 # schedule:
 #   retro:
-#     every: 7d
+#     weekday: 1
+#     hour: 9
 #     scope:
 #       since: 7d
 #       project: /path/to/project

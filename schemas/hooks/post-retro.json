@@ -34,9 +34,11 @@
       "additionalProperties": {
         "type": "string",
         "minLength": 0,
-        "maxLength": 256
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
       },
-      "maxProperties": 64
+      "maxProperties": 0,
+      "description": "Always {}: retros have no labels."
     },
     "retro_id": {
       "$ref": "../defs.json#/$defs/retro_id"
@@ -79,9 +81,6 @@
           "type": "null"
         }
       ]
-    },
-    "reused": {
-      "type": "boolean"
     }
   },
   "required": [
@@ -96,8 +95,102 @@
     "reason",
     "findings",
     "candidates",
-    "cost_usd",
-    "reused"
+    "cost_usd"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "done"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "failed"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "runner_lost",
+              "session_not_started",
+              "claude_session_error",
+              "session_failed",
+              "no_artifact",
+              "artifact_invalid",
+              "identity_mismatch",
+              "marker_mismatch",
+              "no_valid_findings"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "escalated"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "hook_escalated",
+              "session_blocked",
+              "session_needs_input"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "canceled"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "interrupted",
+              "hook_vetoed"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

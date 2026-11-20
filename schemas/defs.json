@@ -7,8 +7,8 @@
     "timestamp": {
       "type": "string",
       "maxLength": 40,
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})(?![\\s\\S])",
-      "description": "ISO 8601 with offset or Z."
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z(?![\\s\\S])",
+      "description": "UTC, Z suffix."
     },
     "timestamp_ms": {
       "type": "string",
@@ -80,7 +80,8 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "pattern": "^[a-z][a-z0-9_.-]{0,63}(?![\\s\\S])"
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}(?![\\s\\S])",
+      "description": "claude-session's label key grammar."
     },
     "decision_id": {
       "type": "string",
@@ -99,26 +100,26 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}(?![\\s\\S])"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])"
     },
     "ref": {
       "type": "string",
       "minLength": 2,
-      "maxLength": 5,
-      "pattern": "^s[1-9][0-9]{0,3}(?![\\s\\S])",
-      "description": "Session number inside one retro, s<N>."
+      "maxLength": 4,
+      "pattern": "^s([1-9][0-9]{0,1}|[1-4][0-9]{2}|500)(?![\\s\\S])",
+      "description": "Session number inside one retro, s1 to s500."
     },
     "finding_id": {
       "type": "string",
       "minLength": 2,
       "maxLength": 4,
-      "pattern": "^f[1-9][0-9]{0,2}(?![\\s\\S])"
+      "pattern": "^f([1-9]|[1-4][0-9]|50)(?![\\s\\S])"
     },
     "candidate_id": {
       "type": "string",
       "minLength": 2,
       "maxLength": 3,
-      "pattern": "^c[1-9][0-9]{0,1}(?![\\s\\S])"
+      "pattern": "^c([1-9]|1[0-9]|20)(?![\\s\\S])"
     },
     "flag": {
       "enum": [
@@ -126,7 +127,8 @@
         "no_usage",
         "no_timestamps",
         "truncated_tail",
-        "old_rules"
+        "old_rules",
+        "project_from_dir"
       ]
     },
     "category": {
@@ -160,17 +162,19 @@
     "retro_reason": {
       "enum": [
         "runner_lost",
+        "session_not_started",
+        "claude_session_error",
+        "session_failed",
         "no_artifact",
-        "skill_not_found",
         "artifact_invalid",
         "identity_mismatch",
         "marker_mismatch",
         "no_valid_findings",
-        "session_failed",
         "hook_escalated",
         "session_blocked",
         "session_needs_input",
-        "interrupted"
+        "interrupted",
+        "hook_vetoed"
       ]
     },
     "skipped": {
@@ -180,7 +184,13 @@
           "$ref": "defs.json#/$defs/session_id"
         },
         "reason": {
-          "const": "live"
+          "enum": [
+            "live",
+            "transcript_missing",
+            "transcript_changed",
+            "empty",
+            "over_cap"
+          ]
         }
       },
       "required": [
@@ -250,7 +260,7 @@
         "subagents"
       ],
       "additionalProperties": false,
-      "description": "Session totals; subagents is the separate part counted from agent transcripts."
+      "description": "Session totals; the four counters are the main agent's only, subagents is the sum of all four counters over the agents."
     },
     "cost": {
       "type": "object",
@@ -293,7 +303,12 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 64,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])",
+          "description": "The claude-session launch kind."
+        },
+        "run": {
+          "type": "integer",
+          "minimum": 0
         },
         "labels": {
           "type": "object",
@@ -304,10 +319,14 @@
             "type": "string",
             "minLength": 0,
             "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])",
             "x-untrusted": true
           },
           "maxProperties": 64,
           "description": "Unauthenticated hints copied from claude-session."
+        },
+        "updated_at": {
+          "$ref": "defs.json#/$defs/timestamp"
         },
         "outcome": {
           "anyOf": [
@@ -384,7 +403,9 @@
       "required": [
         "csession_id",
         "kind",
+        "run",
         "labels",
+        "updated_at",
         "outcome",
         "end_reason",
         "cost_usd",
@@ -496,15 +517,20 @@
           "type": "integer",
           "minimum": 0
         },
-        "subagents": {
+        "agents": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Number of agent files."
         },
         "compactions": {
           "type": "integer",
           "minimum": 0
         },
         "parse_errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_line_types": {
           "type": "integer",
           "minimum": 0
         },
@@ -542,14 +568,15 @@
         "tool_errors",
         "denials",
         "interruptions",
-        "subagents",
+        "agents",
         "compactions",
         "parse_errors",
+        "unknown_line_types",
         "flags",
         "harness"
       ],
       "additionalProperties": false,
-      "description": "One stored session (counts and ids only, no conversation text)."
+      "description": "One stored session (counts and ids only, no conversation text). ended_at >= started_at and tool_errors <= tool_calls are tool-enforced."
     },
     "agent": {
       "type": "object",
@@ -646,6 +673,33 @@
         },
         "tokens": {
           "$ref": "defs.json#/$defs/tokens4"
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "denials": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "interruptions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active_seconds": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -653,10 +707,15 @@
         "session_id",
         "agent_id",
         "model",
-        "tokens"
+        "tokens",
+        "tool_calls",
+        "tool_errors",
+        "denials",
+        "interruptions",
+        "active_seconds"
       ],
       "additionalProperties": false,
-      "description": "One row per (day, session, agent or main, model); agent_id null means the main transcript."
+      "description": "Counted events aggregated per (day in time_zone, session, agent or main, model); agent_id null means the main transcript."
     },
     "scope": {
       "type": "object",
@@ -664,10 +723,7 @@
         "sessions": {
           "type": "array",
           "items": {
-            "type": "string",
-            "minLength": 8,
-            "maxLength": 36,
-            "pattern": "^[0-9a-f-]{8,36}(?![\\s\\S])"
+            "$ref": "defs.json#/$defs/session_id"
           },
           "maxItems": 1000,
           "uniqueItems": true
@@ -678,7 +734,7 @@
             "type": "string",
             "minLength": 3,
             "maxLength": 400,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}=[^\\n\\r]{0,256}(?![\\s\\S])"
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
           },
           "maxItems": 64,
           "uniqueItems": true
@@ -698,7 +754,11 @@
         "since": {
           "anyOf": [
             {
-              "$ref": "defs.json#/$defs/timestamp"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^([0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2}))?|[1-9][0-9]{0,8}(s|m|h|d))(?![\\s\\S])",
+              "description": "As typed: a time, a date or a duration ago."
             },
             {
               "type": "null"
@@ -708,7 +768,11 @@
         "until": {
           "anyOf": [
             {
-              "$ref": "defs.json#/$defs/timestamp"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^([0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2}))?|[1-9][0-9]{0,8}(s|m|h|d))(?![\\s\\S])",
+              "description": "As typed: a time, a date or a duration ago."
             },
             {
               "type": "null"
@@ -748,7 +812,7 @@
         "outcome"
       ],
       "additionalProperties": false,
-      "description": "Canonical retro scope (the flags of retro run, with since and until resolved to times)."
+      "description": "Descriptive retro scope (the flags of retro run as given; sessions resolved to full ids, since and until kept as typed; resolved times are in scope_resolved)."
     },
     "coverage": {
       "type": "object",
@@ -856,7 +920,7 @@
           "then": {
             "properties": {
               "ref": {
-                "pattern": "^s[1-9][0-9]{0,3}\\.i[0-9]{3,6}(?![\\s\\S])"
+                "pattern": "^s([1-9][0-9]{0,1}|[1-4][0-9]{2}|500)\\.i[0-9]{3,6}(?![\\s\\S])"
               }
             }
           }
@@ -875,7 +939,7 @@
           "then": {
             "properties": {
               "ref": {
-                "pattern": "^(s[1-9][0-9]{0,3}|total)\\.(?!i[0-9]{3,6}(?![\\s\\S]))[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+                "pattern": "^(s([1-9][0-9]{0,1}|[1-4][0-9]{2}|500)|total)\\.(?!i[0-9]{3,6}(?![\\s\\S]))[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
               }
             }
           }
@@ -969,6 +1033,95 @@
       ],
       "additionalProperties": false
     },
+    "stored_candidate": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/candidate_id"
+        },
+        "target_class": {
+          "$ref": "defs.json#/$defs/target_class"
+        },
+        "target_hint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "x-untrusted": true
+        },
+        "proposal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1500,
+          "x-untrusted": true
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/finding_id"
+          },
+          "minItems": 1,
+          "maxItems": 50,
+          "uniqueItems": true
+        },
+        "risk": {
+          "enum": [
+            "high",
+            "medium"
+          ]
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/ref"
+          },
+          "maxItems": 500,
+          "uniqueItems": true,
+          "description": "Distinct session refs the supporting findings cite."
+        }
+      },
+      "required": [
+        "id",
+        "target_class",
+        "target_hint",
+        "proposal",
+        "findings",
+        "risk",
+        "sessions"
+      ],
+      "additionalProperties": false,
+      "description": "A candidate as stored: the model's fields plus tool-written risk and sessions. All text is untrusted."
+    },
+    "store_fresh": {
+      "type": "object",
+      "properties": {
+        "last_ingest_at": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_complete_ingest_at": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "last_ingest_at",
+        "last_complete_ingest_at"
+      ],
+      "additionalProperties": false,
+      "description": "How fresh the store is."
+    },
     "retro_counts": {
       "type": "object",
       "properties": {
@@ -1005,7 +1158,7 @@
     "retro_metrics": {
       "type": "object",
       "propertyNames": {
-        "pattern": "^(s[1-9][0-9]{0,3}|total)\\.(?!i[0-9]{3,6}(?![\\s\\S]))[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+        "pattern": "^(s([1-9][0-9]{0,1}|[1-4][0-9]{2}|500)|total)\\.(?!i[0-9]{3,6}(?![\\s\\S]))[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
       },
       "additionalProperties": {
         "type": "number",
@@ -1046,6 +1199,36 @@
         "scope": {
           "$ref": "defs.json#/$defs/scope"
         },
+        "scope_resolved": {
+          "type": "object",
+          "properties": {
+            "since": {
+              "anyOf": [
+                {
+                  "$ref": "defs.json#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "until": {
+              "anyOf": [
+                {
+                  "$ref": "defs.json#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "since",
+            "until"
+          ],
+          "additionalProperties": false
+        },
         "coverage": {
           "anyOf": [
             {
@@ -1062,6 +1245,38 @@
             "$ref": "defs.json#/$defs/skipped"
           },
           "maxItems": 1000
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "$ref": "defs.json#/$defs/ref"
+              },
+              "session_id": {
+                "$ref": "defs.json#/$defs/session_id"
+              },
+              "csession_id": {
+                "anyOf": [
+                  {
+                    "$ref": "defs.json#/$defs/csession_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "ref",
+              "session_id",
+              "csession_id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 500,
+          "description": "The kept sessions, for mapping evidence refs to sessions."
         },
         "skill": {
           "$ref": "defs.json#/$defs/skill"
@@ -1136,6 +1351,47 @@
             }
           ]
         },
+        "sandbox_active": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup": {
+          "anyOf": [
+            {
+              "enum": [
+                "pending",
+                "done",
+                "incomplete"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "purge_incomplete",
+              "transcripts_kept",
+              "recovery_skipped",
+              "ingest_busy"
+            ]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "redacted": {
+          "type": "integer",
+          "minimum": 0
+        },
         "again_of": {
           "anyOf": [
             {
@@ -1193,7 +1449,7 @@
         "candidates": {
           "type": "array",
           "items": {
-            "$ref": "defs.json#/$defs/candidate"
+            "$ref": "defs.json#/$defs/stored_candidate"
           },
           "maxItems": 20
         }
@@ -1204,8 +1460,10 @@
         "reason",
         "key",
         "scope",
+        "scope_resolved",
         "coverage",
         "skipped",
+        "sessions",
         "skill",
         "model",
         "created_at",
@@ -1215,6 +1473,10 @@
         "cost_usd",
         "num_turns",
         "outcome",
+        "sandbox_active",
+        "cleanup",
+        "warnings",
+        "redacted",
         "again_of",
         "counts",
         "metrics",
@@ -1224,8 +1486,31 @@
         "candidates"
       ],
       "additionalProperties": false,
-      "description": "The stored Retro object. Untrusted fields: summary, findings[].title and detail, candidates[].target_hint and proposal.",
+      "description": "The stored Retro object. key is computed as in the interface, Retro lifecycle (Key). Untrusted fields: summary, findings[].title and detail, candidates[].target_hint and proposal. counts.findings equals the findings length (tool-enforced).",
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "digesting",
+                  "running",
+                  "validating"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
@@ -1241,6 +1526,21 @@
             "properties": {
               "reason": {
                 "type": "null"
+              },
+              "key": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "coverage": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "summary": {
+                "not": {
+                  "type": "null"
+                }
               }
             }
           }
@@ -1261,13 +1561,59 @@
               "reason": {
                 "enum": [
                   "runner_lost",
+                  "session_not_started",
+                  "claude_session_error",
+                  "session_failed",
                   "no_artifact",
-                  "skill_not_found",
                   "artifact_invalid",
                   "identity_mismatch",
                   "marker_mismatch",
-                  "no_valid_findings",
-                  "session_failed"
+                  "no_valid_findings"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "escalated"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "hook_escalated",
+                  "session_blocked",
+                  "session_needs_input"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "canceled"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "interrupted",
+                  "hook_vetoed"
                 ]
               }
             }
@@ -1332,6 +1678,9 @@
               "type": "null"
             }
           ]
+        },
+        "superseded": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -1344,10 +1693,134 @@
         "scope",
         "findings",
         "candidates",
-        "key"
+        "key",
+        "superseded"
       ],
       "additionalProperties": false,
-      "description": "One row of retro list: counts, never the findings."
+      "description": "One row of retro list: counts, never the findings or any model text.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "digesting",
+                  "running",
+                  "validating"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "done"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "key": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "runner_lost",
+                  "session_not_started",
+                  "claude_session_error",
+                  "session_failed",
+                  "no_artifact",
+                  "artifact_invalid",
+                  "identity_mismatch",
+                  "marker_mismatch",
+                  "no_valid_findings"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "escalated"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "hook_escalated",
+                  "session_blocked",
+                  "session_needs_input"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "canceled"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "interrupted",
+                  "hook_vetoed"
+                ]
+              }
+            }
+          }
+        }
+      ]
     },
     "ingest_files": {
       "type": "object",
@@ -1379,6 +1852,14 @@
         "vanished": {
           "type": "integer",
           "minimum": 0
+        },
+        "rewritten": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
@@ -1388,7 +1869,9 @@
         "unchanged",
         "unsafe",
         "excluded",
-        "vanished"
+        "vanished",
+        "rewritten",
+        "remaining"
       ],
       "additionalProperties": false
     },
@@ -1402,11 +1885,21 @@
         "errors": {
           "type": "integer",
           "minimum": 0
+        },
+        "oversized": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
         "parsed",
-        "errors"
+        "errors",
+        "oversized",
+        "unknown"
       ],
       "additionalProperties": false
     },
@@ -1439,11 +1932,15 @@
           "type": "integer",
           "minimum": 0
         },
-        "usage_rows": {
+        "events": {
           "type": "integer",
           "minimum": 0
         },
         "harness_snapshots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files": {
           "type": "integer",
           "minimum": 0
         },
@@ -1458,44 +1955,22 @@
         "log_entries": {
           "type": "integer",
           "minimum": 0
+        },
+        "retro_starts": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
         "sessions",
         "agents",
-        "usage_rows",
+        "events",
         "harness_snapshots",
+        "files",
         "retros",
         "digests",
-        "log_entries"
-      ],
-      "additionalProperties": false
-    },
-    "prune_retention": {
-      "type": "object",
-      "properties": {
-        "sessions": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "retros": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "digests": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "log": {
-          "type": "integer",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "sessions",
-        "retros",
-        "digests",
-        "log"
+        "log_entries",
+        "retro_starts"
       ],
       "additionalProperties": false
     },
@@ -1534,7 +2009,7 @@
                 "live_sessions_only",
                 "empty_scope",
                 "store_newer",
-                "already_exists",
+                "already_running",
                 "in_use",
                 "cron_block_malformed",
                 "claude_session_missing",
@@ -1542,15 +2017,18 @@
                 "sandbox_unavailable",
                 "store_unwritable",
                 "no_readable_roots",
-                "session_not_started",
-                "runner_lost",
-                "no_artifact",
                 "skill_not_found",
+                "launch_settings_mismatch",
+                "session_not_started",
+                "claude_session_error",
+                "crontab_unavailable",
+                "runner_lost",
+                "session_failed",
+                "no_artifact",
                 "artifact_invalid",
                 "identity_mismatch",
                 "marker_mismatch",
                 "no_valid_findings",
-                "session_failed",
                 "mode_unsupported",
                 "confirmation_required"
               ]
@@ -1587,8 +2065,9 @@
             "field": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 64,
-              "pattern": "^[a-z_][a-z0-9_.-]{0,63}(?![\\s\\S])"
+              "maxLength": 66,
+              "pattern": "^(--[a-z][a-z0-9-]{0,63}|[A-Z][A-Z0-9_]{0,63}|[a-z_][a-z0-9_.-]{0,63})(?![\\s\\S])",
+              "description": "The config key, flag or environment variable at fault, never its value."
             },
             "hook": {
               "enum": [
@@ -1599,6 +2078,13 @@
             },
             "outcome": {
               "$ref": "defs.json#/$defs/token"
+            },
+            "end_reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+              "description": "A claude-session token."
             }
           },
           "required": [],
@@ -1612,7 +2098,7 @@
         "details"
       ],
       "additionalProperties": false,
-      "description": "Exit mapping: internal 1; usage and config_invalid 2; not_found 10; vetoed 11; failed 12; needs_human 13; session_ended 14-18 (details.outcome); refused 20; ambiguous 21; artifact_invalid 22. Exits 130 and 143 print no envelope.",
+      "description": "Exit mapping: see the interface, Exit codes. Exits 129, 130 and 143 print no envelope.",
       "allOf": [
         {
           "if": {
@@ -1640,7 +2126,7 @@
                       "live_sessions_only",
                       "empty_scope",
                       "store_newer",
-                      "already_exists",
+                      "already_running",
                       "in_use",
                       "cron_block_malformed"
                     ]
@@ -1676,7 +2162,11 @@
                       "sandbox_unavailable",
                       "store_unwritable",
                       "no_readable_roots",
-                      "session_not_started"
+                      "skill_not_found",
+                      "launch_settings_mismatch",
+                      "session_not_started",
+                      "claude_session_error",
+                      "crontab_unavailable"
                     ]
                   }
                 }
@@ -1704,14 +2194,11 @@
                 "properties": {
                   "reason": {
                     "enum": [
-                      "runner_lost",
                       "no_artifact",
-                      "skill_not_found",
                       "artifact_invalid",
                       "identity_mismatch",
                       "marker_mismatch",
-                      "no_valid_findings",
-                      "session_failed"
+                      "no_valid_findings"
                     ]
                   }
                 }

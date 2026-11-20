@@ -2,13 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/cli/ingest.json",
   "title": "ingest output",
-  "description": "Printed with --json on exit 0, including a partial run (complete false) and 'already running' (already_running true, all counts zero).",
+  "description": "Printed with --json on exit 0, including a partial run (complete false), 'already running' (already_running true, all counts zero) and a queued --session capture (queued true). With --dry-run, files.rewritten is the number of files that would be reread.",
   "type": "object",
   "properties": {
     "complete": {
       "type": "boolean"
     },
     "already_running": {
+      "type": "boolean"
+    },
+    "queued": {
       "type": "boolean"
     },
     "dry_run": {
@@ -64,6 +67,7 @@
   "required": [
     "complete",
     "already_running",
+    "queued",
     "dry_run",
     "files",
     "lines",

@@ -14,11 +14,15 @@
     },
     "truncated": {
       "type": "boolean"
+    },
+    "store": {
+      "$ref": "../defs.json#/$defs/store_fresh"
     }
   },
   "required": [
     "sessions",
-    "truncated"
+    "truncated",
+    "store"
   ],
   "additionalProperties": false
 }

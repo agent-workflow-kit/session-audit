@@ -4,7 +4,7 @@ Analyze Claude Code sessions after the fact: usage analytics from your transcrip
 
 ## Status
 
-Designed, not implemented: the interface is [`docs/interface.md`](docs/interface.md) (0.1.0-design). Post-v1: not part of the v1 scope (architecture §19).
+Designed, not implemented: the interface is [`docs/interface.md`](docs/interface.md) (0.1.0-design); the implementation plan is written next. Post-v1: not part of the v1 scope (architecture §19).
 
 ## Layer
 
@@ -23,12 +23,12 @@ L3 (workflow). Works fully standalone; no tmux, worktree tool or notifier is req
 |---|---|
 | `ingest` | Read new transcript bytes into the store; capture claude-session facts when installed |
 | `sessions`, `usage`, `show` | Query the store |
-| `retro run` | Run a retro over a scope (`--session`, `--label`, `--project`, `--since`, `--until`) |
+| `retro run` | Run a retro over a scope (`--session`, `--label`, `--project`, `--since`, `--until`, `--kind`, `--outcome`) |
 | `retro list`, `retro show`, `retro delete` | Read and remove stored retros |
 | `prune` | Apply the retention keys |
 | `export` | Print store rows as JSON lines |
 | `validate [--probe]` | Offline configuration and environment check |
-| `cron install\|uninstall` | A managed crontab block: hourly `ingest`, daily `prune` |
+| `cron install\|uninstall` | A managed crontab block: `ingest` (every `--ingest-every`, default hourly), daily `prune`, and the optional weekly retro line |
 
 Every command takes `--json`. The full interface, exit codes and refusal reasons are in [`docs/interface.md`](docs/interface.md).
 
@@ -38,7 +38,7 @@ Every command takes `--json`. The full interface, exit codes and refusal reasons
 |---|---|---|---|
 | claude-session | A (hard) | `retro run` (required); harness facts during `ingest` (optional) | `uv tool install git+https://github.com/agent-workflow-kit/claude-session` |
 
-A retro also needs the sandbox prerequisites claude-session documents (bubblewrap and socat on Linux and WSL2). A missing claude-session makes `retro run` exit 12 and name this install command.
+A retro also needs the sandbox prerequisites claude-session documents (bubblewrap and socat on Linux and WSL2) and claude-session 0.45.0 or later. A missing or older claude-session makes `retro run` exit 12 and name this install command.
 
 ## Quick start
 
@@ -54,7 +54,7 @@ session-audit cron install --ingest-every 1h
 
 `~/.config/session-audit/config.yaml` plus `config.d/*.yaml` (see `config.example.yaml` for every key and default). The safe defaults need no configuration. Useful keys: `time_zone`, `prices` (your own price table), `retro.model` (a cheaper model for routine retros), `redaction.mask_env` (names of variables whose values must never reach a digest), `retention.*`, `limits.retros_per_day`.
 
-A retro refuses to run when the config is a symlink, not yours, or writable by others.
+`retro run`, `retro delete`, `ingest`, `prune` and `cron` refuse to run when the config is a symlink, not yours, or writable by others.
 
 ## Environment variables
 
@@ -66,11 +66,11 @@ A retro refuses to run when the config is a symlink, not yours, or writable by o
 
 ## Exit codes
 
-The design guide's reserved codes: 0 success, 2 usage, 10 not found, 11 vetoed, 12 failed for a reportable reason, 13 needs a human, 14 to 18 the retro session's outcome, 20 refused (with a `reason`), 21 ambiguous selector. Tool-specific: 22 the retro session's artifact is missing or invalid.
+The table is in [`docs/interface.md`](docs/interface.md#exit-codes), with the mapping from claude-session results in [Outcome mapping](docs/interface.md#outcome-mapping).
 
 ## Safety
 
-A retro session reads only the digest, in a sandbox with no network, no setting sources, an environment allowlist and a permission profile that denies other awkit tools. Retro text is untrusted model output and must be fenced by anything that consumes it.
+A retro session reads only the digest, in a sandbox with no network, no setting sources, an environment allowlist and a permission profile that denies other awkit tools; it runs in claude-session's own session directory. Retro text is untrusted model output and must be fenced by anything that consumes it. See [Safety](docs/interface.md#safety).
 
 ## Documentation
 
@@ -78,7 +78,8 @@ A retro session reads only the digest, in a sandbox with no network, no setting 
 - Tool design guide: [`../awkit-docs/design-guide.md`](../awkit-docs/design-guide.md) ([published](https://github.com/agent-workflow-kit/awkit-docs/blob/main/design-guide.md))
 - This tool's design: [`docs/design.md`](docs/design.md)
 - This tool's interface: [`docs/interface.md`](docs/interface.md)
-- Implementation plan: [`docs/plan.md`](docs/plan.md)
+
+Links into `awkit-docs` assume a sibling clone of that repository.
 
 ## License
 

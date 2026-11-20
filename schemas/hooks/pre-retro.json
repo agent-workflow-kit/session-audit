@@ -34,9 +34,11 @@
       "additionalProperties": {
         "type": "string",
         "minLength": 0,
-        "maxLength": 256
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
       },
-      "maxProperties": 64
+      "maxProperties": 0,
+      "description": "Always {}: retros have no labels."
     },
     "scope": {
       "$ref": "../defs.json#/$defs/scope"
@@ -70,6 +72,16 @@
     },
     "key": {
       "$ref": "../defs.json#/$defs/sha256"
+    },
+    "max_turns": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 7200
     }
   },
   "required": [
@@ -85,7 +97,9 @@
     "items",
     "skill",
     "model",
-    "key"
+    "key",
+    "max_turns",
+    "timeout_seconds"
   ],
   "additionalProperties": false
 }

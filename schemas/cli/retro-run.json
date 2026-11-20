@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/cli/retro-run.json",
   "title": "retro run output",
-  "description": "Printed with --json on exit 0 (a stored retro reused, an already running retro, a finished retro or the dry-run plan). Any non-zero exit prints the error envelope (details.retro_id names a retro that exists).",
+  "description": "Printed with --json on exit 0 (a stored retro reused, a finished retro or the dry-run plan). Any non-zero exit prints the error envelope (details.retro_id names a retro that exists).",
   "oneOf": [
     {
       "type": "object",
@@ -36,6 +36,36 @@
         "scope": {
           "$ref": "../defs.json#/$defs/scope"
         },
+        "scope_resolved": {
+          "type": "object",
+          "properties": {
+            "since": {
+              "anyOf": [
+                {
+                  "$ref": "../defs.json#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "until": {
+              "anyOf": [
+                {
+                  "$ref": "../defs.json#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "since",
+            "until"
+          ],
+          "additionalProperties": false
+        },
         "coverage": {
           "anyOf": [
             {
@@ -52,6 +82,38 @@
             "$ref": "../defs.json#/$defs/skipped"
           },
           "maxItems": 1000
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "$ref": "../defs.json#/$defs/ref"
+              },
+              "session_id": {
+                "$ref": "../defs.json#/$defs/session_id"
+              },
+              "csession_id": {
+                "anyOf": [
+                  {
+                    "$ref": "../defs.json#/$defs/csession_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "ref",
+              "session_id",
+              "csession_id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 500,
+          "description": "The kept sessions, for mapping evidence refs to sessions."
         },
         "skill": {
           "$ref": "../defs.json#/$defs/skill"
@@ -126,6 +188,47 @@
             }
           ]
         },
+        "sandbox_active": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup": {
+          "anyOf": [
+            {
+              "enum": [
+                "pending",
+                "done",
+                "incomplete"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "purge_incomplete",
+              "transcripts_kept",
+              "recovery_skipped",
+              "ingest_busy"
+            ]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "redacted": {
+          "type": "integer",
+          "minimum": 0
+        },
         "again_of": {
           "anyOf": [
             {
@@ -183,25 +286,12 @@
         "candidates": {
           "type": "array",
           "items": {
-            "$ref": "../defs.json#/$defs/candidate"
+            "$ref": "../defs.json#/$defs/stored_candidate"
           },
           "maxItems": 20
         },
         "reused": {
           "type": "boolean"
-        },
-        "already_running": {
-          "type": "boolean"
-        },
-        "phase": {
-          "anyOf": [
-            {
-              "$ref": "../defs.json#/$defs/token"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "required": [
@@ -210,8 +300,10 @@
         "reason",
         "key",
         "scope",
+        "scope_resolved",
         "coverage",
         "skipped",
+        "sessions",
         "skill",
         "model",
         "created_at",
@@ -221,6 +313,10 @@
         "cost_usd",
         "num_turns",
         "outcome",
+        "sandbox_active",
+        "cleanup",
+        "warnings",
+        "redacted",
         "again_of",
         "counts",
         "metrics",
@@ -228,13 +324,34 @@
         "summary",
         "findings",
         "candidates",
-        "reused",
-        "already_running",
-        "phase"
+        "reused"
       ],
       "additionalProperties": false,
-      "description": "The Retro object plus reused, already_running and phase.",
+      "description": "The Retro object plus reused.",
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "digesting",
+                  "running",
+                  "validating"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
@@ -250,6 +367,21 @@
             "properties": {
               "reason": {
                 "type": "null"
+              },
+              "key": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "coverage": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "summary": {
+                "not": {
+                  "type": "null"
+                }
               }
             }
           }
@@ -270,13 +402,59 @@
               "reason": {
                 "enum": [
                   "runner_lost",
+                  "session_not_started",
+                  "claude_session_error",
+                  "session_failed",
                   "no_artifact",
-                  "skill_not_found",
                   "artifact_invalid",
                   "identity_mismatch",
                   "marker_mismatch",
-                  "no_valid_findings",
-                  "session_failed"
+                  "no_valid_findings"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "escalated"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "hook_escalated",
+                  "session_blocked",
+                  "session_needs_input"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "canceled"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "interrupted",
+                  "hook_vetoed"
                 ]
               }
             }
@@ -384,6 +562,10 @@
             "maxLength": 512
           },
           "maxItems": 200
+        },
+        "daily_remaining": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
@@ -397,7 +579,8 @@
         "key",
         "skill",
         "model",
-        "launch_flags"
+        "launch_flags",
+        "daily_remaining"
       ],
       "additionalProperties": false,
       "description": "The dry-run plan. Never holds digest text."

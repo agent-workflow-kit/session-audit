@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/cli/validate.json",
   "title": "validate output",
-  "description": "Printed with --json on success and failure. Exit 0 ok (warnings allowed), 2 invalid config, 12 a failed check. probe_* checks appear only with --probe.",
+  "description": "Printed with --json on exits 0, 2 and 12, also with a config that does not parse. Exit 0 ok (warnings allowed), 2 invalid config, 12 a failed check. probe_* checks appear only with --probe.",
   "type": "object",
   "properties": {
     "ok": {
@@ -97,6 +97,12 @@
           "price_table_old",
           "migration_pending",
           "root_unusable",
+          "ingest_stale",
+          "retros_unrecovered",
+          "cleanup_incomplete",
+          "sandbox_lowered",
+          "env_file_unsafe",
+          "no_cron_block",
           "claude_session_missing"
         ]
       },
