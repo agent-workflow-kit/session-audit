@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/export-sessions.json",
+  "title": "export sessions line",
+  "description": "One object per line of export sessions (no wrapper), oldest first. The schema is for one line.",
+  "$ref": "../defs.json#/$defs/session"
+}

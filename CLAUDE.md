@@ -4,9 +4,7 @@
 
 ## What this is
 
-`session-audit` is a Layer 3 (workflow) tool of the awkit tool family. Analyze Claude session transcripts and outcomes: retros and usage analytics.
-It must work fully standalone at a terminal: it never depends on the harness (`awkit`).
-It is post-v1: not part of the v1 scope.
+`session-audit` is a Layer 3 (workflow) tool of the awkit tool family. Analyze Claude session transcripts and outcomes: retros and usage analytics. It must work fully standalone at a terminal: it never depends on the harness (`awkit`). It is post-v1: not part of the v1 scope.
 
 ## Read first
 
@@ -29,9 +27,10 @@ It is post-v1: not part of the v1 scope.
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md` and records decisions there.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. The interface (`docs/interface.md`), the design (`docs/design.md`) and the schemas exist; `docs/plan.md` is written next. Once it lands, implement its stages test-first, one issue at a time.
+2. `docs/interface.md` is the single normative source. When code and interface disagree, fix the interface in the same PR (and update `awkit-docs/interface-registry.md`).
+3. The retro session's safety settings (sandbox, third-party-reading kind, tool list, profile) are passed per call and must never depend on another tool's configuration.
+4. The store holds no conversation text; never add a column or log field that does.
 
 ## Repository workflow
 

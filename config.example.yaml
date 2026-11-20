@@ -1,2 +1,147 @@
-# Example config for session-audit. Location: ~/.config/session-audit/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
+# Example config for session-audit. Location: ~/.config/session-audit/config.yaml
+# (respecting XDG_CONFIG_HOME); drop-ins in config.d/*.yaml are merged in lexical
+# order (maps merge, hook lists append). Every key is optional; the values below
+# are the defaults. Keys with no fixed default are shown commented out.
+# Durations: a number of seconds or a string such as 300s, 20m (no unit = seconds,
+# zero is refused); keys that name days (retention.*, and since/until of
+# schedule.retro.scope) also accept d, e.g. 400d. There is no h unit: write 60m.
+# Sizes: whole bytes, or a whole number with B, KB or MB (1 KB = 1024 bytes); no fraction, no zero.
+# Unknown keys are refused. Schema: schemas/config.json.
+
+# Replaces both default transcript roots (~/.claude/projects and $CLAUDE_CONFIG_DIR/projects).
+# transcript_roots:
+#   - ~/.claude/projects
+
+# IANA zone for day, week and month bucketing and the daily retro limit.
+# Default: the machine's zone.
+# time_zone: UTC
+
+ingest:
+  # Time budget per ingest run (at most 3600s); a run that hits it stops cleanly and resumes next time.
+  budget: 300s
+  # Time budget per transcript file (at most 600s).
+  file_budget: 60s
+  # Consecutive failed full ingests before the ingest_failing attention hook fires.
+  fail_threshold: 3
+
+harness:
+  # auto: use claude-session when installed; on: a missing claude-session is a failed
+  # check; off: never call it.
+  enabled: auto
+  # Command name of claude-session (binding A).
+  claude_session_cmd: claude-session
+
+# Price table, USD per million tokens per model (exact name, else longest prefix).
+# Extends the bundled table; validate warns when as_of is older than 180 days.
+# Default: the bundled table with its own as_of date.
+# prices:
+#   as_of: 2026-01-01
+#   models:
+#     example-model:
+#       input: 3.0
+#       output: 15.0
+#       cache_read: 0.3
+#       cache_write: 3.75
+
+cost:
+  # Fraction by which reported and estimated cost may differ before the cost_mismatch
+  # flag is set (only for a session that has a reported cost).
+  mismatch_margin: 0.10
+
+retention:
+  # Sessions, agents, events and harness runs (by coalesce(ended_at, last_ingested_at)).
+  sessions: 400d
+  # Stored retros, with their artifact and digest.
+  retros: 180d
+  # Stored digests.
+  digests: 7d
+  # log.jsonl entries.
+  log: 90d
+
+limits:
+  # Retro runs started per day. A retro waiting on its pre-retro hook holds a place; vetoed,
+  # refused, reused and dry runs do not count, and a run that never reached the model is refunded.
+  retros_per_day: 5
+
+retro:
+  # The slot's skill, as plugin:skill (a bare name is refused).
+  skill: session-audit:audit
+  # Marker a custom skill must write into the artifact. Default: none.
+  # skill_marker: example-marker
+  # Extra plugin directories (absolute paths, at most 8) for a custom skill; each is
+  # passed with --plugin-dir. claude-session refuses credential locations, so a plugin
+  # under ~/.claude/plugins/ cannot be used. Every file and directory of each entry must
+  # be owned by you and not group or other writable.
+  # plugin_dirs: []
+  # Model for the retro session. Default: Claude Code's default. Env: SESSION_AUDIT_MODEL.
+  # model: example-model
+  # Session timeout (1s to 2h). Env: SESSION_AUDIT_TIMEOUT.
+  timeout: 20m
+  # Session turn bound.
+  max_turns: 12
+  # Most sessions one retro may cover. An explicit --session list over this is refused
+  # (scope_too_large); a filter scope keeps the newest sessions and skips the rest.
+  max_sessions: 20
+  # A session whose transcript changed within this time is skipped as live.
+  quiet_after: 30m
+  # Replaces the bundled permission profile file. Default: the bundled file.
+  # permission_profile: /path/to/profile.json
+  # Sandbox level passed per call (required, preferred or off). A lower level is passed
+  # only when stdin is a terminal (retro run refuses without one) and makes validate warn.
+  sandbox: required
+  # Setting sources passed per call. Must stay empty for a retro (claude-session
+  # refuses the launch otherwise).
+  setting_sources: []
+  # Environment variable names passed to the retro session.
+  env_allowlist: [PATH, HOME, USER, LANG, TERM]
+  # The tools list passed to the retro session (names from claude-session's --tools list).
+  tools: [Read, Write, Bash, Skill]
+  # Remove the retro session's own transcript files after collecting the artifact.
+  remove_run_transcripts: true
+
+digest:
+  # Total digest cap.
+  max_bytes: 200KB
+  # Per-session cap.
+  session_max_bytes: 20KB
+  # Characters kept of a prompt item (the four *_chars keys accept 20 to 65536).
+  prompt_chars: 500
+  # Characters kept of an assistant item.
+  assistant_chars: 300
+  # Characters kept of a tool argument summary.
+  arg_chars: 200
+  # Characters kept of an error, denial, interruption or rejection item.
+  error_chars: 300
+
+redaction:
+  # Variable names whose set values are masked in the digest.
+  mask_env: []
+  # Token prefixes to mask, such as an organization's token prefix; a prefix followed by
+  # 8 to 256 token characters is redacted (3 to 64 characters each).
+  extra_token_prefixes: []
+
+# Optional weekly retro run from cron (cron install adds the line). Default: absent (off).
+# weekday is 0 to 6 (0 Sunday, default 1), hour is 0 to 23 (default 9). scope.since is
+# required and, like scope.until, is a duration ago: <n>(s|m|h|d), for example 7d.
+# schedule:
+#   retro:
+#     weekday: 1
+#     hour: 9
+#     scope:
+#       since: 7d
+#       project: /path/to/project
+
+# Hook lists: pre-retro, post-retro, post-attention. Each entry has cmd (run via
+# sh -c, payload on stdin), timeout (default 30s) and, on post- hooks, async.
+# Default: no hooks.
 hooks: {}
+# hooks:
+#   post-retro:
+#     - cmd: "my-notifier --stdin-json"
+#       async: true
+
+# Actor name (me.name) written to log.jsonl. Default: the OS user name, with characters
+# outside [A-Za-z0-9._@/-] replaced by _ and cut to 64.
+me: {}
+# me:
+#   name: example-user

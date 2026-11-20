@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/ingest.json",
+  "title": "ingest output",
+  "description": "Printed with --json on exit 0, including a partial run (complete false), 'already running' (already_running true, all counts zero) and a --session capture whose file reads were deferred to the lease holder (files_deferred true). With --dry-run, files.rewritten is the number of files that would be reread.",
+  "type": "object",
+  "properties": {
+    "complete": {
+      "type": "boolean"
+    },
+    "already_running": {
+      "type": "boolean"
+    },
+    "files_deferred": {
+      "type": "boolean"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "files": {
+      "$ref": "../defs.json#/$defs/ingest_files"
+    },
+    "lines": {
+      "$ref": "../defs.json#/$defs/ingest_lines"
+    },
+    "sessions": {
+      "$ref": "../defs.json#/$defs/ingest_sessions"
+    },
+    "harness": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "matched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "captured": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "enabled",
+        "matched",
+        "captured",
+        "errors"
+      ],
+      "additionalProperties": false
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "x-untrusted": true
+      },
+      "maxItems": 200
+    }
+  },
+  "required": [
+    "complete",
+    "already_running",
+    "files_deferred",
+    "dry_run",
+    "files",
+    "lines",
+    "sessions",
+    "harness",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

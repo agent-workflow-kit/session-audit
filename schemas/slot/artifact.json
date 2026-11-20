@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/slot/artifact.json",
+  "title": "retro artifact",
+  "description": "audit.json, the closed shape the model writes (at most 256 KB as a file, checked by the tool). All model text is untrusted. marker is required whenever an expected marker exists (bundled skill, or a custom skill with retro.skill_marker), absent otherwise; uniqueness of finding and candidate ids is tool-enforced (checked by the tool).",
+  "type": "object",
+  "properties": {
+    "retro_id": {
+      "$ref": "../defs.json#/$defs/retro_id"
+    },
+    "run_token": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]{16,128}(?![\\s\\S])"
+    },
+    "digest_sha256": {
+      "$ref": "../defs.json#/$defs/sha256"
+    },
+    "marker": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "The bundled skill's marker matches ^[a-z0-9-]{16,64}$; a custom marker is any 1 to 256 characters."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "x-untrusted": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/finding"
+      },
+      "maxItems": 50
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/candidate"
+      },
+      "maxItems": 20
+    }
+  },
+  "required": [
+    "retro_id",
+    "run_token",
+    "digest_sha256",
+    "summary",
+    "findings",
+    "candidates"
+  ],
+  "additionalProperties": false
+}

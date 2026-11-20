@@ -1,33 +1,230 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "session-audit/log",
+  "$id": "session-audit/log.json",
   "title": "session-audit log.jsonl record",
-  "type": "object",
-  "properties": {
-    "ts": {
-      "type": "string",
-      "format": "date-time"
+  "description": "One record per completed ingest, per retro state change, per retro deleted and per prune. Hash-only: never transcript text, model text or a path from a transcript. Refusals, dry runs and failed commands write nothing.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/timestamp_ms"
+        },
+        "actor": {
+          "$ref": "defs.json#/$defs/actor"
+        },
+        "action": {
+          "const": "ingest"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "files": {
+          "$ref": "defs.json#/$defs/ingest_files"
+        },
+        "lines": {
+          "$ref": "defs.json#/$defs/ingest_lines"
+        },
+        "sessions": {
+          "$ref": "defs.json#/$defs/ingest_sessions"
+        }
+      },
+      "required": [
+        "ts",
+        "actor",
+        "action",
+        "complete",
+        "files",
+        "lines",
+        "sessions"
+      ],
+      "additionalProperties": false
     },
-    "level": {
-      "type": "string",
-      "enum": [
-        "debug",
-        "info",
-        "warn",
-        "error"
-      ]
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/timestamp_ms"
+        },
+        "actor": {
+          "$ref": "defs.json#/$defs/actor"
+        },
+        "action": {
+          "const": "retro_state"
+        },
+        "retro_id": {
+          "$ref": "defs.json#/$defs/retro_id"
+        },
+        "state": {
+          "$ref": "defs.json#/$defs/retro_state"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/retro_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "digest_sha256": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "again_of": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/retro_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "csession_id": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/csession_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/decision_id"
+          },
+          "maxItems": 32
+        },
+        "hook_output_ignored": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "findings": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidates": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ts",
+        "actor",
+        "action",
+        "retro_id",
+        "state",
+        "reason",
+        "key",
+        "digest_sha256",
+        "again_of",
+        "csession_id",
+        "decision_ids",
+        "hook_output_ignored",
+        "findings",
+        "candidates"
+      ],
+      "additionalProperties": false
     },
-    "event": {
-      "type": "string"
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/timestamp_ms"
+        },
+        "actor": {
+          "$ref": "defs.json#/$defs/actor"
+        },
+        "action": {
+          "const": "retro_delete"
+        },
+        "retro_id": {
+          "$ref": "defs.json#/$defs/retro_id"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "defs.json#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ts",
+        "actor",
+        "action",
+        "retro_id",
+        "key"
+      ],
+      "additionalProperties": false
     },
-    "message": {
-      "type": "string"
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/timestamp_ms"
+        },
+        "actor": {
+          "$ref": "defs.json#/$defs/actor"
+        },
+        "action": {
+          "const": "prune"
+        },
+        "tables": {
+          "$ref": "defs.json#/$defs/prune_tables"
+        },
+        "recovered": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "ts",
+        "actor",
+        "action",
+        "tables",
+        "recovered"
+      ],
+      "additionalProperties": false
     }
-  },
-  "required": [
-    "ts",
-    "level",
-    "event"
-  ],
-  "additionalProperties": true
+  ]
 }

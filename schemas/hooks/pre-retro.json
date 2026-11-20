@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/hooks/pre-retro.json",
+  "title": "pre-retro hook payload",
+  "description": "Stdin JSON of the pre-retro hook: after the retro row is created, before the session is launched. Ids, counts and enums only. Exit 0 continue, 13 escalate, other non-zero veto.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "session-audit"
+    },
+    "hook": {
+      "const": "pre-retro"
+    },
+    "object_type": {
+      "const": "retro"
+    },
+    "object_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\\s\\S])"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^ev-[a-z2-7]{26}(?![\\s\\S])"
+    },
+    "labels": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "../defs.json#/$defs/label_key"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
+      },
+      "maxProperties": 0,
+      "description": "Always {}: retros have no labels."
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "sessions": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "digest_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "items": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "skill": {
+      "$ref": "../defs.json#/$defs/skill"
+    },
+    "model": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "key": {
+      "$ref": "../defs.json#/$defs/sha256"
+    },
+    "max_turns": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 7200
+    }
+  },
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "event_id",
+    "labels",
+    "scope",
+    "sessions",
+    "digest_bytes",
+    "items",
+    "skill",
+    "model",
+    "key",
+    "max_turns",
+    "timeout_seconds"
+  ],
+  "additionalProperties": false
+}

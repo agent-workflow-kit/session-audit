@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/prune.json",
+  "title": "prune output",
+  "description": "Counts per table, the retro ids recovered by the housekeeping step and warnings. With dry_run true, what would be deleted and recovered.",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "tables": {
+      "$ref": "../defs.json#/$defs/prune_tables"
+    },
+    "recoveries": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/retro_id"
+      },
+      "maxItems": 1000,
+      "uniqueItems": true
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "ingest_busy",
+          "recovery_deferred"
+        ]
+      },
+      "maxItems": 2,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "dry_run",
+    "tables",
+    "recoveries",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/export-retros.json",
+  "title": "export retros line",
+  "description": "One Retro object per line of export retros (no wrapper), oldest first. The schema is for one line.",
+  "$ref": "../defs.json#/$defs/retro"
+}

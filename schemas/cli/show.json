@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-audit/cli/show.json",
+  "title": "show output",
+  "description": "One session. The harness snapshot is inside session. At most 1000 agents (by tokens descending, then agent id) and 10000 usage rows (by day, agent, model); truncated is true when either list was cut.",
+  "type": "object",
+  "properties": {
+    "session": {
+      "$ref": "../defs.json#/$defs/session"
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/agent"
+      },
+      "maxItems": 1000
+    },
+    "usage": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/usage_row"
+      },
+      "maxItems": 10000
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "store": {
+      "$ref": "../defs.json#/$defs/store_fresh"
+    }
+  },
+  "required": [
+    "session",
+    "agents",
+    "usage",
+    "truncated",
+    "store"
+  ],
+  "additionalProperties": false
+}

@@ -1,65 +1,168 @@
 # session-audit: design
 
-Status: Seeded from awkit architecture v1.4; not yet designed.
+Status: designed against architecture v1.33 and design guide v1.17. The normative rules are in [`interface.md`](interface.md); this document records why, and the internal structure. It never restates the interface's tables.
 
 Section references (§N) point to `../awkit-docs/architecture.md` unless marked "design guide" (`../awkit-docs/design-guide.md`).
 
 ## Role and layer
 
-Analyze Claude session transcripts and outcomes: retros and usage analytics.
-
-Layer 3 (workflow). Must work fully standalone; no upward awareness.
-
-Post-v1: not part of the v1 scope (§4, §19). It may be built in parallel if there is capacity.
-
-Skill-wrapper tool (§5.5, design guide §11). Default slot: `audit` (bundled as `session-audit:audit` in `plugin/`).
-
-## Responsibilities
-
-From §5.3 (`session-audit`), verbatim:
-
-Skill-wrapper: analyze transcripts and outcomes; retros ("what went well / badly"); usage analytics. Default mode headless.
+Layer 3 (workflow), post-v1 (§4, §19). Analyzes Claude Code session transcripts: deterministic usage analytics from a store of counts, and model-written retros over a bounded, redacted digest. It is a skill-wrapper tool (§5.5, design guide §11) with the slot `audit`, kind `audit`, default skill `session-audit:audit` bundled in `plugin/`. It works fully standalone: the only sibling it calls is claude-session, and only the retro half requires it.
 
 ## Uses
 
-None specified in the architecture yet; to be decided in the design session (binding: TBD (A/B/C)).
+| Tool | Binding | Used for | Required |
+|---|---|---|---|
+| claude-session 0.45.2 or later | A (call by name, parse `--json`) | `list` and `status` for harness snapshots during `ingest`; `start --dry-run`, `start`, the adopting `exec --session-id`, `status`, `forget --purge`, `stop` and `--version` for retro runs | Optional for `ingest`, `sessions`, `usage`; required for `retro run` |
 
-## Key flow
+Not used: agent-spawn, wtctl, termctl (a headless retro needs no window or worktree), memoctl (nothing is written to notes), notice-route (hooks are wired by the user or the harness), forgectl, ticketctl. A missing claude-session makes `retro run` exit 12 with `details.reason: claude_session_missing` and the install command in the message; one older than 0.45.2 (0.45.0 added `--tools`; 0.45.2 is the first release whose sandboxed `report` works for a default `uv tool install`) exits 12 `claude_session_too_old`.
 
-No flow is defined for this tool in §10 (post-v1).
+Consumed by: self-improve (post-v1) through `retro show --json`; awkit through the read commands, `validate --json` and the cron block. session-audit knows neither.
 
-## Relevant cross-cutting sections
+## Resolved open topics
 
-- §3.2, §3.3: layering rules and edge bindings
-- §5.5: capability slots: `audit`, kind `audit`
-- §8: session model: transcripts, outcomes, retention
-- §12: autonomy and escalation
-- §13: security: fencing of transcript content, environment
-- §14: audit logs as an input
-- design guide §11: skill-wrapper pattern
+The architecture left four topics open (§20). They are resolved as follows.
 
-## Constraints (decided)
-
-From §20 (`session-audit, self-improve`):
-
-none.
-
-Packaging: The bundled plugin is shipped inside the package and located via `importlib.resources.files('session_audit') / 'plugin'`.
-
-## Open topics
-
-From §20 (`session-audit, self-improve`):
-
-what is audited, when, output, how improvements are applied.
+| Topic | Resolution | Interface |
+|---|---|---|
+| What is audited | Every Claude Code transcript on disk, with claude-session records only as optional enrichment; usage, tools, errors, denials and cost per session, agent and day; retros over chosen scopes | [Ingest rules](interface.md#ingest-rules), [Harness enrichment](interface.md#harness-enrichment) |
+| When it runs | `ingest` hourly from cron or on demand; retros only on explicit command, or from an opt-in weekly cron line; never at session end | [Cron](interface.md#cron), [Retro lifecycle](interface.md#retro-lifecycle) |
+| Output | Counts in a store; retros as a closed JSON artifact plus findings and improvement candidates, read with `retro show --json` | [Retro artifact](interface.md#retro-artifact) |
+| How improvements are applied | They are not, here. Candidates are suggestions; self-improve turns them into proposed edits a human accepts (§12.1) | [Overview](interface.md#overview) |
 
 ## Decisions
 
-| Decision | Rationale | Date |
+| # | Decision | Why | Interface |
+|---|---|---|---|
+| D1 | Read every transcript on disk, harness data only as enrichment | Usage is most useful across everything run by hand and by the harness; the tool must work with no harness installed; claude-session exposes no transcript listing, tokens or per-session cost | [Ingest rules](interface.md#ingest-rules) |
+| D2 | A store of derived facts with no conversation text | Claude Code deletes transcripts after about 30 days and claude-session sessions leave its commands after `forget`; counts survive, text would add a secret and injection surface | [Ingest rules](interface.md#ingest-rules) |
+| D3 | `ingest` from cron, retros on demand | `ingest` is free, idempotent and must run regularly anyway; a retro costs money and reads untrusted text; a retro per session end would recurse through the same hooks | [Cron](interface.md#cron) |
+| D4 | The retro session sees only a pre-built, redacted, fenced digest in a sandboxed third-party-reading session | Transcripts hold third-party text and secret-shaped strings; the built-in `audit` kind is trusted and unsandboxed; a prompt-injected retro must not reach credentials or the network; the manifest is control data with no transcript text; the tool verifies the effective tools, isolation and every inherited safety setting with a dry run before anything is stored, so a launch problem costs nothing and the guarantee never depends on claude-session's config | [Digest](interface.md#digest), [Retro launch](interface.md#retro-launch) |
+| D5 | A closed artifact whose evidence references the tool checks; numbers come from the store | Models invent facts; a reference to an item that is not in the digest is dropped; a consumer gets one stable contract; model text is redacted again before it is stored, because a retro outlives its digest; candidate risk is written by the tool | [Retro artifact](interface.md#retro-artifact), [Retro validation](interface.md#retro-validation) |
+| D6 | Headless only in 0.x, through `claude-session start` and an adopting `exec` in the session's own working directory | A retro is a batch job; the dependency stays one tool, shareable without tmux or worktrees; interactive discussion is self-improve's role; the id is known before the model runs, so recovery, signals and cleanup act on an exact id, and a directory under the state directory would be refused by claude-session on every install | [Retro launch](interface.md#retro-launch), [Deviations](interface.md#deviations-from-the-design-guide) |
+| D7 | Tokens exact, dollars carry a basis; a session's reported cost is its own main file's last cost line and is null under copied history | Cost lines do not always reconcile with tokens; mixing figures would mislead; a fork's cost lines may include its source's spend, so a session with copied history shows only an estimate; claude-session's per-run `cost_usd` is a different quantity and stays in the harness snapshot | [Cost](interface.md#cost) |
+| D8 | Join to harness records only on the Claude Code session ids claude-session recorded, at query time, and refresh a snapshot whenever its `updated_at` changes | Guessing from directory names is spoofable; harness facts vanish at `forget`; snapshots keyed by claude-session id over a fixed window need no cursor, negative cache or queue, so nothing is skipped for good and read order does not matter | [Harness enrichment](interface.md#harness-enrichment) |
+| D9 | Event-focused, budgeted digest with text only for failures | Successful tool output is where secrets concentrate and is rarely informative for a retro | [Digest](interface.md#digest) |
+| D10 | No `audit.jsonl`; hash-only `log.jsonl`; hooks `pre-retro`, `post-retro`, `post-attention` | No external action is taken; a spend check before a model run is the one real veto point | [Hooks](interface.md#hooks), [Log](interface.md#log) |
+| D11 | Standard config location with ownership checks, no repo layer | The threat (a trusted session editing config) is covered by the check plus the sandbox's write limits, and the check covers every command that can run a hook; a repo layer would let an environment value weaken a repo's safety | [Config](interface.md#config) |
+| D12 | One `events` table, one deterministic owner per dedupe key (the kind is part of the key; owner order: largest output, earliest timestamp, native copy, path, offset; at most 8 stored copies per key, so owner work is bounded) | Content-block lines, compaction repeats and copied history after a fork count once, independent of ingest order and file rewrites; a tool call and its error are distinct events; session values are derived from counted events and per-file facts, so a reread replaces them; `usage`, `sessions` and `show` aggregate at query time, so every counter, `--by tool` and `--tz` are exact; a reread deletes old events in short batches and every write transaction touches a bounded number of rows, so none nears the lease expiry | [Counting rules](interface.md#counting-rules) |
+| D13 | Explicit retro scope, hard bounds, a content key over the digested sessions; a filter scope over the cap is trimmed, an explicit list is refused | Cost is predictable; an unchanged set of sessions never pays twice; the fence nonce stays random so a reader cannot forge the closing tag; the weekly schedule is never refused only for matching many sessions; `--max-turns` defaults to 12 (from a live run); the plan check, the cap and the same-key race are all settled in one order of checks, and the daily limit reserves a place when the row is inserted, so a launch problem is found by a dry run before anything is stored or counted | [Retro lifecycle](interface.md#retro-lifecycle), [Config](interface.md#config) |
+| D14 | Blocking run, no resume, recovery by recorded id at the start of `retro run` and in `prune` | Follows review-run's shape with less surface; `validate` and `ingest --dry-run` stay read-only, `validate` only warns; recovery never looks a session up by label; recovery takes the retro's lease first, so two processes never recover the same retro, and it defers when claude-session cannot answer | [Retro lifecycle](interface.md#retro-lifecycle) |
+| D15 | A hardened incremental reader | Transcripts can be unterminated, corrupt, huge or planted by a same-user process; natural data (a cut emoji) and planted data must not stop ingest | [Ingest rules](interface.md#ingest-rules) |
+| D16 | No outputs outside the store | Notes written from a session that read untrusted text would reach later trusted sessions | [Safety](interface.md#safety) |
+| D17 | Retention keys with a daily prune | Rows are small; model text and digests are not | [Retention](interface.md#retention) |
+| D18 | No TUI in 0.x | The read commands cover reading; a TUI is a separate review surface | [TUI](interface.md#tui) |
+| D19 | Identity echoes, a marker, a closed shape and a skill preflight in the plugin directories | The wrapper pattern for artifacts: claude-session accepts any artifact as `done`, so the tool must check; with no setting sources only plugin skills load, so `--skill` takes `plugin:skill` from the bundled plugin or `retro.plugin_dirs` and is checked before anything is stored with claude-session's own plugin path rules (credential locations such as `~/.claude` are refused, the bundled plugin of a `uv tool install` is allowed); the whole tree of a configured plugin directory must be owned by the user and not group or other writable (exit 12 `unsafe_plugin_dir`), while the bundled plugin gets no mode check because installed tool directories are group-writable by default; the skill name is limited to `[a-z0-9-]` so no path character reaches a path; the marker detects a skill that was not followed, not an attack | [Slot contract](interface.md#slot-contract), [Retro validation](interface.md#retro-validation) |
+| D20 | The retro session's own transcripts are excluded by the exact project directory name recorded before launch, and removed by that name at cleanup | The digest would otherwise stay in Claude Code's store and be audited in turn; the name claude-session's session directory encodes to is recorded in `retro_sessions` when `start` returns, so cleanup never depends on data a crash may not have collected, and a launch whose name would exceed 200 characters, or whose session directory path holds a non-ASCII character, is refused; a row is kept until its cleanup is finished and its transcript directory is gone, and the exclusion is read at every file open | [Retro launch](interface.md#retro-launch), [Ingest rules](interface.md#ingest-rules) |
+| D21 | The digest and the stored numbers come from the same bytes and one read snapshot of the store | The digest reads each file only up to its stored offset and skips a session whose file changed, so the key, the numbers and the evidence agree | [Retro lifecycle](interface.md#retro-lifecycle) |
+| D22 | Time buckets are 15-minute UTC slots | Any `--tz` and a changed `time_zone` re-bucket exactly, because every real zone offset is a multiple of 15 minutes | [Counting rules](interface.md#counting-rules) |
+
+## Live verification
+
+Facts relied on, with the run that established them. Each becomes a regression test in the plan (`live` where it needs the real tool).
+
+| Fact | Established by | Test |
 |---|---|---|
+| Transcripts are written per session under per-project directories with subagent files beside them; a project directory name is derived from the first-seen working directory; per-line working directories drift | Free read-only survey of a real corpus (Claude Code 2.1.x) | Synthetic corpus, parser tests |
+| One API message is one line per content block (same message id); naive sums overcount about 2 times; deduping by message id (largest output) matches a run's reported usage exactly | Survey and a real run | Counting-rule unit test, `live` reconcile test |
+| Timestamps are not monotonic (about a fifth of lines step backwards), so min and max are used | Survey | Synthetic corpus |
+| About 30 days of transcripts are retained; resumed sessions append to the same file; compaction is a boundary line | Survey | Synthetic corpus |
+| Cost appears only in dedicated cost lines and can disagree with tokens | Survey (one of five sessions far off) | `cost_mismatch` flag test |
+| Corrupt lines, NUL bytes and unterminated final lines exist; a 140 MB file parses in under a second with line-by-line reading | Survey | Reader robustness tests |
+| Secret-shaped strings occur in tool output | Survey (counts only) | Redaction tests |
+| Transcripts record no labels or environment; a harness session is linkable only through the Claude Code session id that claude-session records | Survey | Join tests |
+| A transcript file name equals the `sessionId` of every top-level line; subagent lines carry the parent's `sessionId` and their own `agentId`; no message uuid repeats across files in the surveyed corpus (forks were not observable); `cache_creation` has 5-minute and 1-hour counters | Survey (spike A) | Discovery, identity and cache-write fixtures |
+| Each transcript field the tool reads (message tokens, tool call, tool error, denial, interruption, rejection, prompt, turn duration, compaction, reported cost, identity, agent link) exists under the key path the field map names | Survey (spike A, Claude Code 2.1.284 to 2.1.328) | One synthetic-corpus fixture per row of the transcript field map |
+| The retro `exec` call works end to end for kind `audit` with third-party-reading settings: exit 0, frozen artifact, `cost_usd`, `num_turns`, sandbox active; about 40 s and a cent | Real runs (small model, synthetic digest) | `live` retro round trip |
+| `implicit_done: true` hides failures; a malformed artifact and a missing report both end `done`; a misspelled skill ends `needs-input` | Real runs | Validation tests, `live` |
+| A report command containing `$CSESSION_DIR` is denied in the sandbox; a literal absolute path works | Real runs | Skill test |
+| The four plugin placeholder entries are needed for sandboxed Bash; claude-session adds them in a per-run copy | Real runs | `live` |
+| Injected instructions in a digest were not followed in all five runs; fake secrets never reached an artifact; the built-in `ReportFindings` tool was once called, so the tool list is restricted | Real runs | `live` injection test |
+| `forget` keeps files for 30 days; `forget --purge` removes them; neither removes Claude Code's own transcript of the run | Real runs | `live` cleanup test |
+| Evidence references: no invalid reference over five runs; finding counts vary between runs | Real runs | `live` |
+| claude-session refuses a run whose working directory is under the state directory or any hidden home entry; its own per-session directory is exempt | Reading claude-session's published interface | Launch test with the default state directory and with `XDG_STATE_HOME` set |
+| `status --json` reports the Claude session ids, the frozen artifact and the sandbox flag; a forgotten session reports as not found (a repeat `forget --purge` exits 10); `forget --purge` can leave `purged: false`, which `reconcile` finishes after 30 days | Reading claude-session's published interface and schema | Fake-tool tests, `live` cleanup test |
+| Plugin path rules: a plugin directory that is `/`, `$HOME` or an ancestor, contains or is inside a credential path (`~/.claude`, `~/.config`, `~/.ssh`, and others), is under or contains a session-writable path or the state root, or holds an absolute or escaping symlink, a special file or more than 10,000 entries, 64 MiB or 32 levels, is refused as `unsafe_plugin_dir`; toolchain directories such as `~/.local/share/uv` are allowed; `start --dry-run` runs the same checks read-only | Reading claude-session's published interface (origin/main) | Preflight tests, launch plan check test with the fake tool |
+| A failed `start` (launch validation after allocation) ends the run `not-started` and prints the error envelope `launch_failed` with `end_reason`, `hint`, `csession_id` and `run`; the session is real, not live, and `forget --purge` works on it; a pending run never adopted ends `never_adopted` and is never forgotten by claude-session itself | Reading claude-session's published interface and schema | Fake-tool tests of the `start` rows of the outcome mapping, `live` |
+| `start --dry-run --json` allocates nothing, uses the placeholder id `cs-aaaaaaaa` for a new session, and prints `tools`, `implicit_done`, `sandbox`, `sandbox_lowered`, `repo`, `cwd`, `origins` and the resolved `profile`; a user or per-repo config of the `audit` kind shows in `origins` | Reading claude-session's published interface and schema | Launch plan check tests, one per safety setting |
+| `transcript --paths --json` returns `files[]` (`claude_session_id`, `run`, `source`, `path`, `exists`) with `subagents[]`; the tool does not call it, because cleanup finds the retro's transcripts by the exact project directory name | Reading claude-session's published interface and schema | None (documented to explain why it is not used) |
+| A project directory name is the first-seen working directory with every non-alphanumeric character replaced by `-` (91 of 91 files); only short ASCII names were observed, so a launch whose name would exceed 200 characters or whose session directory path holds a non-ASCII character is refused | Survey (spike A) | Plan check test, name-encoding unit test |
+| Denials sit on user `tool_result` lines (`permissionDecision`, `toolDenialKind`); a denial has a tool-use id when its line has a `tool_result` block, an interruption has none | Survey (spike A) | Field-map fixtures |
+| No line uuid appears in more than one top-level file (54,036 uuids) and no line carries a foreign `sessionId`; cross-file copies were not observable, so the owner tie-break is untested by real data | Survey (spike A) | Fork fixture, owner-rule property tests |
 
-## Questions for the design session
+Still to verify (conservative default until then): macOS paths and sandbox behavior; a retro in `--cwd session-dir` and the name of its transcript project directory (self-exclusion depends on it); whether Claude Code shortens project directory names over 200 characters (the plan check refuses such a launch either way); how Claude Code encodes a non-ASCII character in a project directory name, per code point or per UTF-16 unit (the plan check refuses such a path); `session-env/<id>` under `$CLAUDE_CONFIG_DIR`; whether a retro session loads ancestor `CLAUDE.md` files or writes project memory next to its transcript; a real `claude --fork-session` transcript pair: whether copied lines keep the source `sessionId` (settles the owner tie-break); the retro session's offered tool and skill list (Claude Code's own bundled skills may remain loadable through `Skill`); a retro of more than 20 sessions (an explicit list is refused, a filter scope is trimmed); real-run behavior of a custom skill without a marker; the size of the events table on a real corpus (target under 200 MB for a year of heavy use).
 
-1. What is audited (transcripts, outcomes, costs, audit logs), and from which sources?
-2. When does an audit run (on demand, scheduled, per session end)?
-3. What is the output (format, location, consumers such as self-improve)?
-4. How are improvements derived from audit findings handed off?
+## Modules
+
+| Module | Responsibility |
+|---|---|
+| `cli` | argparse subcommands, global flags, exit-code mapping, JSON envelopes |
+| `config` | YAML load with drop-ins, Pydantic validation, ownership checks, price table |
+| `gateway` | the only place that spawns processes, touches the filesystem outside the store or reads the clock: `claude-session` calls (per-call timeouts and process groups), file opens, crontab |
+| `reader` | discovery, safe open (no symlinks, no FIFO blocking), incremental line reading, offset, inode and head and tail hash bookkeeping, line and file budgets |
+| `parse` | line-type tolerant parsing into events (the transcript field map): usage, tools, errors, denials, interruptions, timing, subagent links; a guard around every line |
+| `count` | counting rules, the deterministic owner per dedupe key, 15-minute slots, cost basis, session values derived at query time, model and tool of errors and denials by the paired call |
+| `store` | SQLite schema, migrations, leases (retro, ingest) with one liveness rule and compare-and-set takeover, queries, `umask 077`, `secure_delete`, checkpoint after deletes |
+| `harness` | claude-session `list` and `status` snapshots keyed by claude-session id and the query-time join (Claude Code session ids) |
+| `digest` | numbering, item selection, budget, redaction, sanitizing, fencing, manifest |
+| `retro` | order of checks, key, skill preflight, launch plan check (before any row), `start` and the adopting `exec` through the gateway, outcome mapping, validation, collect and cleanup, recovery by recorded id |
+| `artifact` | closed-shape validation and evidence checks |
+| `hooks` | config order, first non-zero decides, stdout capped, process groups, payloads |
+| `cron` | managed block read, write, dry run |
+| `usage` | query-time aggregation over counted events for `usage`, `show` and `export` |
+| `plugin/` | `skills/audit/SKILL.md`, `skills/audit/references/marker.txt` and `profiles/audit-retro.yaml` (a claude-session profile that only adds denies) and `.claude-plugin/plugin.json` (names the plugin `session-audit`, so its name never depends on the installed directory name) |
+
+## Data model
+
+SQLite in WAL mode, additive migrations only. Tables:
+
+- `files`: path (raw bytes), device, inode, size, offset, head length and hash, tail hash, rules version, skip-to-LF flag, parse-error and unknown-line counts, first and last timestamp seen, last usable timestamp, first working directory, first entrypoint, last version, last cost-state dollars, an invalid-cost flag, the count of copies not stored, a rereading flag, last read, status. Per-file facts are replaced when the file is reread; session and agent values are derived from them and from counted events at query time.
+- `sessions`: session id, project directory name, main file id, first and last ingest time. Identity only.
+- `agents`: agent id, session id, parent tool-call id, agent type, file id. Identity only.
+- `events`: one row per counted fact per file (a message's tokens, a tool call, a tool error, a denial, an interruption, a turn duration, a compaction): `key` (hash of the kind and the id, so kinds never collide), `ref` (hash of the paired tool call, on errors and denials), `file_id`, `file_path`, `line_offset`, `kind`, `ts`, `slot` (15-minute UTC), `session_id`, `agent_id`, `model`, `tool`, the four token counters with 5-minute and 1-hour cache writes, `seconds`, `native` (the line's `sessionId` is its file's session), `counted`. The owner of a key is the copy with the largest output tokens (messages only), then the earliest timestamp (null last), then the native copy, then the smaller file path, then the smaller offset; at most 8 copies of a key are stored (a worse copy is counted in its file's `copies_dropped`), and the owner is compared only with those, for every key a file read touches. Indexes on `(key)`, `(file_id)` and `(session_id, counted)`. Pruned with the session.
+- `pruned_sessions`: session id and prune time, so ingest does not resurrect a pruned session from an unchanged file.
+- `harness_runs`: claude-session id, its `updated_at`, the Claude session ids it recorded (at most 64) and the snapshot (kind, labels as `key=value` strings, run, outcome, end reason, cost, turns, skill, repo, final); joined to sessions at query time.
+- `retros`: id, key, state, reason, scope (descriptive) and resolved scope, skill, model, timestamps, csession id, session map, cost, turns, outcome, sandbox flag, again-of, lease fields, counts, dropped, redacted, warnings, `run_token`, `digest_sha256`. No collected ids or run files.
+- `retro_artifacts`: retro id, artifact JSON (validated, redacted), summary. The only stored copy of the artifact.
+- `retro_starts`: local day and retro id; the daily limit counts it together with live `digesting` rows; the only rows removed early are refunds of runs that never reached the model; `prune` removes rows older than two days.
+- `retro_sessions`: csession id, retro id, csession directory, private directory, project directory name, cleanup state (`pending`, `done`, `incomplete`, `skipped`), forgotten time, creation time. It outlives the retro and drives self-exclusion and cleanup; removed only when cleanup is done, incomplete or skipped and no transcript root holds its project directory any more (or after 400 days); exclusion reads the table at every file open.
+- `meta`: schema version, rules version, ingest lease, `last_ingest_at`, `last_complete_ingest_at`, `ingest_interval`, `fail_count`, `first_failed_at`, `last_failed_at`, `last_fired_at`.
+
+Untrusted text lives only in `retro_artifacts` and the stored digest files.
+
+## Concurrency
+
+One `ingest` at a time: a lease on `meta`; retro leases follow the same single liveness rule (the holder runs with its recorded start time and the lease has not expired; a lease that is not live is taken over by compare-and-set, and every later state write of a holder is a compare-and-set that stops the holder when it lost the lease), see [Retro lifecycle](interface.md#retro-lifecycle) and [`ingest`](interface.md#ingest). Recovery takes a retro's lease first, so two processes never recover the same retro. A file is parsed with no transaction open and written in short chunks (events, offset, owners and per-file facts together), so a crash leaves the state of the last committed chunk and the counts never depend on read order; every connection sets `busy_timeout` 30 s; lease renewals use their own short transaction and are a compare-and-set on the holder's pid and start time (a recovery renews its claim the same way); every write transaction touches a bounded number of rows (at most 2,000 events or rows, each compared with at most 8 copies), so none is held near the 120 s expiry; housekeeping stops starting new items after 120 s. The live check and the row insert of `retro run` share one `BEGIN IMMEDIATE` transaction, which also reserves the daily-limit place. `ingest --session` writes its harness snapshot itself without the ingest lease. A SQLite write lock is never held across a call to claude-session or a hook. `prune` takes the ingest lease for session retention and deletes one session per transaction; `retro delete` uses one transaction.
+
+## Error handling
+
+A bad line, an unsafe file or an unknown shape is counted and skipped, never fatal; every line is parsed inside one guard. A source that cannot be read at all (an unusable root, an unwritable store) is exit 12 with a reason. A retro failure keeps its state and reason in the store and is reported by exit code. Every `claude-session` call is checked against its exit code and JSON envelope; any result outside the outcome mapping table is `claude_session_error` (exit 12), and a skill, claude-session version or launch-settings problem (including an unsafe plugin directory, an over-long or non-ASCII project directory name) is found by the preflight or the plan check and refused before a row exists; a `start` that fails after allocating records any id it printed after validating it, and forgets the session like any other. A failed `start` leaves a session the tool records in `retro_sessions` and forgets like any other. Every claude-session call has a timeout and its own process group, and a run has an overall deadline. A recovery or cleanup that cannot finish leaves the cleanup state pending or incomplete and `validate` warns; cleanup is one idempotent step list repeated by housekeeping, so a repeat `forget` that reports not found cannot turn an unfinished purge into done, and recovery defers (warning) when claude-session cannot answer.
+
+## Test strategy
+
+- All process, file-outside-store, clock and crontab access go through `gateway.py`; tests substitute fakes (`tests/fakebin/` holds a fake `claude-session`).
+- A synthetic transcript corpus with duplicate-block lines, corrupt, unterminated and NUL lines, backwards timestamps, subagents, compaction, resume, a fork with copied history, unknown line types and a symlink, FIFO and hard-linked file. Golden `--json` files for every command; every real output validated against `schemas/`.
+- Counting, cost basis and slot bucketing property tests, including the owner rule: any ingest order, a rewritten owner file, a partial copy of a streaming message and a rebuild give the same counted events; a failed Bash call yields one counted `tool_call` and one counted `tool_error`; a user line with both a denial and an interruption yields two events; session values equal a recount from events and per-file facts.
+- Redaction and sanitizer tests with a fuzz corpus (including forged closing fence tags, adversarial inputs for linear time at 64 KiB and the invisible and bidi code points the allowlist replaces).
+- Retro lifecycle tests against the fake `claude-session`: the order of checks, skill and version preflight, the plan check, every row of the outcome mapping table, every artifact check, signals, and the launch plan check (every safety setting, the project directory name length), a failed `start`, the deadline, lease takeover, cleanup retries by recorded id and recovery that defers without claude-session.
+- Reader and counting tests for the hardening rules: `totalCostUSD` of `1e999`, `NaN`, `-1`, `true`, `"5"` and `2e6` ignores the line and sets `cost_invalid`, and every numeric field of an event is validated before storage (`--json` stays valid); the owner rule with 9 and 300 copies of one key keeps 8, counts `copies_dropped` and stays linear, a rebuild of a file with millions of events commits in bounded batches and never holds a transaction near the lease expiry, and a crash between batches resumes with `rereading` set.
+- Retention and exclusion tests: a `retro_sessions` row survives while its project directory exists (also with `remove_run_transcripts: false`) and is removed once the directory is gone or after 400 days, and a retro directory created during a long ingest is excluded because the table is read at every file open.
+- Retro launch hardening tests: the bundled plugin of a wheel installed with umask 002 passes the preflight while a configured directory with one group-writable file or directory is refused (`unsafe_plugin_dir`, exit 12), skill names with `/`, `..`, uppercase or over 64 characters exit 2, a `start --dry-run` plan with an unknown extra `origins` key set by config fails closed, a non-ASCII session directory path is refused, `start` output with a malformed id or directory is refused without calling `forget` or `stop`, a `start` that times out after printing an id is recorded and forgotten, housekeeping stops after 120 s with `recovery_deferred`, and a stale holder's renewal does not extend a new holder's lease.
+- Text tests: model text of 1,500 U+0344 characters or a short secret expanded by `[REDACTED:<kind>]` is stored within its schema cap, and an error message or hint carrying escape sequences is sanitized on stderr.
+- Packaging test: the built wheel contains `session_audit/plugin/.claude-plugin/plugin.json` (a hidden directory) and the installed plugin's name is `session-audit`.
+- `live` tests (never in CI): the real reader on a real directory, and one real retro round trip. Each fact in Live verification is a named test.
+- `make verify` (ruff, pyright, pytest without `live`, markdown lint) must pass before every commit.
+
+## Dependencies
+
+`pyyaml` (required: the standard library cannot read YAML) and `pydantic` (config and artifact validation, as the design guide specifies). Nothing else: the reader, parser, store and cron block use the standard library.
+
+## Platform
+
+Linux and WSL are tested; macOS is expected to work and is checked locally. See [Platform notes](interface.md#platform-notes).
+
+## Open items for implementation
+
+- The exact secret-shaped patterns (bounded, as package data) and their tests.
+- Whether `usage --by` needs more than two dimensions (not for 0.x).
+- The skill that the bundled plugin ships is written in the implementation plan's skill issue.
+- The measured size of the events table on a real corpus, and an index or rollup if it misses the target.
