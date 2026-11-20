@@ -4,9 +4,7 @@
 
 ## What this is
 
-`session-audit` is a Layer 3 (workflow) tool of the awkit tool family. Analyze Claude session transcripts and outcomes: retros and usage analytics.
-It must work fully standalone at a terminal: it never depends on the harness (`awkit`).
-It is post-v1: not part of the v1 scope.
+`session-audit` is a Layer 3 (workflow) tool of the awkit tool family. Analyze Claude session transcripts and outcomes: retros and usage analytics. It must work fully standalone at a terminal: it never depends on the harness (`awkit`). It is post-v1: not part of the v1 scope.
 
 ## Read first
 

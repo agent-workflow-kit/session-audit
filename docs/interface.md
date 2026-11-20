@@ -41,10 +41,10 @@ Errors go to stderr. With `--json` they are also printed on stdout as `{"error":
 |---|---|
 | 0 | Success. `ingest` also exits 0 for a partial run that hit its budget (`complete: false`) and for "already running" |
 | 1 | Unexpected internal error |
-| 2 | Usage error or invalid config. Reasons with a name: `retro run --mode interactive` in 0.x (`details.reason: mode_unsupported`), `ingest --rebuild` or `retro delete` without a terminal and without `--yes` (`details.reason: confirmation_required`). Also a bare skill name, a session prefix shorter than 8 characters, a retro prefix shorter than 4 characters after `ra-`, `--limit` outside 1 to 1000, a flag out of range (`details.field` names it), `--rebuild` combined with `--path`, `--since` or `--session`, `ingest --dry-run` combined with `--session`, an `ingest --session` value that is not a claude-session id (`^cs-[a-z2-7]{8}$`; the hint says the flag takes a claude-session id when the value looks like a Claude Code session id), a `retro run --session` value that is a claude-session id (the hint says the flag takes a Claude Code session id), more than 1000 `--session` flags on `retro run`, a `cron install` scope that does not match the `WHEN` duration grammar (`details.field`: `schedule.retro.scope`) and a plugin directory in a location claude-session would refuse (`details.field`: `retro.plugin_dirs`) |
+| 2 | Usage error or invalid config. Reasons with a name: `retro run --mode interactive` in 0.x (`details.reason: mode_unsupported`), `ingest --rebuild` or `retro delete` without a terminal and without `--yes` (`details.reason: confirmation_required`). Also a malformed skill (a bare name, or a name part outside `^[a-z0-9][a-z0-9-]{0,63}$`; `details.field`: `--skill`), a session prefix shorter than 8 characters, a retro prefix shorter than 4 characters after `ra-`, `--limit` outside 1 to 1000, a flag out of range (`details.field` names it), `--rebuild` combined with `--path`, `--since` or `--session`, `ingest --dry-run` combined with `--session`, an `ingest --session` value that is not a claude-session id (`^cs-[a-z2-7]{8}$`; the hint says the flag takes a claude-session id when the value looks like a Claude Code session id), a `retro run --session` value that is a claude-session id (the hint says the flag takes a Claude Code session id), more than 1000 `--session` flags on `retro run` and a `cron install` scope that does not match the `WHEN` duration grammar (`details.field`: `schedule.retro.scope`) |
 | 10 | Not found: a session, retro or artifact id |
 | 11 | A `pre-retro` hook vetoed the run (retro `canceled`, reason `hook_vetoed`; `details.retro_id` names it) |
-| 12 | The requested operation failed for a reportable reason. `details.reason` is one of `claude_session_missing`, `claude_session_too_old`, `store_unwritable` (the state directory or `state.db` cannot be created or written: `ingest`, `retro run`, `prune`), `no_readable_roots` (every transcript root unreadable), `skill_not_found`, `launch_settings_mismatch` (the launch plan differs from the required settings, see Retro launch item 1), `session_not_started` (a retro session that never started; `details.end_reason` is claude-session's token, `sandbox_unavailable` among them), `claude_session_error` (any claude-session result outside the Outcome mapping table, and the tool's own deadline) or `crontab_unavailable`; `details.retryable` says whether trying again can help. A retro row exists only when the failure happened after step 13 of the Order of checks |
+| 12 | The requested operation failed for a reportable reason. `details.reason` is one of `claude_session_missing`, `claude_session_too_old`, `store_unwritable` (the state directory or `state.db` cannot be created or written: `ingest`, `retro run`, `prune`), `no_readable_roots` (every transcript root unreadable), `skill_not_found`, `unsafe_plugin_dir` (a configured plugin directory failed the preflight, see Retro launch item 0), `launch_settings_mismatch` (the launch plan differs from the required settings, see Retro launch item 1), `session_not_started` (a retro session that never started; `details.end_reason` is claude-session's token, `sandbox_unavailable` among them), `claude_session_error` (any claude-session result outside the Outcome mapping table, and the tool's own deadline) or `crontab_unavailable`; `details.retryable` says whether trying again can help. A retro row exists only when the failure happened after step 13 of the Order of checks |
 | 13 | Needs a human: a `pre-retro` hook escalated (reason `hook_escalated`), or the retro session reported blocked or needs-input (reasons `session_blocked`, `session_needs_input`); retro state `escalated` |
 | 14 to 18 | The retro session's outcome passed through unchanged from claude-session: 14 exited-unreported, 15 killed, 16 timeout, 17 lost, 18 reported failed. `details.outcome` is the outcome token and `details.retro_id` names the retro |
 | 20 | Refused, with `details.reason` (see Refusal reasons). Housekeeping (Order of checks step 5) may have recovered other retros before a refusal; their results are in the log |
@@ -64,7 +64,7 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 |---|---|
 | `scope_too_large` | An explicit `--session` list names more sessions than `retro.max_sessions` (the count is in `details.matched`); a filter scope is never refused for size (see `retro run`) |
 | `daily_limit` | `limits.retros_per_day` starts today plus retros waiting on their `pre-retro` hook |
-| `config_unsafe` | The config, its directory, a drop-in, the permission profile file, a plugin directory or its `SKILL.md` is unsafe (see Config), or `retro.sandbox` is below `required` while stdin is not a terminal |
+| `config_unsafe` | The config, its directory, a drop-in or the permission profile file is unsafe (see Config), or `retro.sandbox` is below `required` while stdin is not a terminal |
 | `live_sessions_only` | Every matched session changed within `retro.quiet_after` |
 | `empty_scope` | The scope matches no stored session, or every skip was not `live` and nothing is left |
 | `store_newer` | `state.db` was written by a newer version |
@@ -196,7 +196,7 @@ Prints store rows as JSON lines (one object per line, oldest first, no limit; th
 
 `session-audit validate [--probe] [--json]`
 
-Offline and read-only by default; never prompts and never recovers or changes anything. Checks the config and its ownership, the transcript roots, the store (opened read-only; a pending migration is reported, never applied), the price table age (warns when `as_of` is older than 180 days), the permission profile file, the bundled plugin directory and whether claude-session is installed and at least MIN_CS (see Retro launch). Output `{"ok": bool, "checks": [{"name", "ok", "reason"}], "warnings": [...]}` (`schemas/cli/validate.json`). It prints its document on exits 0, 2 and 12. With a config that does not parse the `config` check fails, `store` and `claude_session` still run with built-in defaults, and the checks that need config are reported `ok: false` with reason `config_invalid`. Check names: `config`, `config_ownership`, `transcript_roots`, `store`, `price_table`, `permission_profile`, `plugin`, `claude_session`, and under `--probe` also `probe_kinds` and `probe_sandbox`; the `plugin` check runs `skill_preflight` for `retro.skill` (reasons `plugin_missing`, `config_unsafe`). `reason` is null when the check is ok and otherwise one of `config_invalid`, `config_unsafe`, `no_readable_roots`, `store_unreadable`, `store_newer`, `permission_profile_missing`, `plugin_missing`, `claude_session_missing`, `claude_session_too_old`, `probe_failed`, `sandbox_unavailable`; a check has no message field. With `harness.enabled: on` and no claude-session the `claude_session` check fails; with `auto` it passes. `warnings` is a closed enum: `price_table_old`, `migration_pending`, `root_unusable`, `ingest_stale` (`last_complete_ingest_at` is null or older than max(24 h, 2 x the ingest interval recorded in `meta` by `cron install`) while a managed block exists), `retros_unrecovered` (a non-final retro whose lease is not live exists), `cleanup_incomplete` (a `retro_sessions` row is `pending` or `incomplete` for more than a day), `sandbox_lowered`, `env_file_unsafe`, `claude_session_missing` (only when `schedule.retro` is set and `harness.enabled` is `auto`). Exit 0 for ok (including warnings), 2 for an invalid config, 12 for a failed check. `--probe` additionally runs `claude-session kinds --json` and the sandbox availability check.
+Offline and read-only by default; never prompts and never recovers or changes anything. Checks the config and its ownership, the transcript roots, the store (opened read-only; a pending migration is reported, never applied), the price table age (warns when `as_of` is older than 180 days), the permission profile file, the bundled plugin directory and whether claude-session is installed and at least MIN_CS (see Retro launch). Output `{"ok": bool, "checks": [{"name", "ok", "reason"}], "warnings": [...]}` (`schemas/cli/validate.json`). It prints its document on exits 0, 2 and 12. With a config that does not parse the `config` check fails, `store` and `claude_session` still run with built-in defaults, and the checks that need config are reported `ok: false` with reason `config_invalid`. Check names: `config`, `config_ownership`, `transcript_roots`, `store`, `price_table`, `permission_profile`, `plugin`, `claude_session`, and under `--probe` also `probe_kinds` and `probe_sandbox`; the `plugin` check runs `skill_preflight` for `retro.skill` (reasons `plugin_missing`, `unsafe_plugin_dir`). `reason` is null when the check is ok and otherwise one of `config_invalid`, `config_unsafe`, `no_readable_roots`, `store_unreadable`, `store_newer`, `permission_profile_missing`, `plugin_missing`, `unsafe_plugin_dir`, `claude_session_missing`, `claude_session_too_old`, `probe_failed`, `sandbox_unavailable`; a check has no message field. With `harness.enabled: on` and no claude-session the `claude_session` check fails; with `auto` it passes. `warnings` is a closed enum: `price_table_old`, `migration_pending`, `root_unusable`, `ingest_stale` (`last_complete_ingest_at` is null or older than max(24 h, 2 x the ingest interval recorded in `meta` by `cron install`) while a managed block exists), `retros_unrecovered` (a non-final retro whose lease is not live exists), `cleanup_incomplete` (a `retro_sessions` row is `pending` or `incomplete` for more than a day), `sandbox_lowered`, `env_file_unsafe`, `claude_session_missing` (only when `schedule.retro` is set and `harness.enabled` is `auto`). Exit 0 for ok (including warnings), 2 for an invalid config, 12 for a failed check. `--probe` additionally runs `claude-session kinds --json` and the sandbox availability check.
 
 ### `cron`
 
@@ -243,7 +243,10 @@ A root writable by another user makes that root unusable (reported, other roots 
 ```text
 every line is parsed, validated and stored inside one guard: any exception (JSONDecodeError, RecursionError,
     ValueError, OverflowError, UnicodeError) makes it an error line (lines.errors); never fails the file or the run
-token counters, durationMs: int (not bool), 0 <= n <= 2**32; else the line is an error line
+token counters, durationMs and every other numeric field stored on an event: int (not bool), 0 <= n <= 2**32; else the line is an error line
+totalCostUSD: int or float (not bool), finite, 0 <= x <= 1000000; else that cost-state line is ignored (counted in lines.errors) and
+    the file's cost_invalid is set (the session gets the flag cost_invalid)
+no infinity, NaN, negative, boolean or string value of a numeric field is ever stored or printed
 sums: SQL SUM over at most 2**31 events stays below 2**63, so aggregates are exact integers
 timestamps: ISO 8601; outside [2020-01-01, file mtime + 1 day] -> treated as missing
 strings: fix_surrogates, then model, tool, agent_type and version capped at 128 characters, project at 4096
@@ -257,8 +260,9 @@ Tool and model names are stored as read (capped at 128 characters); output lists
 
 ```text
 stored per file: dev, inode, size, offset, head_len, head_sha, tail_sha, rules_version, skip_to_lf,
-    parse_errors, unknown_lines, min_ts, max_ts, last_ts, first_cwd, first_entrypoint, last_version, cost_state_usd
-a full reread resets the per-file facts; an incremental read adds to the counts, sets first_* only when null,
+    parse_errors, unknown_lines, min_ts, max_ts, last_ts, first_cwd, first_entrypoint, last_version, cost_state_usd,
+    cost_invalid, copies_dropped, rereading
+a full reread resets the per-file facts and sets rereading; an incremental read adds to the counts, sets first_* only when null,
     replaces last_* and cost_state_usd when a later line has one, and widens min_ts and max_ts
 head_len = min(4096, offset) and head_sha = SHA-256 of bytes [0, head_len); both are rewritten when the offset grows
     while head_len < 4096, after the old prefix matched
@@ -267,12 +271,12 @@ reread from the start when: (dev, inode) changed, or size < offset, or head_sha 
 otherwise read from offset
 ```
 
-A reread rebuilds the file's events chunk by chunk; each chunk's events, offset, owners and per-file facts commit together, so a crash leaves the state of the last committed chunk (see Counting rules 1).
+A reread first resets the file row (offset 0, `rereading` set) and deletes the old events in batches of at most 2,000 rows, each batch its own short transaction that also repairs the owner of every key it deleted from; the last batch clears `rereading`, and a run that finds it set finishes the deletion before it reads. Then the file's events are rebuilt chunk by chunk (at most 10,000 lines or 2,000 events per chunk); each chunk's events, offset, owners and per-file facts commit together, so a crash leaves the state of the last committed chunk (see Counting rules 1).
 
-**7. Self-exclusion.** The tool never matches its own retro transcripts by a directory it owns. The exact transcript project directory name of every retro session is recorded in `retro_sessions.project_dir` when `start` returns, before the adopting `exec` runs (Retro launch item 3), and the rows are kept at least `max(retention.sessions, 60d)` (see Retention), even after `retro delete` or `prune` of the retro. A transcript file is skipped and counted in `files.excluded` when its project directory name is one of them. Other claude-session sessions have other directory names and are never excluded. A file of a retro session cannot be ingested before its exclusion is known (the name is stored before the session runs). The launch plan check refuses a launch whose project directory name would exceed 200 characters, so the rule never depends on how Claude Code shortens long names.
+**7. Self-exclusion.** The tool never matches its own retro transcripts by a directory it owns. The exact transcript project directory name of every retro session is recorded in `retro_sessions.project_dir` when `start` returns, before the adopting `exec` runs (Retro launch item 3), and a row outlives the retro (`retro delete` and `prune` of the retro never remove it) until its cleanup is finished and its transcript directory is gone (see Retention). A transcript file is skipped and counted in `files.excluded` when its project directory name is one of them. Other claude-session sessions have other directory names and are never excluded. A file of a retro session cannot be ingested before its exclusion is known (the name is stored before the session runs). The launch plan check refuses a launch whose project directory name would exceed 200 characters, so the rule never depends on how Claude Code shortens long names.
 
 ```text
-def excluded(project_dir_name):
+def excluded(project_dir_name):              # called at every file open; reads the table at that moment, never a set loaded earlier
     return project_dir_name in {rs.project_dir for rs in retro_sessions}
 ```
 
@@ -312,25 +316,26 @@ From spike A against Claude Code 2.1.284 to 2.1.328; every key is optional.
 # within one file: a message keeps the largest output_tokens (tie: the earliest line) and its row's line_offset is
 #   the message's first line; every other kind keeps its first line
 def read_file(F, full):                         # no transaction is open while lines are parsed
-    start = 0 if full else F.offset
-    for chunk in parse_lines(F, start):         # at most 10,000 lines per chunk; stops at a line boundary when
-                                                #   ingest.file_budget or --budget is hit (the next run resumes)
+    if full: reset_file(F)                      # one short transaction: offset 0, per-file facts reset, rereading = 1
+    if F.rereading: delete_old_events(F)        # batches; the last one clears rereading
+    for chunk in parse_lines(F, F.offset):      # at most 10,000 lines or 2,000 events per chunk; stops at a line boundary
+                                                #   when ingest.file_budget or --budget is hit (the next run resumes)
         with begin_immediate():                 # short; busy_timeout 30 s on every connection
-            touched = set()
-            if full and chunk.is_first:
-                touched |= {k for (k,) in q("SELECT key FROM events WHERE file_id=?", F)}
-                q("DELETE FROM events WHERE file_id=?", F)
             for ev in chunk.events:
-                upsert_within_file(ev); touched.add(ev.key)
-            for k in touched:
-                owner = q1("SELECT rowid FROM events WHERE key=? ORDER BY "
-                           "CASE kind WHEN 'message' THEN output ELSE 0 END DESC, "
-                           "ts IS NULL, ts, native DESC, file_path, line_offset LIMIT 1", k)
-                q("UPDATE events SET counted = (rowid = ?) WHERE key=?", owner, k)
+                upsert_within_file(ev)
+                place_copy(ev)                  # compares with at most 8 stored copies of ev.key
             write_file_row(F, offset=chunk.end_offset, facts=chunk.facts)   # hashes and per-file facts
+def place_copy(ev):                             # a key keeps at most 8 stored copies: the 8 best by owner order
+    copies = q("SELECT rowid, <owner order columns> FROM events WHERE key=?", ev.key)    # at most 8 rows
+    if len(copies) == 8 and ev is worse than every copy: delete ev; files.copies_dropped += 1 for ev's file
+    else: store ev; if there are now 9 copies, delete the worst (files.copies_dropped += 1 for its file)
+    counted = the best copy only
+def delete_old_events(F):                       # batches of at most 2,000 rows, each its own short transaction
+    for each batch: delete the rows; for every deleted counted row, the best of the remaining copies of its key
+        (at most 8 rows) becomes counted; between batches check the budget and renew the lease; the last batch clears rereading
 ```
 
-The owner of a key is the copy with the largest `output_tokens` (messages only; 0 for other kinds), then the earliest timestamp (null last), then the copy whose line `sessionId` equals its file's session id (`native`; a line without `sessionId` counts as native), then the smaller file path, then the smaller offset; only the owner is counted. A tool call and its error, and two facts on one line, are separate events because the kind is part of the key. The rule does not depend on ingest order, so a rebuild, a rewrite of either file, or reading a fork before its source give the same counts. When an owner's session is pruned its copies are not re-evaluated until a file holding them is read again (residual risk). This also stops copied history after a fork or resume from counting twice.
+The owner of a key is the copy with the largest `output_tokens` (messages only; 0 for other kinds), then the earliest timestamp (null last), then the copy whose line `sessionId` equals its file's session id (`native`; for an agent file the file's session id is the parent session id; a line without `sessionId` counts as native), then the smaller file path, then the smaller offset; only the owner is counted. At most 8 copies of a key are stored, the 8 best by this order; a copy that is not among them is not stored and counts in its file's `copies_dropped`. A tool call and its error, and two facts on one line, are separate events because the kind is part of the key. The rule does not depend on ingest order, so a rebuild, a rewrite of either file, or reading a fork before its source give the same counts. When an owner's session is pruned its remaining copies are not re-evaluated until a file holding them is read again, and a copy that was not stored is never recovered (residual risk). Cost bound: a chunk, a deletion batch and a prune compare at most 8 rows per event or row, so a write transaction touches at most 2,000 x 8 rows and takes well under a second, ingest work is linear in the lines read and never grows with the number of files that hold a copy, and no transaction is held near the 120 s lease expiry. This also stops copied history after a fork or resume from counting twice.
 
 **2. Attribution, tokens and reported cost.** Events belong to the session and agent of the file whose copy owns the key. A session's `tokens` four counters are the main agent's only; `tokens.subagents` is the sum of all four counters over its agents; the Session `agents` count is the number of agent files; every other counter includes agents. `usage` rows by `session` include agents. A session's `cost.estimated_usd` includes its agents. The reported figure is (copy):
 
@@ -371,7 +376,7 @@ grouping by model or tool puts an event with a null value in the row whose key e
 message lines with model "<synthetic>" and zero usage are ignored
 ```
 
-**7. Quality flags.** A session carries `parse_errors` (a count), `unknown_line_types` (a count) and `flags` from the closed set `cost_mismatch`, `no_usage`, `no_timestamps`, `old_rules`, `project_from_dir`. The flags are facts about the reading, not about the work. A session with no usage has `estimated_usd` 0 and the `no_usage` flag. An oversized tail is counted in `lines.oversized`.
+**7. Quality flags.** A session carries `parse_errors` (a count), `unknown_line_types` (a count) and `flags` from the closed set `cost_mismatch`, `no_usage`, `no_timestamps`, `old_rules`, `project_from_dir`, `cost_invalid` (a cost-state line of the main file had an invalid value and was ignored). The flags are facts about the reading, not about the work. A session with no usage has `estimated_usd` 0 and the `no_usage` flag. An oversized tail is counted in `lines.oversized`.
 
 **8. Session values.** Every session and agent value is computed from counted events and the session's file rows when it is printed (copy):
 
@@ -388,7 +393,7 @@ session(s), computed at query time:
   entrypoint = mapped from the main file's first_entrypoint; version = the main file's last_version
   reported_usd = see rule 2
   flags = no_usage (no message event), no_timestamps (an event in ev has ts null), cost_mismatch, old_rules,
-          project_from_dir
+          project_from_dir, cost_invalid (the main file's cost_invalid)
 agent(a): the same counters over the agent's own counted events; models as above
 ```
 
@@ -510,10 +515,10 @@ The manifest `coverage` is `{digest_bytes, items_total, items_kept, sessions: [{
 ```text
 def digest_text(raw, cap):
     t = fix_surrogates(raw)                 # lone surrogates -> U+FFFD
-    t = t[:65536]                           # pre-cap in code points before any regex
+    t = t[:65536]                           # work bound only (not the content cap), in code points before any regex
     t = unicodedata.normalize("NFC", t)
     t = redact(t)                           # bounded built-in patterns, literal masks, token prefixes
-    t = cut(t, cap)                         # at a code point, never inside a [REDACTED:<kind>] marker
+    t = cut(t, cap)                         # after NFC and redaction, at a code point, never inside a [REDACTED:<kind>] marker
     t = sanitize(t)                         # see Sanitizing
     t = re.sub(r"(?i)</untrusted", "&lt;/untrusted", t)
     return t
@@ -571,17 +576,18 @@ def retro_key(kept_sessions, skill, model):
 
 A changed transcript, changed digest settings or a changed redaction list change the key; the scope does not enter it. A custom skill that changes does not change the key: use `--again`. A stored `done` retro with the same key is returned without a model call unless `--again`. The dry-run key and the `pre-retro` payload `key` equal the key a real run computes over the same transcript bytes.
 
-**Leases.** A retro lease is `(holder_pid, holder_start_time, expires_at)` on the retro row; the ingest lease uses the same rule on `meta` (design guide §4.3). The holder renews it every 30 s in its own short transaction while it works, including while it waits for `claude-session` and for hooks (a renewal thread); it expires 120 s after the last renewal (copy):
+**Leases.** A retro lease is `(holder_pid, holder_start_time, expires_at)` on the retro row; the ingest lease uses the same rule on `meta` (design guide §4.3). The holder renews it every 30 s in its own short transaction while it works, including while it waits for `claude-session` and for hooks (a renewal thread), and a process that took a lease over for recovery renews it the same way until the recovery ends; it expires 120 s after the last renewal (copy):
 
 ```text
-live(lease) = the holder PID runs with the recorded start time AND now < expires_at
+live(lease) = the holder PID runs with the recorded start time AND now < expires_at       # nothing stronger (see Residual risks)
 a lease that is not live may be taken over at once: a dead holder at once, a running holder whose renewal stopped
     after its expiry (a hung process)
 take_over(r) = UPDATE ... SET holder_pid = me, holder_start = my_start, expires_at = now + 120 s
                WHERE id = ? AND holder_pid IS ? AND holder_start IS ? AND expires_at IS ?   -- rowcount 1 or skip
 every later state write of a holder is a compare-and-set on its own holder_pid and holder_start;
     rowcount 0 means the lease was taken over: the holder stops its work and exits 1
-renewal: every 30 s in its own short transaction
+renewal: every 30 s in its own short transaction: UPDATE ... SET expires_at = now + 120 s WHERE id = ? AND holder_pid = ? AND holder_start = ?;
+    rowcount 0 means the lease was taken over: the holder stops its work (a stale holder never extends a new holder's lease)
 ```
 
 **Daily limit.** The binding check is at the row insert and counts the live `digesting` rows as reserved, so no hook runs on a spent day, no row is deleted after a hook saw it, and a `pre-retro` hook that starts `retro run` again is bounded by the limit (copy):
@@ -609,6 +615,9 @@ vetoed, escalated-by-hook, refused, reused and dry runs never start, so they nev
 ```text
 housekeeping (start of retro run, and prune; never ingest or validate; --dry-run only lists):
   cs_ok = claude-session is present and >= MIN_CS
+  total bound 120 s: after 120 s no further recovery or cleanup retry is started (warning recovery_deferred; the rest waits for
+      the next housekeeping); an item already started ends within its own call timeouts
+  take_over(r) is followed by the renewal of its lease until final(r) or release(r)
   for r in retros where state in (digesting, running, validating) and not live(r.lease):
       if not take_over(r): continue                               # another process recovers it
       if r.csid is not null:
@@ -651,10 +660,10 @@ One numbered order for `retro run` (copy as written):
 ```text
 retro run:
  1  parse flags; no scope flag or --mode interactive -> exit 2; more than 1000 --session flags -> exit 2
- 2  load config; unsafe config, plugin directory or profile file -> 20 config_unsafe (Config);
+ 2  load config; unsafe config or profile file -> 20 config_unsafe (Config);
     retro.sandbox below required while stdin is not a terminal -> 20 config_unsafe; store newer -> 20 store_newer
  3  claude-session present and >= MIN_CS -> else 12 claude_session_missing | claude_session_too_old
- 4  skill preflight -> else 12 skill_not_found
+ 4  skill preflight -> else 2 (malformed skill) | 12 skill_not_found | 12 unsafe_plugin_dir
  5  housekeeping (not with --dry-run); its results are logged even when a later step refuses
  6  resolve scope from the store (a full session id unknown to the store is first looked up on disk under the roots
     and ingested); unknown --session -> 10; ambiguous prefix -> 21; nothing matched -> 20 empty_scope;
@@ -702,14 +711,18 @@ skip reasons: live (newest mtime of the session's main and subagent files is wit
 **0. Skill preflight** (Order of checks step 4; nothing is stored before it passes):
 
 ```text
+SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 def skill_preflight(skill):
     if ":" not in skill: exit 2 (bare skill names cannot load with setting sources none; deviation)
     plugin, name = skill.split(":", 1)
+    if not SKILL_NAME.fullmatch(name): exit 2 naming --skill      # before any path is built from name
     for d in [bundled_plugin_dir] + config.retro.plugin_dirs:
-        refuse(d) when d is, contains or is inside ~/.claude, ~/.config, ~/.local/state, $XDG_CONFIG_HOME or
-            $XDG_STATE_HOME, or is $HOME or an ancestor: exit 2 naming retro.plugin_dirs (claude-session would refuse it)
-        owner_ok(d) and owner_ok(d/skills/name/SKILL.md): owner me (or root for the bundled directory), not group or
-            other writable, not a symlink; else exit 20 config_unsafe naming retro.plugin_dirs
+        if d is a configured directory (not the bundled one):
+            refuse(d) when d is, contains or is inside ~/.claude, ~/.config, ~/.local/state, $XDG_CONFIG_HOME or
+                $XDG_STATE_HOME, or is $HOME or an ancestor: exit 12 unsafe_plugin_dir (claude-session would refuse it)
+            walk d without following symlinks, within 10,000 entries, 64 MiB and 32 levels (claude-session's limits):
+                every file and directory is owned by me, not group or other writable, and is a regular file or a
+                directory; any violation or an exceeded limit: exit 12 unsafe_plugin_dir
         pname = manifest_name(d) or basename(d)          # .claude-plugin/plugin.json "name", read with a 64 KiB cap
         if pname == plugin and is_regular_file_nofollow(d / "skills" / name / "SKILL.md"):
             return d
@@ -717,7 +730,7 @@ def skill_preflight(skill):
 bundled_plugin_dir = realpath(importlib.resources.files("session_audit") / "plugin")
 ```
 
-The directory found is passed with `--plugin-dir` (the bundled plugin always is).
+The directory found is passed with `--plugin-dir` (the bundled plugin always is). The bundled plugin gets no owner or mode check: it is the tool's own package, trusted as the tool is, and installed tool directories are group-writable by default (a `uv tool install` under a user-private group and umask 002 gives `drwxrwxr-x`), so a mode rule would refuse a normal install. claude-session's own plugin rules still apply to it at launch (the plan check reports a refusal as `session_not_started` with `end_reason: unsafe_plugin_dir`); the preflight only verifies that the skill file exists and that the manifest names `session-audit`. A configured directory is code the user pointed at, so its whole tree gets the strict check.
 
 **1. Launch plan check** (Order of checks step 11). Before any row, the tool runs `claude-session start --dry-run --json` with the real flags and empty placeholder files of the same names, and requires exact values for the settings that carry safety, plus origins that show no user or repo config changed them (copy):
 
@@ -737,16 +750,16 @@ def plan_check(flags):                          # Order of checks step 11; nothi
           and p.write_dirs == [] and p.notes_context is False and p.claude_args == []
           and plan.sandbox.mode == retro.sandbox and plan.sandbox_lowered == (retro.sandbox != "required")
           and plan.repo is None
-          and all(o.get(k) in ("builtin", "flag", "flag-implied") for k in CHECKED_KEYS)
+          and all(v in ("builtin", "flag", "flag-implied") for k, v in o.items() if k not in OPEN_ORIGIN_KEYS)
+          and os.path.realpath(plan.cwd).isascii()
           and len(project_dir_name(plan.cwd)) <= 200)
     not ok                                         -> exit 12 launch_settings_mismatch (retryable false)
-CHECKED_KEYS = ("read_dirs", "write_dirs", "env.set_names", "env.path_prepend", "env.allow", "env.inherit",
-               "notes_context", "claude_args", "mcp", "sandbox", "setting_sources", "permission_profile",
-               "tools", "implicit_done", "reads_third_party")
+OPEN_ORIGIN_KEYS = ("model", "timeout", "max_turns")   # the only origins that may come from user or repo config; any other key,
+                                                  # including one claude-session adds later, must be builtin or flag
 project_dir_name(cwd) = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd))   # Claude Code's encoding (spike A)
 ```
 
-The names are claude-session's `schemas/cli/exec-dry-run.json` and `kinds.json#/$defs/profile` names. A user or per-repo claude-session config that changes any safety setting of the `audit` kind makes every retro exit 12 `launch_settings_mismatch` until it is removed; `model` and `timeout` from that config are not safety settings (the tool passes `--timeout`, and `--model` when set). The check also refuses a launch whose transcript project directory name would exceed 200 characters, so self-exclusion never depends on how Claude Code shortens long names, and the tool's guarantee never depends on claude-session's config.
+The names are claude-session's `schemas/cli/exec-dry-run.json` and `kinds.json#/$defs/profile` names. A user or per-repo claude-session config that changes any safety setting of the `audit` kind makes every retro exit 12 `launch_settings_mismatch` until it is removed; `model`, `timeout` and `max_turns` from that config are not safety settings (the tool passes `--timeout` and `--max-turns`, and `--model` when set); every other key of `origins`, including a safety field claude-session adds later, must be `builtin`, `flag` or `flag-implied`, so an unknown field fails closed. The check also refuses a launch whose session directory path holds a non-ASCII character (how Claude Code encodes such a character in a project directory name is unverified) and one whose transcript project directory name would exceed 200 characters, so self-exclusion never depends on how Claude Code shortens or encodes names, and the tool's guarantee never depends on claude-session's config.
 
 **2. Files.** At step 15 the tool writes `digest.md` and `manifest.json` under `digests/<retro_id>/` and the prompt file under `prompts/<retro_id>/`. `run_token = secrets.token_urlsafe(24)` (32 characters), stored on the retro row with `digest_sha256`.
 
@@ -757,15 +770,18 @@ out, rc = cs("start", *flags, "--json")                       # 120 s
 rc == 0: csid, csdir = out.csession_id, out.csession_dir
 rc == 12 and out.error.code == "launch_failed": csid = out.error.csession_id; csdir = sessions_root/csid
     (sessions_root = dirname(dirname(plan.cwd)) from the step 11 plan)
-in both cases, one transaction: retro.csid = csid; insert retro_sessions(csession_id=csid, retro_id, csession_dir=csdir,
-    private_dir=dirname(sessions_root)/"private"/csid, project_dir=project_dir_name(csdir + "/work"),
-    cleanup="pending", created_at=now)
+any other rc, a timeout or a signal: csid = the one distinct token matching CSID in its stdout or stderr, else none; csdir = sessions_root/csid
+validate before anything is stored or passed to forget or stop: CSID.fullmatch(csid), csdir == sessions_root/csid and
+    project_dir = project_dir_name(csdir + "/work") matches ^[A-Za-z0-9-]{1,200}$; a mismatch records nothing:
+    warning on stderr, final failed/claude_session_error, exit 12
+with a valid csid, in one transaction: retro.csid = csid; insert retro_sessions(csession_id=csid, retro_id, csession_dir=csdir,
+    private_dir=dirname(sessions_root)/"private"/csid, project_dir=project_dir, cleanup="pending", created_at=now)
 rc == 12 launch_failed: final failed/session_not_started (end_reason from the envelope); cleanup; exit 12
-any other rc: final failed/claude_session_error; exit 12 (no session is known to the tool)
+any other rc, a timeout or a signal: final failed/claude_session_error; cleanup when an id was recorded; exit 12
 rc == 0: run out.argv plus --outcome-file <state>/outcomes/<retro_id>.json and --json
 ```
 
-`start` stages copies of the prompt and inputs, so the tool's own files are never read by the session. The adopting `exec` runs with the tool's own environment, which must hold the names `start --json` lists in `required_env_names` (Claude's login variables); from cron they come from `--env-file`.
+An id the tool never saw (a crash before it was stored, or none in the output) is not recoverable by the tool: it never scans or looks a session up by label (see Residual risks). `start` stages copies of the prompt and inputs, so the tool's own files are never read by the session. The adopting `exec` runs with the tool's own environment, which must hold the names `start --json` lists in `required_env_names` (Claude's login variables); from cron they come from `--env-file`.
 
 **4.** Per-call settings (each replaceable by the config keys in Config, never by another tool's config):
 
@@ -806,7 +822,7 @@ Every claude-session result maps to one retro state, reason and exit (Exit codes
 | the tool's own deadline was reached (item 6) | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
 | exit 15, or `launch_interrupted`, after the tool forwarded a signal | `canceled` | `interrupted` | 129, 130, 143 |
 | `start` exit 12 `launch_failed` | `failed` | `session_not_started` | 12 `session_not_started`, `details.end_reason` from the envelope, `retryable` |
-| `start` any other result (exit 1, 2, 20, unparseable, timeout) | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
+| `start` any other result (exit 1, 2, 20, unparseable, timeout, signal); an id found in its output is recorded and cleaned up | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
 | adopting `exec` with `phase: launch` (exit 11, 12, 13) | `failed` | `session_not_started` | 12 `session_not_started`, `details.end_reason`, `retryable` |
 | exit 0, outcome `done` | validated: `done`, or `failed` | null, or a validation reason | 0, or 22 with the reason |
 | exit 13, session phase, outcome `blocked` / `needs-input` | `escalated` | `session_blocked` / `session_needs_input` | 13 `needs_human` |
@@ -844,12 +860,13 @@ def cleanup(rs):                                  # rs: a retro_sessions row; id
     files_ok &= delete_local(rs.retro_id)
     rs.cleanup = "pending" if not files_ok else ("done" if purged else "incomplete")
 def remove_tree(parent, rel):                     # absent: True; fd-based; never follows a symlink
+    lstat the last component of rel first: a symlink there is unlinked (never followed) and the result is True
     open parent, then each component of rel, with O_DIRECTORY|O_NOFOLLOW; every directory owned by me, same device
     walk depth first (at most 32 levels): unlinkat each entry (a symlink is unlinked, never followed); rmdir each directory
     any entry of another owner or device, or deeper than 32 -> False (left in place)
 def delete_local(retro_id): remove prompts/<retro_id>/ and outcomes/<retro_id>.json; return True when both are gone
 claude_config_dir = $CLAUDE_CONFIG_DIR when set and absolute, else ~/.claude
-project_dir must match ^[A-Za-z0-9-]{1,200}$ (it is project_dir_name of the session's work directory, Retro launch item 1)
+project_dir must match ^[A-Za-z0-9-]{1,200}$ (it is project_dir_name of the session's work directory, Retro launch item 3); a row that fails it is marked skipped and nothing is removed
 ```
 
 `pending` and `incomplete` rows are retried by housekeeping (`retro run` step 5 and `prune`), whether or not the retro row still exists; `incomplete` means only claude-session's own copy remains, and turns `done` once claude-session's `reconcile` has removed it. `skipped` means recovery found a session without the tool's labels and touched nothing. `validate` warns `cleanup_incomplete` while a row is `pending` or `incomplete` for more than a day. With `retro.remove_run_transcripts: false` the Retro object's `warnings` includes `transcripts_kept`.
@@ -911,10 +928,10 @@ every parse of claude-session output uses the same guard: an exception is claude
      if the model wrote at least one finding and none survive                         -> no_valid_findings
      zero findings written by the model is a valid done retro
      ids are kept as written (no renumbering); dropped.findings and dropped.candidates count both causes
-8  text: normalize and redact every model string; never a failure
+8  text: normalize, redact, then cut every model string to its cap; never a failure
 ```
 
-Check 8: every model string (`summary`, `title`, `detail`, `target_hint`, `proposal`) goes through `fix_surrogates`, NFC, the redactor (see Digest) and, for each literal value v used by the masks, a check for `base64(v)` (three alignments), hex and URL-encoded `v`; each hit becomes `[REDACTED:<kind>]` and counts in the Retro object's `redacted`. Control, escape and bidi characters are kept as stored text but every display sanitizes them. The stored artifact is the checked, redacted object in `retro_artifacts`; the frozen bytes are never written to disk by the tool.
+Check 8: every model string (`summary`, `title`, `detail`, `target_hint`, `proposal`) goes through `fix_surrogates`, NFC, the redactor (see Digest) and, for each literal value v used by the masks, a check for `base64(v)` (three alignments), hex and URL-encoded `v`; each hit becomes `[REDACTED:<kind>]` and counts in the Retro object's `redacted`. The cut comes last: the string is shortened to its cap (`summary` 2000, `title` 120, `detail` 1500, `target_hint` 200, `proposal` 1500 characters) on a code point boundary and never inside a `[REDACTED:<kind>]` marker, so a stored string never exceeds its cap even when NFC or a marker made it longer; check 4 still rejects a string that is over its cap as written. Control, escape and bidi characters are kept as stored text but every display sanitizes them. The stored artifact is the checked, redacted object in `retro_artifacts`; the frozen bytes are never written to disk by the tool.
 
 The failure reasons, listed once, are `runner_lost`, `session_not_started`, `claude_session_error`, `session_failed`, `no_artifact`, `artifact_invalid`, `identity_mismatch`, `marker_mismatch` and `no_valid_findings`; the last five are the validation reasons (exit 22). A failed check 7 drops only the findings (or candidates) with the bad reference and records `dropped` counts; any other failed check discards the whole artifact. `counts.findings` equals the stored findings length (tool-enforced).
 
@@ -945,19 +962,19 @@ The schemas hold the field lists; this section keeps only rules a schema cannot 
 - **Session object.** `project` is the first non-empty `cwd` of the main file (capped at 4096); when none, the project directory name with flag `project_from_dir`. `entrypoint` is `cli` mapped to `interactive`, a value starting `sdk-` to `headless`, anything else or missing to `unknown`, from the first line that has the key; `version` is the last seen. `harness` is null or the snapshot (`run` and `updated_at` included; `kind` is the launch kind; `labels` is an array of `key=value` strings; `outcome` and `end_reason` are lowercase tokens owned by claude-session, not enums here; `cost_usd` is claude-session's cost of that run, never added to `cost`; `source` is always `harness`). Counters include agents; `tokens` is the main agent's with `tokens.subagents` separate; `cost` includes agents. Aggregation: a `usage` or totals `active_seconds` is null when every contributing session's is null; `ended_at >= started_at` holds by construction; `tool_errors` may exceed `tool_calls` (an error whose call sits in a file that was pruned or never read).
 - **Retro object.** `key` is computed as in Retro lifecycle (Key). `key` and `coverage` are set when the row is inserted (Order of checks step 13) and are never null. `csession_id`, `cost_usd`, `num_turns`, `outcome`, `sandbox_active`, `cleanup`, `summary`, `model` and `finished_at` are nullable. `scope` is descriptive: `{sessions, labels, project, since, until, kind, outcome}` as given, with `sessions` resolved to full ids, `since` and `until` kept as typed (a duration stays a duration) and the resolved times in `scope_resolved: {since, until}`. `counts` is `{sessions, skipped, over_cap, items, findings, candidates}`. `metrics` maps metric ids (`s1.tool_calls`, `total.denials`) to numbers. `dropped` is `{findings, candidates}`. `skipped` rows are `{session_id, reason}` with reason `live`, `transcript_missing`, `transcript_changed` or `empty` (at most 1000 rows; `counts.skipped` is the total; candidates never reached are in `counts.over_cap`). `sessions` is `[{ref, session_id, csession_id}]` (the kept sessions, `csession_id` from the harness snapshot or null), kept for the retro's life. `cleanup` is the `retro_sessions` row's state (`pending`, `done`, `incomplete`, `skipped`), null when the retro never got a csession id. `warnings` is a closed set: `transcripts_kept`, `recovery_skipped`, `ingest_busy`. `redacted` counts redactions in model text. `outcome` is a lowercase token from claude-session. `reason` and `state` are coupled (see the schema `allOf`): non-final states carry null; `done` null with a non-null `summary`; `failed` a failure reason; `escalated` `hook_escalated`, `session_blocked` or `session_needs_input`; `canceled` `interrupted` or `hook_vetoed`.
 - **Untrusted fields.** Fields that carry transcript or model text are marked `x-untrusted` in the schemas: Retro `summary`, finding `title` and `detail`, candidate `target_hint` and `proposal`, harness `labels`, `skill` and `repo`, session `project`, `version`, agent `agent_type`, model names, usage keys, ingest `warnings` and the `retro show` `digest`. A consumer must treat all of them as untrusted.
-- **Display.** Every non-JSON output passes each untrusted string (every field marked `x-untrusted`, every path, model, tool and label value, every `warnings` string) through the sanitizer at print time. `--json` output is ASCII (`ensure_ascii=True`), so control and bidi characters are escaped.
+- **Display.** Every non-JSON output passes every string that is not one of the tool's own constants through the sanitizer at print time: every field marked `x-untrusted`, every path, model, tool and label value, every `warnings` string, and every error message, hint and detail (stderr included). `--json` output is ASCII (`ensure_ascii=True`), so control and bidi characters are escaped.
 
 Sessions, retros and `usage` output must be validated by tests against these schemas.
 
 ## Hooks
 
-Hooks are configured in the tool's own config (and drop-ins; there is no `--hook` flag), run via `sh -c` in their own process group, and receive a JSON payload on stdin. Environment: `SESSION_AUDIT_HOOK`, `SESSION_AUDIT_ID`, `SESSION_AUDIT_OBJECT_TYPE`. Hooks inherit the tool's environment. Default timeout 30 seconds: SIGTERM to the hook's process group, 5 s, SIGKILL. Payloads carry ids, counts and enums, never transcript or model text, and are closed objects. Schemas in [`schemas/hooks/`](../schemas/hooks/).
+Hooks are configured in the tool's own config (and drop-ins; there is no `--hook` flag), run via `sh -c` in their own process group, and receive a JSON payload on stdin. Environment: `SESSION_AUDIT_HOOK`, `SESSION_AUDIT_ID`, `SESSION_AUDIT_OBJECT_TYPE`. Hooks inherit the tool's environment. Default timeout 30 seconds: SIGTERM to the hook's process group, 5 s, SIGKILL. Payloads carry ids, counts and enums, never transcript or model text, and are closed objects. Schemas are in [`schemas/hooks/`](../schemas/hooks/).
 
 | Hook | When | Payload (besides `tool`, `hook`, `object_type`, `object_id`, `event_id`, `labels`) | Effect |
 |---|---|---|---|
-| `pre-retro` | After the row is created (Order of checks step 14) and before the session is launched; a `daily_limit` refusal never runs it | `scope`, `sessions`, `digest_bytes`, `items`, `skill`, `model`, `key`, `max_turns`, `timeout_seconds` | exit 0 continue; 13 escalate (retro `escalated`, reason `hook_escalated`, exit 13); other non-zero, a timeout or a signal: veto (retro `canceled`, reason `hook_vetoed`, exit 11) |
-| `post-retro` | When a retro reaches a final state, after cleanup | `retro_id`, `state`, `reason`, `findings`, `candidates`, `cost_usd` | cannot undo; failure logged and warned |
-| `post-attention` | A closed `reason` | `reason` (`retro_failed`, `ingest_failing`), `object_type` (`retro` or `ingest`), `details` (a closed set of ids and enums) | cannot undo |
+| `pre-retro` (`schemas/hooks/pre-retro.json`) | After the row is created (Order of checks step 14) and before the session is launched; a `daily_limit` refusal never runs it | `scope`, `sessions`, `digest_bytes`, `items`, `skill`, `model`, `key`, `max_turns`, `timeout_seconds` | exit 0 continue; 13 escalate (retro `escalated`, reason `hook_escalated`, exit 13); other non-zero, a timeout or a signal: veto (retro `canceled`, reason `hook_vetoed`, exit 11) |
+| `post-retro` (`schemas/hooks/post-retro.json`) | When a retro reaches a final state, after cleanup | `retro_id`, `state`, `reason`, `findings`, `candidates`, `cost_usd` | cannot undo; failure logged and warned |
+| `post-attention` (`schemas/hooks/post-attention.json`) | A closed `reason` | `reason` (`retro_failed`, `ingest_failing`), `object_type` (`retro` or `ingest`), `details` (a closed set of ids and enums) | cannot undo |
 
 Entries of one hook run in config order (drop-ins appended in lexical order). `pre-retro`: the first entry that exits non-zero decides (13 escalate, any other non-zero, a timeout or a death by signal veto); later entries do not run.
 
@@ -993,7 +1010,7 @@ The hooks exclude their own retro runs: a `post-state-change` hook of claude-ses
 
 Location `~/.config/session-audit/config.yaml` (respecting `XDG_CONFIG_HOME`), drop-ins `~/.config/session-audit/config.d/*.yaml` merged in lexical order (maps merge, hook lists append), `--config` overrides. Schema [`schemas/config.json`](../schemas/config.json), example `config.example.yaml`. Precedence: flags, then environment variables for the few keys that have one, then config, then built-in defaults. There is no `repos:` layer.
 
-`retro run`, `retro delete`, `ingest`, `prune` and `cron` refuse with exit 20 `config_unsafe` when the config file, `config.d/`, a drop-in or any directory from the config directory up to `$HOME` is a symlink, not owned by the user (root-owned ancestors above `$HOME` are not checked), or group or other writable; read-only commands and `validate` report it. `retro.permission_profile`, each plugin directory and its `SKILL.md` are checked by the same rule before a launch (`config_unsafe`). YAML is loaded with `yaml.safe_load` and a 1 MiB size cap per file.
+`retro run`, `retro delete`, `ingest`, `prune` and `cron` refuse with exit 20 `config_unsafe` when the config file, `config.d/`, a drop-in or any directory from the config directory up to `$HOME` is a symlink, not owned by the user (root-owned ancestors above `$HOME` are not checked), or group or other writable; read-only commands and `validate` report it. `retro.permission_profile` is checked by the same rule before a launch (`config_unsafe`). Each `retro.plugin_dirs` entry is checked as a whole tree by the skill preflight (exit 12 `unsafe_plugin_dir`, see Retro launch item 0); the bundled plugin gets no mode check. YAML is loaded with `yaml.safe_load` and a 1 MiB size cap per file.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -1013,7 +1030,7 @@ Location `~/.config/session-audit/config.yaml` (respecting `XDG_CONFIG_HOME`), d
 | `limits.retros_per_day` | `5` | Retro runs started per day (see Retro lifecycle, Daily limit) |
 | `retro.skill` | `session-audit:audit` | The slot's skill (`plugin:skill`) |
 | `retro.skill_marker` | none | Marker for a custom skill |
-| `retro.plugin_dirs` | `[]` | Extra plugin directories for a custom skill; each passed with `--plugin-dir`. At most 8 absolute paths; claude-session refuses credential locations (so a plugin under `~/.claude/plugins/` cannot be used) and copies each with caps of 10,000 entries, 64 MiB and 32 levels; the launch plan check (Order of checks step 11) reports any other refusal as `session_not_started` with `end_reason: unsafe_plugin_dir` before anything is stored |
+| `retro.plugin_dirs` | `[]` | Extra plugin directories for a custom skill; each passed with `--plugin-dir`. At most 8 absolute paths; claude-session refuses credential locations (so a plugin under `~/.claude/plugins/` cannot be used) and copies each with caps of 10,000 entries, 64 MiB and 32 levels; the launch plan check (Order of checks step 11) reports any other refusal as `session_not_started` with `end_reason: unsafe_plugin_dir` before anything is stored; the preflight also requires every file and directory of each entry to be owned by the user and not group or other writable |
 | `retro.model` | none | Claude Code's default when none |
 | `retro.timeout` | `20m` | Session timeout (1 s to 2 h; a value in `ms` below 1000 is refused) |
 | `retro.max_turns` | `12` | Session turn bound |
@@ -1085,7 +1102,8 @@ ingest skips a file of a pruned session unless its mtime > pruned_at (then it is
 pruned_sessions rows older than 2 x retention.sessions are removed
 harness_runs rows with updated_at < now - retention.sessions are removed
 prune retros with created_at < now - retention.retros, only in a final state (with their retro_artifacts row and digest)
-retro_sessions rows are removed when cleanup is done, incomplete or skipped and created_at < now - max(retention.sessions, 60d)
+retro_sessions rows are removed when cleanup is done, incomplete or skipped AND (no transcript root holds the row's project_dir
+    (lexists, checked at prune) OR created_at < now - 400 days)
 prune digests older than retention.digests; log entries older than retention.log (rewrite under the log lock)
 retro_starts rows older than two days are removed
 again_of may name a deleted retro (it dangles; retro show of that id exits 10)
@@ -1128,20 +1146,21 @@ uninstall --dry-run: block lists the lines that would be removed
 
 ## Platform notes
 
-Linux and WSL (Ubuntu) are tested. macOS is expected to work: the roots, `flock` and the sandbox rules are the same, and a macOS checklist is part of the live-verification issue. A retro needs bubblewrap and socat on Linux and WSL2 (claude-session's requirement). A retro's cwd is claude-session's session directory; the live tests run a retro with the default `~/.local/state` and with `XDG_STATE_HOME` set. Whether Claude Code shortens project directory names over 200 characters is unverified; the launch plan check refuses such a launch either way.
+Linux and WSL (Ubuntu) are tested. macOS is expected to work: the roots, `flock` and the sandbox rules are the same, and a macOS checklist is part of the live-verification issue. A retro needs bubblewrap and socat on Linux and WSL2 (claude-session's requirement). A retro's cwd is claude-session's session directory; the live tests run a retro with the default `~/.local/state` and with `XDG_STATE_HOME` set. Whether Claude Code shortens project directory names over 200 characters is unverified; the launch plan check refuses such a launch either way. How Claude Code encodes a non-ASCII character in a project directory name (one dash per code point or per UTF-16 unit) is unverified; the plan check refuses a session directory path with any non-ASCII character.
 
 ## Residual risks
 
 - Redaction is best effort; a secret in a shape the patterns do not know can reach the digest. The sandbox (no network, no write beyond the artifact) limits what a leaked value can do inside the session. claude-session's artifact check catches only literal values of its own `claude_auth_env` and `secret_env` (8 characters or more); session-audit redacts the artifact text again before storing, which is still best effort.
 - Findings are model opinions about untrusted text. Evidence references prove only that the cited item exists in the digest, not that the finding is right. Runs of the same digest vary. Identity echoes, the marker and evidence references are integrity checks against mistakes; an injected session can satisfy all of them.
 - Claude Code's own bundled skills remain loadable through `Skill` (claude-session: `Skill(...)` rules do not restrict skills); `--tools Read Write Bash Skill` removes the tools a skill would need to act, and the live test lists the offered tools and skills of a retro session.
-- A forged transcript (a same-user process can write into `~/.claude/projects`) can add sessions with chosen counts and chosen text. The store treats every transcript as untrusted data; nothing it holds is an authorization. Counts are bounded so a forged line cannot overflow, wedge or make a session unprunable.
+- A forged transcript (a same-user process can write into `~/.claude/projects`) can add sessions with chosen counts and chosen text. The store treats every transcript as untrusted data; nothing it holds is an authorization. Every numeric field is validated (finite, non-negative, capped) before it is stored, so a forged line cannot overflow a sum, store infinity or NaN, print invalid JSON, wedge ingest or make a session unprunable; it can still add counts and costs within the caps. The owner order cannot authenticate a copy: a forged copy of an event key with a larger `output_tokens` becomes its owner and moves that event to the forger's session, and one duplicated event in a victim's main file makes that session's `reported_usd` null and hides `cost_mismatch`.
 - Harness labels are unauthenticated, and a snapshot is a copy at one moment.
 - `remove_run_transcripts` deletes files in Claude Code's store; it removes only the transcript project directory of the tool's own retro session, matched by its exact name, with fd-based checks.
 - A `forget --purge` that cannot finish leaves claude-session's copy until its `reconcile` (30 days by default); the tool records `incomplete` and checks again at every housekeeping.
-- When an event owner's session is pruned, its copies are not re-evaluated until a file holding them is read again.
+- When an event owner's session is pruned, its remaining copies are not re-evaluated until a file holding them is read again, and a copy beyond the 8 best of a key was never stored, so it cannot take over.
 - When Claude Code rewrites `sessionId` on copied lines, per-session attribution of a verbatim copy falls back to the file path (totals stay right).
-- A crash or SIGKILL between `start` returning and the id being stored leaves a pending claude-session session the tool never recorded; it ends `never_adopted` after claude-session's `lost_grace` and keeps the staged digest copy until the user forgets it (recovery never looks a session up by label).
+- A crash or SIGKILL between `start` returning and the id being stored, a `start` that times out or is signaled after allocating without printing its id, and any exit 12 of `start` other than `launch_failed` whose output holds no id leave a pending claude-session session the tool never recorded; it ends `never_adopted` after claude-session's `lost_grace` and claude-session's `reconcile` removes it 30 days later, and until then it keeps the staged copy of the digest (recovery never looks a session up by label or by scanning). When the id was printed, the tool records it and cleans up as for `launch_failed`.
+- Lease liveness is the holder's PID with its start time and nothing stronger: a process in another PID namespace or host that shares the state directory looks dead and its lease is taken over (not supported), and a machine suspend can pass `expires_at` while the holder lives, so the next run recovers a healthy retro and the holder's compare-and-set write stops it.
 - The project directory is matched by its exact encoded name; a same-user process that creates another directory encoding to the same name (it needs the random csession id) could have it removed.
 - The cron env-file is sourced by the shell; a file its owner makes writable after install is run as shell code until `validate` reports it.
 - Transcript format changes in future Claude Code versions can make counts wrong without failing; the Session object's `unknown_line_types`, `lines.unknown` and the `no_usage` flag are the signals.

@@ -70,7 +70,8 @@ retro:
   # skill_marker: example-marker
   # Extra plugin directories (absolute paths, at most 8) for a custom skill; each is
   # passed with --plugin-dir. claude-session refuses credential locations, so a plugin
-  # under ~/.claude/plugins/ cannot be used.
+  # under ~/.claude/plugins/ cannot be used. Every file and directory of each entry must
+  # be owned by you and not group or other writable.
   # plugin_dirs: []
   # Model for the retro session. Default: Claude Code's default. Env: SESSION_AUDIT_MODEL.
   # model: example-model

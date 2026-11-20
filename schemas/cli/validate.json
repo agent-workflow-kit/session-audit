@@ -41,6 +41,7 @@
                   "store_newer",
                   "permission_profile_missing",
                   "plugin_missing",
+                  "unsafe_plugin_dir",
                   "claude_session_missing",
                   "claude_session_too_old",
                   "probe_failed",

@@ -65,7 +65,7 @@
           "minimum": 1,
           "maximum": 1000,
           "default": 3,
-          "description": "Consecutive failed cron ingests before ingest_failing."
+          "description": "Consecutive failed full ingests before ingest_failing."
         }
       },
       "required": [],
@@ -215,7 +215,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[a-z0-9][a-z0-9-]{0,63}(?![\\s\\S])",
           "default": "session-audit:audit",
           "description": "The slot's skill."
         },
@@ -236,7 +236,7 @@
           "maxItems": 8,
           "uniqueItems": true,
           "default": [],
-          "description": "Extra plugin directories (absolute paths) for a custom skill; each passed with --plugin-dir. claude-session refuses credential locations (a plugin under ~/.claude/plugins cannot be used)."
+          "description": "Extra plugin directories (absolute paths) for a custom skill; each passed with --plugin-dir. claude-session refuses credential locations (a plugin under ~/.claude/plugins cannot be used). The preflight also requires every file and directory of each entry to be owned by the user and not group or other writable (exit 12 unsafe_plugin_dir)."
         },
         "model": {
           "type": "string",
