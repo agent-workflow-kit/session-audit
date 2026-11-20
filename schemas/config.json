@@ -161,7 +161,7 @@
           "minimum": 0,
           "maximum": 1,
           "default": 0.1,
-          "description": "Fraction for the cost_mismatch flag."
+          "description": "Fraction for the cost_mismatch flag (set only when the session's reported cost is not null)."
         }
       },
       "required": [],
@@ -173,7 +173,7 @@
         "sessions": {
           "$ref": "#/$defs/duration_d",
           "default": "400d",
-          "description": "Sessions, agents, events, harness snapshots (at most 3650 d)."
+          "description": "Sessions, agents, events, harness runs (at most 3650 d)."
         },
         "retros": {
           "$ref": "#/$defs/duration_d",
@@ -236,7 +236,7 @@
           "maxItems": 8,
           "uniqueItems": true,
           "default": [],
-          "description": "Extra plugin directories (absolute paths) for a custom skill; each passed with --plugin-dir."
+          "description": "Extra plugin directories (absolute paths) for a custom skill; each passed with --plugin-dir. claude-session refuses credential locations (a plugin under ~/.claude/plugins cannot be used)."
         },
         "model": {
           "type": "string",
@@ -248,14 +248,14 @@
           "anyOf": [
             {
               "type": "number",
-              "exclusiveMinimum": 0,
+              "minimum": 1,
               "maximum": 7200
             },
             {
               "type": "string",
               "minLength": 1,
               "maxLength": 32,
-              "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?(?![\\s\\S])"
+              "pattern": "^(?!0+(\\.0+)?(ms|s|m)?(?![\\s\\S]))(?:[0-9]{1,9}(\\.[0-9]+)?(s|m)?|[1-9][0-9]{3,8}ms)(?![\\s\\S])"
             }
           ],
           "description": "Session timeout, 1 s to 2 h.",
@@ -305,7 +305,7 @@
             "off"
           ],
           "default": "required",
-          "description": "Sandbox level passed per call."
+          "description": "Sandbox level passed per call. A lower value is passed only when stdin is a terminal; without one retro run refuses (config_unsafe). validate warns sandbox_lowered."
         },
         "setting_sources": {
           "type": "array",
@@ -345,8 +345,8 @@
           "items": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 64,
-            "pattern": "^[A-Za-z][A-Za-z0-9_*:.-]{0,63}(?![\\s\\S])"
+            "maxLength": 32,
+            "pattern": "^[A-Z][A-Za-z]{1,31}(?![\\s\\S])"
           },
           "minItems": 1,
           "maxItems": 32,
@@ -357,7 +357,7 @@
             "Bash",
             "Skill"
           ],
-          "description": "The --tools list."
+          "description": "The --tools list: names from claude-session's --tools list (the launch plan check catches the rest)."
         },
         "remove_run_transcripts": {
           "type": "boolean",
@@ -384,28 +384,28 @@
         "prompt_chars": {
           "type": "integer",
           "minimum": 20,
-          "maximum": 100000,
+          "maximum": 65536,
           "default": 500,
           "description": "Cut of a prompt item."
         },
         "assistant_chars": {
           "type": "integer",
           "minimum": 20,
-          "maximum": 100000,
+          "maximum": 65536,
           "default": 300,
           "description": "Cut of an assistant item."
         },
         "arg_chars": {
           "type": "integer",
           "minimum": 20,
-          "maximum": 100000,
+          "maximum": 65536,
           "default": 200,
           "description": "Cut of a tool argument summary."
         },
         "error_chars": {
           "type": "integer",
           "minimum": 20,
-          "maximum": 100000,
+          "maximum": 65536,
           "default": 300,
           "description": "Cut of an error, denial, interruption or rejection item."
         }
@@ -487,10 +487,18 @@
                       "maxLength": 4096
                     },
                     "since": {
-                      "$ref": "#/$defs/duration_d"
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 10,
+                      "pattern": "^[1-9][0-9]{0,8}[smhd](?![\\s\\S])",
+                      "description": "A duration ago, the WHEN grammar: <n>(s|m|h|d)."
                     },
                     "until": {
-                      "$ref": "#/$defs/duration_d"
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 10,
+                      "pattern": "^[1-9][0-9]{0,8}[smhd](?![\\s\\S])",
+                      "description": "A duration ago, the WHEN grammar: <n>(s|m|h|d)."
                     },
                     "kind": {
                       "type": "string",
@@ -657,7 +665,7 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._@/-]{1,64}(?![\\s\\S])",
-          "description": "Actor name. Default: the OS user name."
+          "description": "Actor name. Default: the OS user name with every character outside [A-Za-z0-9._@/-] replaced by _, cut to 64."
         }
       },
       "required": [],
@@ -699,11 +707,19 @@
       "description": "Seconds, or a string [0-9]+(.[0-9]+)?(ms|s|m|d)? (no unit means seconds; zero is refused). Maximum 315360000 s."
     },
     "size": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 16,
-      "pattern": "^[0-9]{1,12}(B|KB|MB)?(?![\\s\\S])",
-      "description": "Bytes, or a number followed by B, KB or MB (1 KB = 1024 bytes)."
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "pattern": "^[1-9][0-9]{0,9}(B|KB|MB)?(?![\\s\\S])"
+        }
+      ],
+      "description": "Bytes, or a whole number followed by B, KB or MB (1 KB = 1024 bytes); no fraction, no zero."
     }
   }
 }

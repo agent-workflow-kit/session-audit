@@ -27,7 +27,7 @@
       "type": "string",
       "minLength": 8,
       "maxLength": 128,
-      "pattern": "^[A-Za-z0-9._:-]{8,128}(?![\\s\\S])"
+      "pattern": "^ev-[a-z2-7]{26}(?![\\s\\S])"
     },
     "labels": {
       "type": "object",

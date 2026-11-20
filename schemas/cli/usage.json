@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "session-audit/cli/usage.json",
   "title": "usage output",
-  "description": "Aggregation of counted events. Order: by key ascending when the first dimension is day, week or month, else by total tokens descending (null last), then key. With the tool dimension, tokens, cost, active_seconds and interruptions are null. Each cost basis is shown separately.",
+  "description": "Aggregation of counted events. Order: by key ascending when the first dimension is day, week or month, else by total tokens descending (null last), then key. With the tool dimension, tokens, cost, active_seconds and interruptions are null. Each cost basis is shown separately; reported_usd in a row is all-or-null and null under --since or --until.",
   "type": "object",
   "properties": {
     "by": {

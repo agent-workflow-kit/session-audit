@@ -24,14 +24,7 @@
           ]
         },
         "key": {
-          "anyOf": [
-            {
-              "$ref": "../defs.json#/$defs/sha256"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "../defs.json#/$defs/sha256"
         },
         "scope": {
           "$ref": "../defs.json#/$defs/scope"
@@ -67,14 +60,7 @@
           "additionalProperties": false
         },
         "coverage": {
-          "anyOf": [
-            {
-              "$ref": "../defs.json#/$defs/coverage"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "../defs.json#/$defs/coverage"
         },
         "skipped": {
           "type": "array",
@@ -204,7 +190,8 @@
               "enum": [
                 "pending",
                 "done",
-                "incomplete"
+                "incomplete",
+                "skipped"
               ]
             },
             {
@@ -216,7 +203,6 @@
           "type": "array",
           "items": {
             "enum": [
-              "purge_incomplete",
               "transcripts_kept",
               "recovery_skipped",
               "ingest_busy"
@@ -368,16 +354,6 @@
               "reason": {
                 "type": "null"
               },
-              "key": {
-                "not": {
-                  "type": "null"
-                }
-              },
-              "coverage": {
-                "not": {
-                  "type": "null"
-                }
-              },
               "summary": {
                 "not": {
                   "type": "null"
@@ -476,7 +452,12 @@
           "items": {
             "$ref": "../defs.json#/$defs/session_id"
           },
-          "maxItems": 1000
+          "maxItems": 1000,
+          "description": "At most 1000 ids; matched_total counts them all."
+        },
+        "matched_total": {
+          "type": "integer",
+          "minimum": 0
         },
         "skipped": {
           "type": "array",
@@ -484,6 +465,11 @@
             "$ref": "../defs.json#/$defs/skipped"
           },
           "maxItems": 1000
+        },
+        "over_cap": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Candidates never reached because retro.max_sessions was filled."
         },
         "items": {
           "type": "integer",
@@ -563,6 +549,26 @@
           },
           "maxItems": 200
         },
+        "reused_retro": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/retro_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "running_retro": {
+          "anyOf": [
+            {
+              "$ref": "../defs.json#/$defs/retro_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "daily_remaining": {
           "type": "integer",
           "minimum": 0
@@ -572,7 +578,9 @@
         "dry_run",
         "scope",
         "matched",
+        "matched_total",
         "skipped",
+        "over_cap",
         "items",
         "items_by_kind",
         "digest_bytes",
@@ -580,6 +588,8 @@
         "skill",
         "model",
         "launch_flags",
+        "reused_retro",
+        "running_retro",
         "daily_remaining"
       ],
       "additionalProperties": false,

@@ -21,7 +21,7 @@ L3 (workflow). Works fully standalone; no tmux, worktree tool or notifier is req
 
 | Command | Purpose |
 |---|---|
-| `ingest` | Read new transcript bytes into the store; capture claude-session facts when installed |
+| `ingest` | Read new transcript bytes into the store; capture claude-session facts when installed (`--session` takes a claude-session id) |
 | `sessions`, `usage`, `show` | Query the store |
 | `retro run` | Run a retro over a scope (`--session`, `--label`, `--project`, `--since`, `--until`, `--kind`, `--outcome`) |
 | `retro list`, `retro show`, `retro delete` | Read and remove stored retros |
@@ -36,9 +36,9 @@ Every command takes `--json`. The full interface, exit codes and refusal reasons
 
 | Tool | Binding | Needed for | Install |
 |---|---|---|---|
-| claude-session | A (hard) | `retro run` (required); harness facts during `ingest` (optional) | `uv tool install git+https://github.com/agent-workflow-kit/claude-session` |
+| claude-session, 0.45.2 or later | A (required for `retro run`, optional otherwise) | `retro run`; harness facts during `ingest` | `uv tool install git+https://github.com/agent-workflow-kit/claude-session` |
 
-A retro also needs the sandbox prerequisites claude-session documents (bubblewrap and socat on Linux and WSL2) and claude-session 0.45.0 or later. A missing or older claude-session makes `retro run` exit 12 and name this install command.
+A retro also needs the sandbox prerequisites claude-session documents (bubblewrap and socat on Linux and WSL2) and claude-session 0.45.2 or later. A missing or older claude-session makes `retro run` exit 12 and name this install command.
 
 ## Quick start
 
@@ -46,7 +46,7 @@ A retro also needs the sandbox prerequisites claude-session documents (bubblewra
 uv tool install git+https://github.com/agent-workflow-kit/session-audit
 session-audit ingest
 session-audit usage --by day,model --since 30d
-session-audit retro run --since 7d --project ~/dev/my-project --dry-run
+session-audit retro run --since 7d --project ~/dev/my-project --dry-run   # a retro needs claude-session; a dry run spends nothing
 session-audit cron install --ingest-every 1h
 ```
 

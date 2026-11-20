@@ -102,7 +102,6 @@
           "cleanup_incomplete",
           "sandbox_lowered",
           "env_file_unsafe",
-          "no_cron_block",
           "claude_session_missing"
         ]
       },

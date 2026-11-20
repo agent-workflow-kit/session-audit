@@ -22,14 +22,7 @@
       ]
     },
     "key": {
-      "anyOf": [
-        {
-          "$ref": "../defs.json#/$defs/sha256"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "../defs.json#/$defs/sha256"
     },
     "scope": {
       "$ref": "../defs.json#/$defs/scope"
@@ -65,14 +58,7 @@
       "additionalProperties": false
     },
     "coverage": {
-      "anyOf": [
-        {
-          "$ref": "../defs.json#/$defs/coverage"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "../defs.json#/$defs/coverage"
     },
     "skipped": {
       "type": "array",
@@ -202,7 +188,8 @@
           "enum": [
             "pending",
             "done",
-            "incomplete"
+            "incomplete",
+            "skipped"
           ]
         },
         {
@@ -214,7 +201,6 @@
       "type": "array",
       "items": {
         "enum": [
-          "purge_incomplete",
           "transcripts_kept",
           "recovery_skipped",
           "ingest_busy"
@@ -373,16 +359,6 @@
         "properties": {
           "reason": {
             "type": "null"
-          },
-          "key": {
-            "not": {
-              "type": "null"
-            }
-          },
-          "coverage": {
-            "not": {
-              "type": "null"
-            }
           },
           "summary": {
             "not": {

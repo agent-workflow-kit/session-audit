@@ -5,7 +5,7 @@
 # Durations: a number of seconds or a string such as 300s, 20m (no unit = seconds,
 # zero is refused); keys that name days (retention.*, and since/until of
 # schedule.retro.scope) also accept d, e.g. 400d. There is no h unit: write 60m.
-# Sizes: bytes, or a number with B, KB or MB (1 KB = 1024 bytes).
+# Sizes: whole bytes, or a whole number with B, KB or MB (1 KB = 1024 bytes); no fraction, no zero.
 # Unknown keys are refused. Schema: schemas/config.json.
 
 # Replaces both default transcript roots (~/.claude/projects and $CLAUDE_CONFIG_DIR/projects).
@@ -44,12 +44,12 @@ harness:
 #       cache_write: 3.75
 
 cost:
-  # Fraction by which reported and estimated cost may differ before the
-  # cost_mismatch flag is set.
+  # Fraction by which reported and estimated cost may differ before the cost_mismatch
+  # flag is set (only for a session that has a reported cost).
   mismatch_margin: 0.10
 
 retention:
-  # Sessions, agents, events and harness snapshots (by ended_at).
+  # Sessions, agents, events and harness runs (by coalesce(ended_at, last_ingested_at)).
   sessions: 400d
   # Stored retros, with their artifact and digest.
   retros: 180d
@@ -59,7 +59,8 @@ retention:
   log: 90d
 
 limits:
-  # Retros started per day (every retro that reached running counts; vetoed, refused and reused runs do not).
+  # Retro runs started per day. A retro waiting on its pre-retro hook holds a place; vetoed,
+  # refused, reused and dry runs do not count, and a run that never reached the model is refunded.
   retros_per_day: 5
 
 retro:
@@ -68,7 +69,8 @@ retro:
   # Marker a custom skill must write into the artifact. Default: none.
   # skill_marker: example-marker
   # Extra plugin directories (absolute paths, at most 8) for a custom skill; each is
-  # passed with --plugin-dir.
+  # passed with --plugin-dir. claude-session refuses credential locations, so a plugin
+  # under ~/.claude/plugins/ cannot be used.
   # plugin_dirs: []
   # Model for the retro session. Default: Claude Code's default. Env: SESSION_AUDIT_MODEL.
   # model: example-model
@@ -83,15 +85,15 @@ retro:
   quiet_after: 30m
   # Replaces the bundled permission profile file. Default: the bundled file.
   # permission_profile: /path/to/profile.json
-  # Sandbox level passed per call (required, preferred or off). A lower level makes
-  # validate warn, and a scheduled retro refuses to run with it.
+  # Sandbox level passed per call (required, preferred or off). A lower level is passed
+  # only when stdin is a terminal (retro run refuses without one) and makes validate warn.
   sandbox: required
   # Setting sources passed per call. Must stay empty for a retro (claude-session
   # refuses the launch otherwise).
   setting_sources: []
   # Environment variable names passed to the retro session.
   env_allowlist: [PATH, HOME, USER, LANG, TERM]
-  # The tools list passed to the retro session.
+  # The tools list passed to the retro session (names from claude-session's --tools list).
   tools: [Read, Write, Bash, Skill]
   # Remove the retro session's own transcript files after collecting the artifact.
   remove_run_transcripts: true
@@ -101,7 +103,7 @@ digest:
   max_bytes: 200KB
   # Per-session cap.
   session_max_bytes: 20KB
-  # Characters kept of a prompt item.
+  # Characters kept of a prompt item (the four *_chars keys accept 20 to 65536).
   prompt_chars: 500
   # Characters kept of an assistant item.
   assistant_chars: 300
@@ -119,7 +121,7 @@ redaction:
 
 # Optional weekly retro run from cron (cron install adds the line). Default: absent (off).
 # weekday is 0 to 6 (0 Sunday, default 1), hour is 0 to 23 (default 9). scope.since is
-# required and is a duration ago (a number of days such as 7d).
+# required and, like scope.until, is a duration ago: <n>(s|m|h|d), for example 7d.
 # schedule:
 #   retro:
 #     weekday: 1
@@ -137,7 +139,8 @@ hooks: {}
 #     - cmd: "my-notifier --stdin-json"
 #       async: true
 
-# Actor name (me.name) written to log.jsonl. Default: the OS user name.
+# Actor name (me.name) written to log.jsonl. Default: the OS user name, with characters
+# outside [A-Za-z0-9._@/-] replaced by _ and cut to 64.
 me: {}
 # me:
 #   name: example-user
