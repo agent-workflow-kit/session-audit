@@ -5,7 +5,7 @@ description = "Analyze Claude session transcripts and outcomes: retros and usage
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = []
+dependencies = ["pyyaml>=6", "pydantic>=2.7"]
 
 [project.scripts]
 session-audit = "session_audit.cli:main"
@@ -21,7 +21,17 @@ packages = ["src/session_audit"]
 "plugin" = "session_audit/plugin"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6", "pyright>=1.1.380", "pymarkdownlnt>=0.9.41"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "pymarkdownlnt>=0.9.41",
+    "check-jsonschema>=0.30",
+    "jsonschema>=4.23",
+    "referencing>=0.35",
+    "rfc3339-validator>=0.1.4",
+    "types-pyyaml>=6",
+]
 
 [tool.ruff]
 line-length = 100
@@ -37,6 +47,7 @@ pythonVersion = "3.12"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["live: needs real models/hosts/credentials; never run in CI"]
+# `-m 'not live'` is the default; `pytest -m live` selects the live tests only.
 addopts = "-m 'not live'"
 
 [tool.semantic_release]
