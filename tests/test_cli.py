@@ -654,7 +654,9 @@ HOSTILE_ARGVS: list[list[str]] = [
 ]
 
 
-@pytest.mark.parametrize("argv", HOSTILE_ARGVS, ids=lambda a: " ".join(a)[:50].encode("ascii", "replace").decode())
+@pytest.mark.parametrize(
+    "argv", HOSTILE_ARGVS, ids=lambda a: " ".join(a)[:50].encode("ascii", "replace").decode()
+)
 def test_a_hostile_value_is_never_echoed_in_the_envelope_or_on_stderr(
     argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -817,7 +819,9 @@ def test_an_unexpected_exception_is_exit_1_without_its_text(
     assert "\x1b" not in err
 
 
-def test_the_exit_code_of_run_is_the_exit_code_of_the_process(capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_exit_code_of_run_is_the_exit_code_of_the_process(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     command = Command(("ok",), "x", lambda p: None, lambda c, a: None, lambda c, a: 7)
     assert run(capsys, ["ok"], commands=(command,))[0] == 7
 
@@ -842,7 +846,8 @@ class _Broken(io.StringIO):
 
 @pytest.mark.parametrize("where", ["write", "flush"])
 @pytest.mark.parametrize(
-    "error", [BrokenPipeError(32, "Broken pipe"), OSError(9, "Bad file descriptor"), ValueError("closed")]
+    "error",
+    [BrokenPipeError(32, "Broken pipe"), OSError(9, "Bad file descriptor"), ValueError("closed")],
 )
 def test_a_failed_stdout_write_ends_with_exit_1(
     where: str, error: Exception, capsys: pytest.CaptureFixture[str]
@@ -908,7 +913,10 @@ def test_an_interrupting_signal_exits_128_plus_n_and_prints_nothing(
             cleaned.append(True)  # work is stopped cleanly on the way out
 
     command = Command(("w",), "x", lambda p: None, lambda c, a: None, run_until_signaled)
-    before = {s: signal.getsignal(s) for s in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM, signal.SIGPIPE)}
+    before = {
+        s: signal.getsignal(s)
+        for s in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM, signal.SIGPIPE)
+    }
     argv = ["w", "--json"] if json_mode else ["w"]
     assert run(capsys, argv, commands=(command,)) == (code, "", "")
     assert cleaned == [True]
@@ -990,13 +998,21 @@ def test_the_console_script_target_is_main() -> None:
 
 
 @pytest.mark.parametrize(
-    "argv", [["--version"], ["validate", "--json"], ["sessions", "--help"], ["sessions", "--limit", "0", "--json"]]
+    "argv",
+    [
+        ["--version"],
+        ["validate", "--json"],
+        ["sessions", "--help"],
+        ["sessions", "--limit", "0", "--json"],
+    ],
 )
 def test_a_closed_pipe_on_stdout_ends_with_exit_1_and_no_traceback(argv: list[str]) -> None:
     read_end, write_end = os.pipe()
     os.close(read_end)  # nobody reads: every write is EPIPE
     try:
-        result = _run_process(_module(*argv), stdout=write_end, capture_output=False, stderr=subprocess.PIPE)
+        result = _run_process(
+            _module(*argv), stdout=write_end, capture_output=False, stderr=subprocess.PIPE
+        )
     finally:
         os.close(write_end)
     assert result.returncode == 1, result.stderr
@@ -1016,7 +1032,19 @@ def test_a_closed_standard_output_descriptor_ends_with_exit_1() -> None:
 
 def test_a_closed_standard_error_descriptor_does_not_crash() -> None:
     result = _run_process(
-        ["sh", "-c", 'exec "$@" 2>&-', "sh", sys.executable, "-m", "session_audit", "sessions", "--limit", "0", "--json"]
+        [
+            "sh",
+            "-c",
+            'exec "$@" 2>&-',
+            "sh",
+            sys.executable,
+            "-m",
+            "session_audit",
+            "sessions",
+            "--limit",
+            "0",
+            "--json",
+        ]
     )
     assert result.returncode == 2
     envelope(result.stdout.decode())
@@ -1105,9 +1133,10 @@ def test_a_real_sigterm_stops_a_running_command_with_exit_143(tmp_path: Path) ->
 
 
 def test_the_envelope_is_the_same_document_in_a_real_process() -> None:
-    result = _run_process(_module("retro", "run", "--since", "1d", "--mode", "interactive", "--json"))
+    result = _run_process(
+        _module("retro", "run", "--since", "1d", "--mode", "interactive", "--json")
+    )
     assert result.returncode == 2
     error = envelope(result.stdout.decode())
     assert error["details"] == {"reason": "mode_unsupported"}
     assert result.stderr.decode().startswith("session-audit: error:")
-
