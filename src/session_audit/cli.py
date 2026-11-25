@@ -4,16 +4,27 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import NoReturn
 
 from . import __version__
+from .textsafe import write_stderr
 
 PROG = "session-audit"
 DESCRIPTION = "Analyze Claude session transcripts and outcomes: retros and usage analytics."
 USAGE_ERROR = 2
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse echoes user text in its errors; print it through the sanitizer."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        write_stderr(f"{self.prog}: error: {message}")
+        raise SystemExit(USAGE_ERROR)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog=PROG,
         description=DESCRIPTION,
     )
