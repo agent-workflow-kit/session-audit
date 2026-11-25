@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Fake claude-session for tests. Scripted per test; the format is in tests/fake_claude_session.py.
+
+Standard library only, so it runs under any python3. It prints exactly what the scenario says;
+the test helper validates every scripted document against claude-session's pinned schemas when
+the scenario is written, and records what was printed in the call log.
+
+Environment:
+  FAKE_CLAUDE_SESSION_SCENARIO  path of the scenario JSON file (required)
+  FAKE_CLAUDE_SESSION_LOG       path of the call log, JSON lines (required)
+
+Scenario: {"<key>": [step, ...]} where key is the subcommand (``list``, ``status``, ``start``,
+``exec``, ``forget``, ``stop``...), ``start --dry-run`` or ``exec --dry-run`` when --dry-run is
+given, or ``--version``. The nth call with a key gets step n; calls past the last repeat the
+last step. A step is {"stdout": <json or text>, "stderr": text, "exit": int, "sleep": seconds,
+"ignore_term": bool, "stdin": bool (read and log stdin), "pid_file": path}.
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+
+UNSCRIPTED = 99
+
+
+def call_key(argv):
+    if argv and argv[0] == "--version":
+        return "--version"
+    words = [a for a in argv if not a.startswith("-")]
+    if not words:
+        return ""
+    sub = words[0]
+    if sub in ("start", "exec") and "--dry-run" in argv:
+        return sub + " --dry-run"
+    return sub
+
+
+def main(argv):
+    scenario_path = os.environ["FAKE_CLAUDE_SESSION_SCENARIO"]
+    log_path = os.environ["FAKE_CLAUDE_SESSION_LOG"]
+    with open(scenario_path, encoding="utf-8") as handle:
+        scenario = json.load(handle)
+    key = call_key(argv)
+    seen = 0
+    if os.path.exists(log_path):
+        with open(log_path, encoding="utf-8") as handle:
+            seen = sum(1 for line in handle if json.loads(line)["key"] == key)
+    steps = scenario.get(key)
+    entry = {"key": key, "argv": argv, "pid": os.getpid(), "stdin": None, "printed": None}
+    if not steps:
+        entry["printed"] = {"stdout": "", "exit": UNSCRIPTED}
+        append(log_path, entry)
+        sys.stderr.write("fake claude-session: no step scripted for %r\n" % key)
+        return UNSCRIPTED
+    step = steps[min(seen, len(steps) - 1)]
+    if step.get("stdin"):
+        entry["stdin"] = sys.stdin.read()
+    stdout = step.get("stdout", "")
+    text = stdout if isinstance(stdout, str) else json.dumps(stdout)
+    entry["printed"] = {"stdout": text, "exit": step.get("exit", 0)}
+    append(log_path, entry)
+    if step.get("pid_file"):
+        with open(step["pid_file"], "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    if step.get("ignore_term"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if step.get("sleep"):
+        time.sleep(step["sleep"])
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    sys.stderr.write(step.get("stderr", ""))
+    return step.get("exit", 0)
+
+
+def append(path, entry):
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
