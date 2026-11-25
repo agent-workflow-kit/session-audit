@@ -1078,7 +1078,7 @@ None in 0.x. awkit can read attention from `retro list --json`. A `browse` TUI i
 
 ## Files
 
-Under `~/.local/state/session-audit/` (respecting `XDG_STATE_HOME`; directories 0700, files 0600). Nothing under the state directory is ever a session-writable path. Every command sets `umask 077` before it creates a file; `state.db` uses `PRAGMA secure_delete=ON`; `retro delete` and `prune` end with `PRAGMA wal_checkpoint(TRUNCATE)`.
+Under `~/.local/state/session-audit/` (respecting `XDG_STATE_HOME` when it is an absolute path; directories 0700, files 0600). A state directory or file that is a symlink, foreign-owned, accessible by group or other, or hard-linked, a corrupt `state.db`, a lock held past the 30 s wait, a full disk and a read-only file system all end the command with exit 12 `store_unwritable`; nothing is repaired or deleted. Nothing under the state directory is ever a session-writable path. Every command sets `umask 077` before it creates a file; `state.db` uses `PRAGMA secure_delete=ON`; `retro delete` and `prune` end with `PRAGMA wal_checkpoint(TRUNCATE)`.
 
 - `state.db`: private SQLite (WAL, versioned additive-only migrations).
 - `log.jsonl`: public, append-only, hash-only (`schemas/log.json`); `log.lock` guards appends and the prune rewrite.
@@ -1180,4 +1180,4 @@ Linux and WSL (Ubuntu) are tested. macOS is expected to work: the roots, `flock`
 
 ## Upgrades
 
-The store is versioned and migrations are additive only. A newer `state.db` makes every command exit 20 (`store_newer`) except `validate`. The store records `meta.rules_version` and `files.rules_version`. After an upgrade that bumps it, every `ingest` first rereads files whose `rules_version` is lower (within its budget) before new bytes; `ingest --rebuild` sets every on-disk file to reread. A session whose files are all gone and whose rows came from a lower version carries `old_rules`. The config schema may add keys in a minor release; a removed key is a breaking change named in its release title.
+The store is versioned and migrations are additive only; applied migrations are recorded in a ledger table, and a store is newer when the ledger holds a number this version does not know. A newer `state.db` makes every command exit 20 (`store_newer`) except `validate`. The store records `meta.rules_version` and `files.rules_version`. After an upgrade that bumps it, every `ingest` first rereads files whose `rules_version` is lower (within its budget) before new bytes; `ingest --rebuild` sets every on-disk file to reread. A session whose files are all gone and whose rows came from a lower version carries `old_rules`. The config schema may add keys in a minor release; a removed key is a breaking change named in its release title.
