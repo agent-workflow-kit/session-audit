@@ -82,7 +82,7 @@ def check(ctx: Context, args: argparse.Namespace) -> None:
     if args.skill is not None:
         a.check_skill(args.skill)
     if args.model is not None:
-        a.check_model(args.model)
+        a.check_model(args.model, launch=True)
     if not any(getattr(args, name) for name in SCOPE_FLAGS):
         raise errors.usage(
             "a scope flag is required",

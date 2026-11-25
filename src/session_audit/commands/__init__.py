@@ -4,7 +4,8 @@ Every command of the interface is one module here that exports ``COMMANDS``, a t
 ``Command`` values (see ``session_audit/command.py``). All are registered below, in the order
 of the interface (it is the order of ``--help``). An issue that implements a command replaces
 that module's ``run`` (and extends ``check``); it does not touch this file or ``cli.py``. A new
-command adds one module and one name to ``MODULES``.
+command is one new module plus two lines here: its import and its entry in ``MODULES``. The
+imports stay literal because the boundary test refuses a dynamic ``import_module``.
 """
 
 from __future__ import annotations

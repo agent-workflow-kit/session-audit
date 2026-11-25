@@ -19,6 +19,10 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | Module | Stage | Responsibility |
 |---|---|---|
 | `cli` | 0 | argparse subcommands, global flags, exit-code mapping, JSON envelopes |
+| `commands/` | 0 | the command registry: one module per command (flags, checks, run) |
+| `command` | 0 | `Command`, `Context` and `Output`, the types a command runs with |
+| `args` | 0 | flag helpers and validators shared by the commands |
+| `errors` | 0 | the exit-code table and the closed error envelope |
 | `config` | 0 | YAML with drop-ins, Pydantic validation, ownership checks, price table |
 | `gateway` | 0 | the only process, filesystem-outside-store, clock and crontab access |
 | `textsafe` | 0 | sanitizer, fix_surrogates, untrusted neutralizer, display helpers |

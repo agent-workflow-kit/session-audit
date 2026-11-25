@@ -16,10 +16,11 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -99,9 +100,19 @@ def test_version_matches_pyproject() -> None:
     )
 
 
+class _NoGateway:
+    """A gateway that fails on any use: ``--version`` must never reach it."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"gateway.{name} used")
+
+
 def test_version_works_with_a_broken_config_and_a_newer_store(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """Cannot fail today: nothing reads a config or a store yet. It pins the contract for #7,
+    which wires config loading and the store: ``--version`` must not touch either (here: no
+    command ``check`` or ``run`` and no gateway call happens)."""
     broken = tmp_path / "config.yaml"
     broken.write_text("{ not: [yaml", encoding="utf-8")
     state = Path(os.environ["XDG_STATE_HOME"]) / "session-audit"
@@ -116,6 +127,8 @@ def test_version_works_with_a_broken_config_and_a_newer_store(
     ):
         code, out, err = run(capsys, argv)
         assert (code, out, err) == (0, f"session-audit {__version__}\n", ""), argv
+    assert CALLS == []  # no command ran
+    assert main(["--version"], gateway=cast(Any, _NoGateway()), commands=STUBBED) == 0
 
 
 # registry -----------------------------------------------------------------------------------
@@ -501,7 +514,7 @@ def test_a_retro_run_without_a_scope_flag_is_a_usage_error(
 
 
 @pytest.mark.parametrize(
-    "skill", ["audit", "a:", ":b", "A:b", "a:B", "a:b:c", "a b:c", "a/b:c", "-a:b", "a:-b", "é:b"]
+    "skill", ["audit", "a:", ":b", "a:B", "a:b:c", "a b:c", "a/b:c", "-a:b", "a:-b", "é:b"]
 )
 def test_a_malformed_skill_names_the_flag(skill: str, capsys: pytest.CaptureFixture[str]) -> None:
     error = _usage(capsys, ["retro", "run", "--since", "1d", "--skill", skill])
@@ -521,7 +534,7 @@ def test_a_malformed_skill_names_the_flag(skill: str, capsys: pytest.CaptureFixt
         ("--decision-id", "a b"),
         ("--decision-id", ""),
         ("--model", "-x"),
-        ("--model", "a b"),
+        ("--model", "a\x07b"),
         ("--model", "a" * 129),
     ],
 )
@@ -608,7 +621,7 @@ def test_prefixes_are_lowercased_and_values_are_normalized(
     run(capsys, ["show", SESSION[:8].upper()])
     run(capsys, ["retro", "show", "RA-ABCD"])
     run(capsys, ["usage", "--by", "label=team,day"])
-    run(capsys, ["ingest", "--budget", "90s", "--session", "cs-abcdefgh"][:3])
+    run(capsys, ["ingest", "--budget", "90s"])
     assert CALLS[0][1].session_id == SESSION[:8]
     assert CALLS[1][1].retro_id == "ra-abcd"
     assert CALLS[2][1].by == ["label=team", "day"]
@@ -1140,3 +1153,216 @@ def test_the_envelope_is_the_same_document_in_a_real_process() -> None:
     error = envelope(result.stdout.decode())
     assert error["details"] == {"reason": "mode_unsupported"}
     assert result.stderr.decode().startswith("session-audit: error:")
+
+
+# the fixed text follows the kind of the argparse message, never the user's words -----------------
+
+
+@pytest.mark.parametrize(
+    ("argv", "message", "field"),
+    [
+        (["sessions", "--foo", "invalid choice"], "Unrecognized argument", None),
+        (["sessions", "--bogus", "expected one argument"], "Unrecognized argument", None),
+        (
+            ["retro", "run", "--session", "11111111", "x ignored explicit argument"],
+            "Unrecognized argument",
+            None,
+        ),
+        (["sessions", "--bogus", "not allowed with argument"], "Unrecognized argument", None),
+        (["sessions", "--since"], "An option is missing its value", "--since"),
+        (["sessions", "--since", "--limit", "2"], "An option is missing its value", "--since"),
+        (["sessions", "--entrypoint", "required"], "Invalid choice", "--entrypoint"),
+        (["sessions", "--entrypoint", "expected one argument"], "Invalid choice", "--entrypoint"),
+        (["sessions", "--json=ignored explicit argument"], "An option takes no value", "--json"),
+        (["nope", "unrecognized arguments:"], "Invalid choice", None),
+    ],
+)
+def test_the_usage_text_is_chosen_by_the_message_kind_not_by_user_words(
+    argv: list[str], message: str, field: str | None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, [*argv, "--json"])
+    assert code == 2, (out, err)
+    error = envelope(out)
+    assert error["message"] == message
+    assert error.get("details", {}).get("field") == field
+
+
+@pytest.mark.parametrize("skill", ["My_Plugin:audit", "a.b:c", "A1:b-2", "x" * 64 + ":" + "y" * 63])
+def test_a_skill_with_a_wider_plugin_part_is_accepted(
+    skill: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(capsys, ["retro", "run", "--since", "1d", "--skill", skill])[0] == 0
+    assert run(capsys, ["retro", "list", "--skill", skill])[0] == 0
+
+
+@pytest.mark.parametrize("skill", ["a" * 64 + ":" + "b" * 65, "a" * 128 + ":b", "a:B", "_a:b"])
+def test_a_skill_beyond_the_schema_grammar_is_refused(
+    skill: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _usage(capsys, ["retro", "run", "--since", "1d", "--skill", skill])["details"] == {
+        "field": "--skill"
+    }
+    assert _usage(capsys, ["retro", "list", "--skill", skill])["details"] == {"field": "--skill"}
+
+
+@pytest.mark.parametrize("model", ["claude opus 4", "-x", "é" * 128, "a" * 128])
+def test_a_model_is_any_text_without_controls_for_the_filters(
+    model: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for command in (["sessions"], ["usage", "--by", "day"]):
+        assert run(capsys, [*command, f"--model={model}"])[0] == 0
+
+
+@pytest.mark.parametrize(
+    "model", ["", "a" * 129, "a\x00b", "a\x1bb", "a\x7fb", "a\x85b", "a\ud800b"]
+)
+def test_a_model_with_controls_or_too_long_is_refused(
+    model: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for command in (["sessions"], ["usage", "--by", "day"], ["retro", "run", "--since", "1d"]):
+        assert _usage(capsys, [*command, "--model", model])["details"] == {"field": "--model"}
+
+
+def test_retro_run_also_refuses_a_model_starting_with_a_dash(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _usage(capsys, ["retro", "run", "--since", "1d", "--model", "-x"])["details"] == {
+        "field": "--model"
+    }
+    assert run(capsys, ["retro", "run", "--since", "1d", "--model", "x -y"])[0] == 0
+
+
+# the exit contract of main --------------------------------------------------------------------
+
+
+def _with_run(fn: Any, check: Any = None) -> Command:
+    return Command(("w",), "x", lambda p: None, check or (lambda c, a: None), fn)
+
+
+@pytest.mark.parametrize("value", ["oops", 256, -1, 1000, None, 1.0, True, b"x", [1]])
+def test_a_run_result_outside_0_to_255_is_an_internal_error(
+    value: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    command = _with_run(lambda ctx, args: value)
+    code, out, err = run(capsys, ["w", "--json"], commands=(command,))
+    assert code == 1
+    assert envelope(out)["code"] == "internal"
+
+
+@pytest.mark.parametrize("value", [0, 1, 20, 255])
+def test_a_run_result_in_range_is_the_exit_code(
+    value: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(capsys, ["w"], commands=(_with_run(lambda ctx, args: value),))[0] == value
+
+
+@pytest.mark.parametrize(
+    ("raised", "code"), [(None, 0), (0, 0), (3, 3), (255, 255), ("oops", 1), (256, 1), (-1, 1)]
+)
+def test_system_exit_codes_are_validated(
+    raised: Any, code: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fn(ctx: Context, args: argparse.Namespace) -> int:
+        raise SystemExit(raised)
+
+    got, out, err = run(capsys, ["w", "--json"], commands=(_with_run(fn),))
+    assert got == code
+    if code == 1:
+        assert envelope(out)["code"] == "internal"
+    else:
+        assert out == ""
+
+
+class _Custom(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("raised", [GeneratorExit, _Custom, RuntimeError])
+def test_any_other_base_exception_is_an_internal_error_without_a_traceback(
+    raised: type[BaseException], capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fn(ctx: Context, args: argparse.Namespace) -> int:
+        raise raised("secret text")
+
+    code, out, err = run(capsys, ["w", "--json"], commands=(_with_run(fn),))
+    assert code == 1
+    assert envelope(out)["code"] == "internal"
+    assert "Traceback" not in err and "secret" not in err and "secret" not in out
+
+
+def test_a_second_signal_while_the_first_unwinds_does_not_traceback(tmp_path: Path) -> None:
+    script = tmp_path / "twice.py"
+    script.write_text(
+        "import sys, time\n"
+        "from session_audit.cli import main\n"
+        "from session_audit.command import Command\n"
+        "def run(ctx, args):\n"
+        "    print('ready', file=sys.stderr, flush=True)\n"
+        "    try:\n"
+        "        time.sleep(60)\n"
+        "    finally:\n"
+        "        time.sleep(1)\n"  # slow cleanup: the second signal lands while unwinding
+        "    return 0\n"
+        "c = Command(('w',), 'x', lambda p: None, lambda c, a: None, run)\n"
+        "raise SystemExit(main(['w', '--json'], commands=(c,)))\n",
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(  # noqa: S603
+        [sys.executable, str(script)],
+        env=_env(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert process.stderr is not None
+        assert process.stderr.readline() == b"ready\n"
+        process.send_signal(signal.SIGTERM)  # the exact PID we started
+        time.sleep(0.3)
+        process.send_signal(signal.SIGINT)
+        out, err = process.communicate(timeout=30)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    assert (process.returncode, out, err) == (143, b"", b"")
+
+
+# a command's progress note on a broken stderr -------------------------------------------------
+
+
+def _note_script(tmp_path: Path) -> Path:
+    script = tmp_path / "note.py"
+    script.write_text(
+        "from session_audit.cli import main\n"
+        "from session_audit.command import Command\n"
+        "def run(ctx, args):\n"
+        "    ctx.note('progress')\n"
+        "    ctx.emit_json({'ok': True})\n"
+        "    return 0\n"
+        "c = Command(('w',), 'x', lambda p: None, lambda c, a: None, run)\n"
+        "raise SystemExit(main(['w'], commands=(c,)))\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def test_a_note_on_a_closed_stderr_does_not_fail_the_command(tmp_path: Path) -> None:
+    script = _note_script(tmp_path)
+    result = _run_process(["sh", "-c", 'exec "$@" 2>&-', "sh", sys.executable, str(script)])
+    assert (result.returncode, result.stdout) == (0, b'{"ok": true}\n')
+
+
+def test_a_note_on_a_full_stderr_does_not_fail_the_command(tmp_path: Path) -> None:
+    if not Path("/dev/full").exists():
+        pytest.skip("no /dev/full")
+    script = _note_script(tmp_path)
+    with open("/dev/full", "wb") as full:
+        result = _run_process(
+            _module_script(script), stderr=full, capture_output=False, stdout=subprocess.PIPE
+        )
+    assert (result.returncode, result.stdout) == (0, b'{"ok": true}\n')
+
+
+def _module_script(script: Path) -> list[str | bytes]:
+    return [sys.executable, str(script)]

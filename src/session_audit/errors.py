@@ -11,6 +11,7 @@ the schema. A ``CliError`` that would break the schema is a programming error an
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .gateway import CallResult
@@ -109,6 +110,15 @@ REQUIRED: dict[str, set[str]] = {
 _MESSAGE_MAX = 2048
 _MATCHES_MAX = 20
 _STRING_KEYS = {"retro_id", "id", "field", "outcome", "end_reason"}
+_ID_MAX = 128
+# The patterns of schemas/defs.json (error.details, retro_id, token); ``fullmatch`` ends at the
+# true end of the string, as the schema's ``(?![\s\S])`` does (``$`` would allow a newline).
+_PATTERNS: dict[str, re.Pattern[str]] = {
+    "field": re.compile(r"--[a-z][a-z0-9-]{0,63}|[A-Z][A-Z0-9_]{0,63}|[a-z_][a-z0-9_.-]{0,63}"),
+    "retro_id": re.compile(r"ra-[a-z2-7]{8}"),
+    "outcome": re.compile(r"[a-z][a-z0-9_-]{0,63}"),
+    "end_reason": re.compile(r"[a-z][a-z0-9_]{0,63}"),
+}
 
 
 def _is_count(value: object) -> bool:
@@ -129,6 +139,11 @@ def _check_details(code: str, details: dict[str, Any]) -> None:
     for key in _STRING_KEYS & set(details):
         if not isinstance(details[key], str) or not details[key]:
             raise ValueError(f"details: {key} must be a non-empty string")
+    for key, pattern in _PATTERNS.items():
+        if key in details and not pattern.fullmatch(details[key]):
+            raise ValueError(f"details: {key} does not match the schema pattern")
+    if "id" in details and len(details["id"]) > _ID_MAX:
+        raise ValueError("details: id is longer than 128 characters")
     if "retryable" in details and not isinstance(details["retryable"], bool):
         raise ValueError("details: retryable must be a boolean")
     for key in ("matched", "limit"):
@@ -140,9 +155,11 @@ def _check_details(code: str, details: dict[str, Any]) -> None:
             not isinstance(matches, list)
             or len(matches) > _MATCHES_MAX
             or len(set(matches)) != len(matches)
-            or not all(isinstance(m, str) and m for m in matches)
+            or not all(isinstance(m, str) and 1 <= len(m) <= _ID_MAX for m in matches)
         ):
-            raise ValueError("details: matches must be at most 20 distinct non-empty strings")
+            raise ValueError(
+                "details: matches must be at most 20 distinct strings of 1 to 128 characters"
+            )
     if "hook" in details and details["hook"] not in _HOOKS:
         raise ValueError("details: hook is not a hook name")
 

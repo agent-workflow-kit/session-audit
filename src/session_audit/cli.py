@@ -24,11 +24,11 @@ from typing import Any, NoReturn
 
 from . import __version__, errors
 from .args import check_actor, check_path, default_actor
-from .command import Command, Context, Output, StdoutFailed
+from .command import Command, Context, Output, StdoutFailed, stderr_line
 from .commands import COMMANDS
 from .errors import CliError
 from .gateway import Gateway, SystemGateway, discard_stream
-from .textsafe import dumps_json, write_stderr
+from .textsafe import dumps_json
 
 PROG = "session-audit"
 DESCRIPTION = "Analyze Claude session transcripts and outcomes: retros and usage analytics."
@@ -44,12 +44,7 @@ class Interrupted(BaseException):
         self.signum = signum
 
 
-def _stderr(line: str) -> None:
-    """One sanitized line on stderr; a closed or broken stderr is not an error worth dying for."""
-    try:
-        write_stderr(line)
-    except (OSError, ValueError, AttributeError):
-        discard_stream(sys.stderr)
+_stderr = stderr_line
 
 
 # argparse's own messages echo user text, so none of them is used: only their kind and, when
@@ -58,33 +53,40 @@ _ARGUMENT = re.compile(
     r"argument ((?:-[A-Za-z0-9]|--[a-z][a-z0-9-]*)(?:/(?:-[A-Za-z0-9]|--[a-z][a-z0-9-]*))*): "
 )
 _REQUIRED = re.compile(r"the following arguments are required: (--[a-z][a-z0-9-]*)(?:,|$)")
+# argparse words a message as ``argument NAME: KIND ...`` (NAME is the parser's own definition,
+# which never holds ``: ``; text after it may be user text), or as one of two whole-message forms.
+# The kind is read only from the start of what follows NAME, never searched for in the message.
+_ARGUMENT_KIND = re.compile(r"argument [^:]*: ", re.DOTALL)
 _KINDS = (
     ("expected one argument", "an option is missing its value"),
     ("expected at least one argument", "an option is missing its value"),
     ("invalid choice", "invalid choice"),
     ("ignored explicit argument", "an option takes no value"),
     ("not allowed with argument", "these options cannot be combined"),
-    ("unrecognized arguments", "unrecognized argument"),
-    ("required", "a required argument is missing"),
 )
 
 
 def usage_from_argparse(message: str) -> CliError:
     """The closed-envelope usage error for an argparse message: a fixed text, and ``field`` when
-    the message names a long option."""
+    the message names a long option. The message kind is classified from its structure (its
+    start), because the rest of it can hold user text."""
     field: str | None = None
     found = _ARGUMENT.match(message) or _REQUIRED.match(message)
     if found:
         names = found.group(1).split("/")
         field = next((n for n in names if n.startswith("--")), None)
     text = "invalid command line"
-    for needle, fixed in _KINDS:
-        if needle in message:
-            text = fixed
-            break
+    if message.startswith("unrecognized arguments:"):
+        text = "unrecognized argument"
+    elif message.startswith("the following arguments are required:"):
+        text = "a required argument is missing"
     else:
-        if found:
-            text = "invalid value"
+        prefix = _ARGUMENT_KIND.match(message)
+        if prefix:
+            rest = message[prefix.end() :]
+            text = next(
+                (fixed for needle, fixed in _KINDS if rest.startswith(needle)), "invalid value"
+            )
     return errors.usage(text[:1].upper() + text[1:], field=field, hint=HELP_HINT)
 
 
@@ -188,29 +190,36 @@ def _isatty(stream: Any) -> bool:
 
 @contextlib.contextmanager
 def _signals() -> Iterator[None]:
-    """SIGHUP and SIGTERM raise ``Interrupted`` like Python's own handler does for SIGINT; a
-    signal that was ignored on entry (``nohup``, a background job) stays ignored. SIGPIPE stays
-    ignored so a closed pipe is an ``EPIPE`` error on the write, which ends the run with exit 1."""
+    """SIGHUP, SIGINT and SIGTERM raise ``Interrupted``; a signal that was ignored on entry
+    (``nohup``, a background job) stays ignored. The first delivery ignores the three again, so a
+    second signal while the exit is unwinding cannot raise out of ``main`` (a signal during a
+    command's own cleanup is the command's concern). SIGPIPE stays ignored so a closed pipe is an
+    ``EPIPE`` error on the write, which ends the run with exit 1. Everything is put back on exit."""
     previous: dict[int, Any] = {}
+    owned: list[int] = []
 
     def handler(signum: int, _frame: object) -> None:
+        for sig in owned:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, signal.SIG_IGN)
         raise Interrupted(signum)
 
     try:
-        for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-            current = signal.getsignal(sig)
-            if current is signal.SIG_IGN:
-                continue
-            previous[sig] = current
-            signal.signal(sig, handler)
-        previous[signal.SIGPIPE] = signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-    except ValueError:  # not the main thread: the host owns the signals
-        pass
-    try:
+        try:
+            for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+                current = signal.getsignal(sig)
+                if current is signal.SIG_IGN:
+                    continue
+                previous[sig] = current
+                signal.signal(sig, handler)
+                owned.append(sig)
+            previous[signal.SIGPIPE] = signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        except ValueError:  # not the main thread: the host owns the signals
+            pass
         yield
     finally:
         for sig, old in previous.items():
-            with contextlib.suppress(ValueError, TypeError):
+            with contextlib.suppress(ValueError, TypeError, OSError):
                 signal.signal(sig, old)
 
 
@@ -259,7 +268,8 @@ def _context(
         check_path(ctx.config, "--config")
     if command.accepts_actor:
         given = getattr(namespace, "actor", None)
-        # TODO(#7): pass the config's ``me.name`` as ``me_name``.
+        # TODO(#7): this is the composition root: #7 loads the config here (``--config``, the
+        # defaults) and passes its ``me.name`` as ``me_name``, and ``time_zone`` to the checks.
         ctx.actor = check_actor(given) if given is not None else default_actor(is_tty=tty)
     return ctx
 
@@ -292,7 +302,7 @@ def main(
     stdout: Callable[[], Any] | None = None,
     stdin_is_tty: bool | None = None,
 ) -> int:
-    """Run the CLI and return the exit code (never raises, except ``Interrupted`` is converted).
+    """Run the CLI and return the exit code, an int from 0 to 255 (never raises).
 
     ``argv`` defaults to ``sys.argv[1:]``. The keyword arguments are for tests: a fake gateway,
     an own registry, a stream getter for standard output and the terminal state of standard input.
@@ -303,31 +313,61 @@ def main(
     tty = _isatty(sys.stdin) if stdin_is_tty is None else stdin_is_tty
     with _signals():
         try:
-            try:
-                return _dispatch(
-                    arguments,
-                    COMMANDS if commands is None else commands,
-                    gateway or SystemGateway(),
-                    out,
-                    tty,
-                    state,
-                )
-            except SystemExit as exit_:  # --help and --version
-                return exit_.code if isinstance(exit_.code, int) else 0
-            except CliError as error:
-                return _report(error, json_mode=state["json"], out=out)
-            except StdoutFailed:
-                return _stdout_failed(out)
-            except Exception:
-                if state["verbose"]:
-                    for line in traceback.format_exc().splitlines():
-                        _stderr(line)
-                return _report(
-                    CliError("internal", "internal error"), json_mode=state["json"], out=out
-                )
-        except StdoutFailed:  # the envelope itself could not be written
-            return _stdout_failed(out)
+            return _run(arguments, commands, gateway, out, tty, state)
         except Interrupted as interrupt:
             return errors.interrupt_exit(interrupt.signum)
         except KeyboardInterrupt:
             return errors.interrupt_exit(signal.SIGINT)
+
+
+def _is_exit_code(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 255
+
+
+def _run(
+    arguments: list[str],
+    commands: Sequence[Command] | None,
+    gateway: Gateway | None,
+    out: Output,
+    tty: bool,
+    state: dict[str, bool],
+) -> int:
+    """Dispatch and turn every outcome into an exit code. Only an interrupt escapes."""
+
+    def internal() -> int:
+        try:
+            return _report(CliError("internal", "internal error"), json_mode=state["json"], out=out)
+        except StdoutFailed:
+            return _stdout_failed(out)
+
+    try:
+        try:
+            code = _dispatch(
+                arguments,
+                COMMANDS if commands is None else commands,
+                gateway or SystemGateway(),
+                out,
+                tty,
+                state,
+            )
+            return code if _is_exit_code(code) else internal()
+        except SystemExit as exit_:  # --help and --version
+            exit_code = exit_.code
+            if exit_code is None:
+                return 0
+            if isinstance(exit_code, int) and _is_exit_code(exit_code):
+                return exit_code
+            return internal()
+        except CliError as error:
+            return _report(error, json_mode=state["json"], out=out)
+        except StdoutFailed:
+            return _stdout_failed(out)
+        except (Interrupted, KeyboardInterrupt):
+            raise
+        except BaseException:  # Exception and the rest (GeneratorExit, a custom BaseException)
+            if state["verbose"]:
+                for line in traceback.format_exc().splitlines():
+                    _stderr(line)
+            return internal()
+    except StdoutFailed:  # the envelope itself could not be written
+        return _stdout_failed(out)

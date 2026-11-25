@@ -303,3 +303,46 @@ def test_interrupt_exits() -> None:
     assert errors.interrupt_exit(1) == 129
     assert errors.interrupt_exit(2) == 130
     assert errors.interrupt_exit(15) == 143
+
+
+# details values follow the schema's patterns and lengths --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "details"),
+    [
+        ("usage", {"field": "-x"}),
+        ("usage", {"field": "--Bad"}),
+        ("usage", {"field": "--limit\n"}),
+        ("usage", {"field": "--" + "a" * 65}),
+        ("usage", {"field": "a b"}),
+        ("not_found", {"id": "x" * 129}),
+        ("ambiguous", {"matches": ["ok", "x" * 129]}),
+        ("session_ended", {"outcome": "Bad", "retro_id": RETRO_ID}),
+        ("session_ended", {"outcome": "done\n", "retro_id": RETRO_ID}),
+        ("session_ended", {"outcome": "done", "retro_id": "ra-abc"}),
+        ("session_ended", {"outcome": "done", "retro_id": "ra-abcdefg1"}),
+        ("session_ended", {"outcome": "done", "retro_id": RETRO_ID + "\n"}),
+        ("failed", {"reason": "claude_session_error", "retryable": False, "end_reason": "Bad"}),
+        ("failed", {"reason": "claude_session_error", "retryable": False, "end_reason": "a-b"}),
+        ("failed", {"reason": "claude_session_error", "retryable": False, "end_reason": "a\n"}),
+    ],
+)
+def test_details_values_that_break_the_schema_raise(code: str, details: dict[str, Any]) -> None:
+    exit_code = 14 if code == "session_ended" else None
+    with pytest.raises(ValueError):
+        CliError(code, "m", exit_code=exit_code, details=details)
+
+
+def test_details_values_at_the_schema_limits_are_accepted() -> None:
+    CliError("not_found", "m", details={"id": "x" * 128})
+    CliError("usage", "m", details={"field": "--" + "a" * 64})
+    CliError("usage", "m", details={"field": "retro.timeout"})
+    CliError("usage", "m", details={"field": "HOME_DIR"})
+    CliError("ambiguous", "m", details={"matches": ["x" * 128]})
+    CliError("session_ended", "m", exit_code=14, details={"outcome": "done", "retro_id": RETRO_ID})
+    CliError(
+        "failed",
+        "m",
+        details={"reason": "claude_session_error", "retryable": True, "end_reason": "a_b1"},
+    )

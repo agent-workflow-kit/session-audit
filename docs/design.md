@@ -96,6 +96,10 @@ Still to verify (conservative default until then): macOS paths and sandbox behav
 | Module | Responsibility |
 |---|---|
 | `cli` | argparse subcommands, global flags, exit-code mapping, JSON envelopes |
+| `commands/` | the command registry: one module per command with its flags, checks and run |
+| `command` | `Command`, `Context` and `Output`, the types a command runs with; every write to standard output goes through `Output` |
+| `args` | flag helpers and validators shared by the commands; messages are fixed text |
+| `errors` | the exit-code table and the closed error envelope (`CliError` enforces the schema) |
 | `config` | YAML load with drop-ins, Pydantic validation, ownership checks, price table |
 | `gateway` | the only place that spawns processes, touches the filesystem outside the store or reads the clock: `claude-session` calls (per-call timeouts and process groups), file opens, crontab |
 | `textsafe` | the sanitizer (awkit's algorithm text as own code), `fix_surrogates`, the `</untrusted` neutralizer, and the display helpers (`show`, `dumps_json`, `write_stderr`) |

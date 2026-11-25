@@ -20,8 +20,12 @@ from .grammar import GrammarError, parse_actor, parse_int, parse_label, parse_wh
 PATH_MAX = 4096  # the stored project is capped here (interface, Session object)
 ACTOR_USER_MAX = 64
 _ACTOR_BAD = re.compile(r"[^A-Za-z0-9._@/-]")
-_SKILL = re.compile(r"[a-z0-9][a-z0-9-]{0,63}:[a-z0-9][a-z0-9-]{0,63}", re.ASCII)
-_MODEL = re.compile(r"[A-Za-z0-9][\x21-\x7e]{0,127}", re.ASCII)
+SKILL_MAX = 128
+MODEL_MAX = 128
+# schemas/defs.json#skill: the plugin part is wider than the name part after the colon.
+_SKILL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[a-z0-9][a-z0-9-]{0,63}", re.ASCII)
+# A model name is stored as read: any text without control characters, DEL or surrogates.
+_MODEL = re.compile(r"[^\x00-\x1f\x7f-\x9f\ud800-\udfff]+")
 _TOKEN = re.compile(r"[a-z][a-z0-9_-]{0,63}", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 RETRO_STATES = ("digesting", "running", "validating", "done", "failed", "escalated", "canceled")
@@ -101,9 +105,16 @@ def check_token(value: object, field: str) -> str:
     return value
 
 
-def check_model(value: object, field: str = "--model") -> str:
-    """A model name: printable ASCII, no spaces, 1 to 128 characters, not starting with a dash."""
-    if not isinstance(value, str) or len(value) > 128 or not _MODEL.fullmatch(value):
+def check_model(value: object, field: str = "--model", *, launch: bool = False) -> str:
+    """A model name: 1 to 128 characters, no control characters, DEL or surrogates (as
+    ``defs.json#model``). With ``launch`` (``retro run``, where the name reaches claude-session)
+    it must also not start with a dash."""
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= MODEL_MAX
+        or not _MODEL.fullmatch(value)
+        or (launch and value.startswith("-"))
+    ):
         raise errors.usage(
             "invalid model", field=field, hint="Give a model name of 1 to 128 characters."
         )
@@ -111,8 +122,10 @@ def check_model(value: object, field: str = "--model") -> str:
 
 
 def check_skill(value: object, field: str = "--skill") -> str:
-    """``plugin:skill``, each part ``^[a-z0-9][a-z0-9-]{0,63}$``; a bare name is refused."""
-    if not isinstance(value, str) or len(value) > 129 or not _SKILL.fullmatch(value):
+    """``plugin:skill`` as ``defs.json#skill``: at most 128 characters, the plugin part
+    ``[A-Za-z0-9][A-Za-z0-9_.-]{0,63}``, the name part ``[a-z0-9][a-z0-9-]{0,63}``; a bare name
+    is refused."""
+    if not isinstance(value, str) or len(value) > SKILL_MAX or not _SKILL.fullmatch(value):
         raise errors.usage(
             "invalid skill", field=field, hint="Use plugin:skill, such as session-audit:audit."
         )

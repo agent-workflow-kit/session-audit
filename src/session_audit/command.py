@@ -13,13 +13,22 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .gateway import Gateway
+from .gateway import Gateway, discard_stream
 from .textsafe import dumps_json, show, write_stderr
 
 
 class StdoutFailed(Exception):
     """Standard output could not be written (closed, a broken pipe, or any I/O error). The run
     ends with exit 1."""
+
+
+def stderr_line(line: str) -> None:
+    """One sanitized line on stderr. A closed, full or broken stderr is not an error worth dying
+    for: the stream is pointed at /dev/null (``discard_stream``) so the exit flush cannot fail."""
+    try:
+        write_stderr(line)
+    except (OSError, ValueError, AttributeError):
+        discard_stream(sys.stderr)
 
 
 class Output:
@@ -75,7 +84,7 @@ class Context:
     def note(self, text: str) -> None:
         """Print a progress line on stderr unless ``--quiet``."""
         if not self.quiet:
-            write_stderr(text)
+            stderr_line(text)
 
 
 @dataclass(frozen=True)
