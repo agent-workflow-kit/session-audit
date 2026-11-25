@@ -98,6 +98,7 @@ Still to verify (conservative default until then): macOS paths and sandbox behav
 | `cli` | argparse subcommands, global flags, exit-code mapping, JSON envelopes |
 | `config` | YAML load with drop-ins, Pydantic validation, ownership checks, price table |
 | `gateway` | the only place that spawns processes, touches the filesystem outside the store or reads the clock: `claude-session` calls (per-call timeouts and process groups), file opens, crontab |
+| `textsafe` | the sanitizer (awkit's algorithm text as own code), `fix_surrogates`, the `</untrusted` neutralizer, and the display helpers (`show`, `dumps_json`, `write_stderr`) |
 | `reader` | discovery, safe open (no symlinks, no FIFO blocking), incremental line reading, offset, inode and head and tail hash bookkeeping, line and file budgets |
 | `parse` | line-type tolerant parsing into events (the transcript field map): usage, tools, errors, denials, interruptions, timing, subagent links; a guard around every line |
 | `count` | counting rules, the deterministic owner per dedupe key, 15-minute slots, cost basis, session values derived at query time, model and tool of errors and denials by the paired call |
