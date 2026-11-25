@@ -10,6 +10,12 @@ Every scripted document is validated against claude-session's pinned schemas
 written, and ``assert_outputs_valid`` validates what the fake actually printed. A step that is
 deliberately not valid (a hostile or malformed output a test wants the code to refuse) must say
 so with ``unvalidated=True``; plain text is only allowed for ``--version`` or then.
+
+A step is also checked against what the real program can do (``_check_exit``): the exit must be
+one the command ends with, an error ``code`` must come with its exit (usage 2, not_found 10,
+refused 20, ambiguous 21, launch_failed, schema_newer and failed 12, internal 1), and an ``exec``
+outcome's ``exit_code`` must equal the exit. The fake itself refuses calls that break claude-
+session's argument grammar (see ``tests/fakebin/claude-session``).
 """
 
 from __future__ import annotations
@@ -38,6 +44,31 @@ SCHEMA_FOR_KEY = {
     "stop": "claude-session/cli/stop.json",
 }
 ERROR_SCHEMA = "claude-session/cli/error.json"
+
+# The process exit of each error code (interface.md, Exit codes; error.json).
+EXIT_FOR_CODE = {
+    "usage": 2,
+    "not_found": 10,
+    "refused": 20,
+    "ambiguous": 21,
+    "launch_failed": 12,
+    "schema_newer": 12,
+    "failed": 12,
+    "internal": 1,
+}
+# Exits that can come with an error envelope from any command.
+_ANY_EXITS = frozenset({1, 2, 10, 20, 21})
+# The exits each scripted command can end with (interface.md, Output by exit code).
+EXITS_FOR_KEY = {
+    "start": frozenset({0, 12}) | _ANY_EXITS,
+    "start --dry-run": frozenset({0, 12, 20}) | _ANY_EXITS,
+    "exec --dry-run": frozenset({0, 12, 20}) | _ANY_EXITS,
+    "exec": frozenset({0, 11, 12, 13, 14, 15, 16, 17, 18}) | _ANY_EXITS,
+    "status": frozenset({0, 12}) | _ANY_EXITS,
+    "list": frozenset({0, 12}) | _ANY_EXITS,
+    "forget": frozenset({0, 12}) | _ANY_EXITS,
+    "stop": frozenset({0, 12}) | _ANY_EXITS,
+}
 
 
 def start_doc(csession_id: str = "cs-aaaaaaab", *, run: int = 1) -> dict[str, Any]:
@@ -80,6 +111,30 @@ def forget_doc(*csession_ids: str, purged: bool = True) -> dict[str, Any]:
 def error_doc(code: str, message: str, **extra: Any) -> dict[str, Any]:
     """A valid error envelope (``code`` one of the pinned schema's codes)."""
     return {"error": {"code": code, "message": message, **extra}}
+
+
+def outcome_doc(
+    csession_id: str = "cs-aaaaaaab", *, outcome: str = "timeout", exit_code: int = 16
+) -> dict[str, Any]:
+    """A valid ``exec --json`` outcome object for a run that timed out (exit 16). Other outcomes
+    need their own state and report; pass them by editing the returned document."""
+    return {
+        "csession_id": csession_id,
+        "run": 1,
+        "forked_from": None,
+        "claude_session_id": None,
+        "phase": "session",
+        "outcome": outcome,
+        "end_reason": "timeout",
+        "exit_code": exit_code,
+        "state": "timeout",
+        "report": None,
+        "session_started_at": None,
+        "cost_usd": None,
+        "num_turns": None,
+        "message": None,
+        "warnings": [],
+    }
 
 
 def step(
@@ -137,9 +192,23 @@ class FakeClaudeSession:
         self._write()
 
     def calls(self) -> list[dict[str, Any]]:
+        """The calls in the order they started. ``printed`` is None for a call that never got to
+        print (killed while it slept); a call refused by the grammar has the key ``<usage>``."""
         if not self.log_path.exists():
             return []
-        return [json.loads(line) for line in self.log_path.read_text("utf-8").splitlines()]
+        calls: list[dict[str, Any]] = []
+        by_id: dict[str, dict[str, Any]] = {}
+        for line in self.log_path.read_text("utf-8").splitlines():
+            record = json.loads(line)
+            if "done" in record:
+                by_id[record["done"]]["printed"] = record["printed"]
+            elif "stdin_of" in record:
+                by_id[record["stdin_of"]]["stdin"] = record["stdin"]
+            else:
+                calls.append(record)
+                if "id" in record:
+                    by_id[record["id"]] = record
+        return calls
 
     def assert_outputs_valid(self) -> None:
         """Validate what the fake printed in every logged call against the pinned schemas."""
@@ -155,6 +224,8 @@ class FakeClaudeSession:
             if one.get("unvalidated") or key == "--version":
                 continue
             printed = call["printed"]
+            if printed is None:
+                continue  # never got to print
             schema = self._schema_for(
                 key, json.loads(printed["stdout"]), printed["exit"], one.get("schema")
             )
@@ -189,6 +260,34 @@ class FakeClaudeSession:
                 f"step for {key!r} prints text; pass unvalidated=True for a deliberate non-document"
             )
         validate(stdout, self._schema_for(key, stdout, one.get("exit", 0), one.get("schema")))
+        self._check_exit(key, stdout, one.get("exit", 0))
+
+    @staticmethod
+    def _check_exit(key: str, stdout: object, exit_code: int) -> None:
+        """Refuse a step the real program could not produce: an exit it never ends that command
+        with, an error code with the wrong exit, an outcome whose ``exit_code`` is not the exit."""
+        allowed = EXITS_FOR_KEY.get(key)
+        if allowed is not None and exit_code not in allowed:
+            raise AssertionError(
+                f"step for {key!r}: exit {exit_code} is not one of {sorted(allowed)}"
+            )
+        if not isinstance(stdout, dict):
+            return
+        error = stdout.get("error")
+        if isinstance(error, dict) and "code" in error:
+            code = error["code"]
+            if EXIT_FOR_CODE.get(code) != exit_code:
+                raise AssertionError(
+                    f"step for {key!r}: error code {code!r} goes with exit "
+                    f"{EXIT_FOR_CODE.get(code)}, not {exit_code}"
+                )
+            if code == "launch_failed" and key != "start":
+                raise AssertionError(f"step for {key!r}: launch_failed is only for start")
+        elif key == "exec" and "exit_code" in stdout and stdout["exit_code"] != exit_code:
+            raise AssertionError(
+                f"step for 'exec': the outcome says exit_code {stdout['exit_code']} "
+                f"but the step exits {exit_code}"
+            )
 
 
 __all__ = [
@@ -199,6 +298,7 @@ __all__ = [
     "error_doc",
     "forget_doc",
     "list_doc",
+    "outcome_doc",
     "start_doc",
     "step",
 ]

@@ -25,7 +25,10 @@ def test_version_is_never_the_placeholder() -> None:
 
 def test_version_matches_pyproject() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert __version__ == pyproject["project"]["version"]
+    assert __version__ == pyproject["project"]["version"], (
+        f"the installed metadata says {__version__} but pyproject.toml says "
+        f"{pyproject['project']['version']}: run `uv sync` after a release bump"
+    )
 
 
 def test_no_args_returns_usage_error() -> None:

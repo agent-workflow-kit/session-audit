@@ -8,8 +8,10 @@ Autouse fixtures:
   tripwires (``crontab``, ``claude``, ``claude-session``) that fail loudly if anything starts
   them.
 - ``_process_guard``: wraps ``subprocess.Popen`` (what the gateway uses) so that
-  ``guard_argv`` refuses to start a program named ``crontab``, ``claude`` or ``claude-session``
-  unless it is a fake under ``tests/fakebin`` or the pytest temporary directory, and records the
+  ``guard_argv`` refuses a call that names ``crontab``, ``claude`` or ``claude-session`` anywhere
+  (any argv element, any word of a ``sh -c`` string) unless it is a fake under ``tests/fakebin``
+  or the pytest temporary directory, refuses a shell, ``env`` or interpreter given an ``env``
+  without the tripwire directory first on ``PATH``, and records the
   PID of every process started at launch. At teardown a process still running is killed by its
   exact process group (it is still our unreaped child, so the group id cannot be reused) and the
   test fails, so a leak is never silently cleaned up.
@@ -18,6 +20,8 @@ Autouse fixtures:
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import signal
 import stat
@@ -38,21 +42,39 @@ class RealToolRefused(AssertionError):
     """A test tried to start the real crontab, claude or claude-session."""
 
 
-def guard_argv(
-    argv: Sequence[str | os.PathLike[str]] | str | os.PathLike[str],
-    env: Mapping[str, str] | None,
+# Programs that run other programs, so a protected program can hide behind them.
+SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish"})
+RUNNERS = SHELLS | {"env", "xargs", "nohup", "timeout", "setsid", "perl", "ruby", "node"}
+_PYTHON = re.compile(r"python[0-9.]*$")
+_WORD = re.compile(r"[\w./+-]+")
+
+
+def _is_runner(program: str) -> bool:
+    name = Path(program).name
+    return name in RUNNERS or bool(_PYTHON.match(name))
+
+
+def _shell_words(text: str) -> list[str]:
+    """Every word a shell command line could run or pass: the shlex tokens and the plain words
+    between quotes and metacharacters (``$(crontab -l)``, ``a;claude-session``)."""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = []
+    return [*tokens, *_WORD.findall(text)]
+
+
+def _check_program(
+    program: str,
+    search: str | None,
     allowed_roots: Sequence[Path],
-    forbidden_roots: Sequence[Path] = (),
+    forbidden_roots: Sequence[Path],
 ) -> None:
-    """Raise ``RealToolRefused`` when ``argv`` starts a protected program that is not a fake
-    under one of ``allowed_roots`` (and not under a ``forbidden_roots`` tripwire directory)."""
-    program = os.fspath(argv if isinstance(argv, (str, os.PathLike)) else argv[0])
     if Path(program).name not in PROTECTED_PROGRAMS:
         return
     if os.sep in program:
         resolved: str | None = program
     else:
-        search = (env or os.environ).get("PATH")
         resolved = shutil.which(program, path=search)
     if resolved is None:
         return  # nothing to run: Popen fails by itself
@@ -61,6 +83,49 @@ def guard_argv(
         real.is_relative_to(root.resolve()) for root in allowed_roots
     ):
         raise RealToolRefused(f"a test tried to start {resolved!r}; only fakes may run")
+
+
+def guard_argv(
+    argv: Sequence[str | os.PathLike[str]] | str | os.PathLike[str],
+    env: Mapping[str, str] | None,
+    allowed_roots: Sequence[Path],
+    forbidden_roots: Sequence[Path] = (),
+    *,
+    shell: bool = False,
+) -> None:
+    """Raise ``RealToolRefused`` when the call would start a protected program that is not a fake
+    under one of ``allowed_roots`` (and not under a ``forbidden_roots`` tripwire directory).
+
+    Every element of ``argv`` is checked by its basename, not only the first (``env crontab -l``),
+    and so are the words of a ``sh -c`` string (or of a ``shell=True`` command line). A program
+    that runs other programs (a shell, ``env``, an interpreter) and is given an ``env`` whose
+    ``PATH`` does not start with the tripwire directory (``forbidden_roots[0]``) is refused too:
+    it could find the real tool through that ``PATH`` where this guard cannot see it."""
+    if isinstance(argv, (str, os.PathLike)):
+        words = [os.fsdecode(argv)]
+    else:
+        words = [os.fsdecode(a) for a in argv]
+    if not words:
+        return
+    search = (os.environ if env is None else env).get("PATH")
+    names = list(words)
+    if shell and isinstance(argv, str):
+        names = _shell_words(argv)
+    elif Path(words[0]).name in SHELLS and "-c" in words[1:]:
+        index = words.index("-c", 1)
+        if index + 1 < len(words):
+            names += _shell_words(words[index + 1])
+    for name in names:
+        _check_program(name, search, allowed_roots, forbidden_roots)
+    if env is not None and (shell or _is_runner(words[0])):
+        first = (env.get("PATH") or "").split(os.pathsep)[0]
+        if not first or not any(
+            Path(first).resolve() == root.resolve() for root in forbidden_roots[:1]
+        ):
+            raise RealToolRefused(
+                f"a test started {words[0]!r} with an env whose PATH does not start with the "
+                "tripwire directory; pass env={..., 'PATH': os.environ['PATH']}"
+            )
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +183,13 @@ def _process_guard(
 
     class GuardedPopen(real_popen):  # type: ignore[misc, valid-type]
         def __init__(self, args: Any, *pargs: Any, **kwargs: Any) -> None:
-            guard_argv(args, kwargs.get("env"), [FAKEBIN, base], [tripwire])
+            guard_argv(
+                args,
+                kwargs.get("env"),
+                [FAKEBIN, base],
+                [tripwire],
+                shell=bool(kwargs.get("shell")),
+            )
             super().__init__(args, *pargs, **kwargs)
             started.append(self)
 

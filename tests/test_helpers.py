@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -173,12 +174,68 @@ def test_a_protected_name_that_does_not_exist_is_left_to_fail_by_itself(tmp_path
     guard_argv(["claude"], {"PATH": str(tmp_path)}, [])
 
 
-def test_the_tripwire_fails_loudly_if_a_shell_script_gets_past_the_popen_guard() -> None:
-    # Reach the tripwire the way the Popen guard cannot see: through a shell's PATH lookup.
-    result = subprocess.run(
-        ["sh", "-c", "claude-session --version"], capture_output=True, text=True, check=False
-    )
+def test_the_tripwire_fails_loudly_if_a_script_gets_past_the_popen_guard(tmp_path: Path) -> None:
+    # The guard cannot read a script file, so the script reaches the tripwire through PATH.
+    script = tmp_path / "runner"
+    script.write_text("#!/bin/sh\nclaude-session --version\n", encoding="utf-8")
+    script.chmod(0o755)
+    result = subprocess.run([str(script)], capture_output=True, text=True, check=False)
     assert result.returncode == 97 and "tripwire" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["sh", "-c", "claude-session --version"],
+        ["bash", "-c", "true; crontab -l"],
+        ["sh", "-c", "x=$(crontab -l); echo $x"],
+        ["sh", "-c", "'/usr/bin/crontab' -l"],
+        ["env", "crontab", "-l"],
+        ["env", "FOO=1", "claude", "-p", "hi"],
+        ["nice", "claude-session", "list"],
+    ],
+)
+def test_a_protected_program_hidden_behind_another_is_refused(argv: list[str]) -> None:
+    with pytest.raises(RealToolRefused):
+        subprocess.Popen(argv)
+
+
+def test_a_protected_name_in_a_shell_command_line_is_refused() -> None:
+    with pytest.raises(RealToolRefused):
+        subprocess.Popen("echo hi; crontab -l", shell=True)
+
+
+def test_the_guard_looks_through_argv_and_shell_strings(tmp_path: Path) -> None:
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    (trip / "crontab").write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+    (trip / "crontab").chmod(0o755)
+    (trip / "claude-session").write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+    (trip / "claude-session").chmod(0o755)
+    with pytest.raises(RealToolRefused):
+        guard_argv(["env", "crontab", "-l"], {"PATH": str(trip)}, [tmp_path], [trip])
+    with pytest.raises(RealToolRefused):
+        guard_argv(["sh", "-c", "claude-session --version"], {"PATH": str(trip)}, [FAKEBIN], [trip])
+
+
+def test_a_shell_with_a_minimal_env_is_refused(tmp_path: Path) -> None:
+    trip = tmp_path / "trip"
+    trip.mkdir()
+    for argv in (["sh", "-c", "true"], ["env", "true"], [sys.executable, "-c", "pass"]):
+        with pytest.raises(RealToolRefused):
+            guard_argv(argv, {"PATH": "/usr/bin"}, [FAKEBIN], [trip])
+        with pytest.raises(RealToolRefused):
+            guard_argv(argv, {}, [FAKEBIN], [trip])
+    with pytest.raises(RealToolRefused):
+        subprocess.Popen(["sh", "-c", "true"], env={"PATH": "/usr/bin:/bin"})
+    with pytest.raises(RealToolRefused):
+        subprocess.Popen(["sh", "-c", "true"], env={})
+
+
+def test_a_shell_whose_env_keeps_the_tripwire_first_is_allowed() -> None:
+    env = {"PATH": os.environ["PATH"]}
+    assert subprocess.run(["sh", "-c", "true"], env=env, check=False).returncode == 0
+    assert subprocess.run(["sh", "-c", "true"], check=False).returncode == 0  # env=None inherits
 
 
 def test_a_process_left_running_fails_the_test_and_is_killed(pytester: pytest.Pytester) -> None:
@@ -245,3 +302,40 @@ def test_fake_gateway_crontab_round_trips() -> None:
     gw = FakeGateway()
     gw.crontab_write("0 * * * * job\n")
     assert gw.crontab_read().stdout == "0 * * * * job\n"
+
+
+# -- the live marker -------------------------------------------------------------------------
+
+
+def test_live_tests_are_deselected_by_default_and_selected_with_m_live(
+    pytester: pytest.Pytester,
+) -> None:
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    options = config["tool"]["pytest"]["ini_options"]
+    # json.dumps writes valid TOML strings and arrays; only the marker and addopts are copied.
+    pytester.makepyprojecttoml(
+        "[tool.pytest.ini_options]\n"
+        f"markers = {json.dumps(options['markers'])}\n"
+        f"addopts = {json.dumps(options['addopts'])}\n"
+    )
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.live
+        def test_needs_a_real_model():
+            pass
+
+        def test_runs_everywhere():
+            pass
+        """
+    )
+    default = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v")
+    default.assert_outcomes(passed=1, deselected=1)
+    default.stdout.fnmatch_lines(["*test_runs_everywhere PASSED*"])
+    live = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-v", "-m", "live")
+    live.assert_outcomes(passed=1, deselected=1)
+    live.stdout.fnmatch_lines(["*test_needs_a_real_model PASSED*"])

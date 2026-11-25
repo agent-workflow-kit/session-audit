@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -16,11 +17,12 @@ from .fake_claude_session import (
     error_doc,
     forget_doc,
     list_doc,
+    outcome_doc,
     start_doc,
     step,
 )
 from .procs import wait_until_gone
-from .schemas import MIN_CLAUDE_SESSION_VERSION, PINNED_SCHEMA_ROOT, PINNED_VERSION
+from .schemas import MIN_CLAUDE_SESSION_VERSION, PINNED_SCHEMA_ROOT, PINNED_VERSION, validate
 
 
 def call(fake: FakeClaudeSession, *args: str, timeout: float = 10, stdin: str | None = None):  # noqa: ANN201
@@ -113,7 +115,7 @@ def test_a_malformed_output_must_be_asked_for_explicitly(tmp_path: Path) -> None
     with pytest.raises(AssertionError):
         fake.script("status", step("{not json"))
     fake.script("status", step("{not json", unvalidated=True))
-    assert call(fake, "status", "--json").stdout == "{not json"
+    assert call(fake, "status", "cs-aaaaaaab", "--json").stdout == "{not json"
     fake.assert_outputs_valid()  # a deliberately unvalidated step is skipped
 
 
@@ -145,7 +147,7 @@ def test_a_hung_call_is_killed_by_the_gateway_timeout(tmp_path: Path) -> None:
     pid_file = tmp_path / "pid"
     fake = FakeClaudeSession(tmp_path)
     fake.script("status", step({"x": 1}, unvalidated=True, sleep=60, pid_file=pid_file))
-    result = call(fake, "status", "--json", timeout=0.5)
+    result = call(fake, "status", "cs-aaaaaaab", "--json", timeout=0.5)
     assert result.status is CallStatus.TIMEOUT
     pid = int(pid_file.read_text(encoding="utf-8"))
     assert wait_until_gone(pid)
@@ -162,3 +164,182 @@ def test_the_fake_needs_only_a_plain_python3() -> None:
     first_line = (Path(__file__).parent / "fakebin" / "claude-session").read_text().splitlines()[0]
     assert first_line == "#!/usr/bin/env python3"
     assert sys.version_info >= (3, 12)
+
+
+# -- the grammar of the commands the fake checks ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--json", "list"],  # a global flag before the subcommand
+        ["--config", "c.yaml", "list", "--json"],
+        ["start"],  # start without --json
+        ["start", "--dry-run"],
+        ["start", "--json", "extra"],  # start takes no positional
+        ["status", "--json"],  # no id
+        ["stop"],
+        ["stop", "--json"],
+        ["status", "cs-aaaaaaab", "cs-aaaaaaac", "--json"],  # one id too many
+        ["list", "--bogus"],
+        ["list", "--json", "--bogus"],
+        ["list", "--jso"],  # no abbreviations
+        ["list", "--json=1"],  # a flag without a value given one
+        ["list", "--json", "--state"],  # a missing value
+        ["list", "--json", "--state", "--live"],  # the value is a flag
+        ["start", "--json", "--tools"],  # --tools needs at least one name
+        ["list", "--", "--json"],  # -- is not part of the grammar
+        ["status", "--json", "--", "cs-aaaaaaab"],
+        ["exec", "--json", "--grace", "5"],  # a flag of another command
+        [],
+    ],
+)
+def test_a_call_the_real_program_would_refuse_is_exit_2_and_logged_as_usage(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    for key in ("start", "status", "stop", "list", "exec"):
+        fake.script(key, step({"x": 1}, unvalidated=True))
+    result = call(fake, *argv)
+    assert result.exit_is(2)
+    assert result.stderr.startswith("claude-session: error: ")
+    assert result.stderr.count("\n") == 1
+    if "--json" in argv:
+        validate(json.loads(result.stdout), "claude-session/cli/error.json")
+        assert json.loads(result.stdout)["error"]["code"] == "usage"
+    else:
+        assert result.stdout == ""
+    assert [c["key"] for c in fake.calls()] == ["<usage>"]
+    fake.assert_outputs_valid()
+
+
+def test_a_refused_call_consumes_no_step(tmp_path: Path) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("list", step({"sessions": [1]}, unvalidated=True), step(list_doc()))
+    assert call(fake, "list", "--bogus").exit_is(2)
+    assert json.loads(call(fake, "list", "--json").stdout) == {"sessions": [1]}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--version"],
+        ["start", "--json", "--kind", "audit", "--label", "a=b", "--label", "c=d"],
+        ["start", "--json", "--tools", "Read", "Grep", "--no-auto-exit", "--implicit-done"],
+        ["start", "--json", "--resume", "cs-aaaaaaab", "--fork", "--reset", "prompt"],
+        ["start", "--json", "--max-turns", "-1"],  # a negative number is a value
+        ["start", "--json", "--timeout=10m", "--dry-run", "--actor", "me"],
+        ["exec", "--session-id", "cs-aaaaaaab", "--run", "2", "--json"],
+        ["status", "cs-aaaaaaab", "--json", "--run", "2"],
+        ["status", "--json", "cs-aaaaaaab"],
+        ["stop", "cs-aaaaaaab", "--grace", "5s", "--dry-run", "--json"],
+        ["list", "--config", "c.yaml", "--verbose", "--yes", "--json", "--state", "running"],
+        ["list", "--json", "--limit", "5", "--live", "--report-status", "done"],
+        ["forget", "--purge", "--json", "cs-aaaaaaab"],
+        ["forget", "--older-than", "30d", "--json"],
+    ],
+)
+def test_a_well_formed_call_gets_its_scripted_step(tmp_path: Path, argv: list[str]) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    for key in (
+        "--version",
+        "start",
+        "start --dry-run",
+        "exec",
+        "status",
+        "stop",
+        "list",
+        "forget",
+    ):
+        fake.script(key, step("ok\n", unvalidated=True))
+    result = call(fake, *argv)
+    assert result.ok and result.stdout == "ok\n", result.stderr
+
+
+# -- scripting a step the real program could not produce -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "extra", "exit_code"),
+    [
+        ("usage", {}, 2),
+        ("not_found", {}, 10),
+        ("refused", {"reason": "live"}, 20),
+        ("ambiguous", {"matches": ["cs-aaaaaaab", "cs-aaaaaaac"]}, 21),
+        ("failed", {}, 12),
+        ("schema_newer", {}, 12),
+        ("internal", {}, 1),
+    ],
+)
+def test_an_error_code_must_come_with_its_exit(
+    tmp_path: Path, code: str, extra: dict[str, object], exit_code: int
+) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("stop", step(error_doc(code, "m", **extra), exit=exit_code))
+    for wrong in sorted({1, 2, 10, 12, 20, 21} - {exit_code}):
+        with pytest.raises(AssertionError, match="goes with exit"):
+            fake.script("stop", step(error_doc(code, "m", **extra), exit=wrong))
+
+
+def test_launch_failed_is_for_start_only(tmp_path: Path) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    doc = error_doc(
+        "launch_failed", "m", csession_id="cs-aaaaaaab", run=1, end_reason="unsafe_cwd", hint=None
+    )
+    fake.script("start", step(doc, exit=12))
+    with pytest.raises(AssertionError, match="only for start"):
+        fake.script("status", step(doc, exit=12))
+
+
+@pytest.mark.parametrize(
+    ("key", "exit_code"),
+    [("status", 13), ("list", 11), ("start", 11), ("start", 20 + 3), ("stop", 14), ("forget", 16)],
+)
+def test_an_exit_the_command_never_ends_with_cannot_be_scripted(
+    tmp_path: Path, key: str, exit_code: int
+) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    with pytest.raises(AssertionError, match="is not one of"):
+        fake.script(key, step(error_doc("failed", "m"), exit=exit_code))
+
+
+def test_an_outcome_document_must_say_the_exit_the_step_has(tmp_path: Path) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("exec", step(outcome_doc(exit_code=16), exit=16))
+    with pytest.raises(AssertionError, match="exit_code 16"):
+        fake.script("exec", step(outcome_doc(exit_code=16), exit=15))
+    assert call(fake, "exec", "--json").exit_is(16)
+    fake.assert_outputs_valid()
+
+
+def test_an_unvalidated_step_is_not_checked_against_the_exit_rules(tmp_path: Path) -> None:
+    FakeClaudeSession(tmp_path).script("status", step({"x": 1}, exit=13, unvalidated=True))
+
+
+# -- the call log ----------------------------------------------------------------------------
+
+
+def test_a_call_killed_while_it_sleeps_is_logged_but_never_as_printed(tmp_path: Path) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("status", step({"x": 1}, unvalidated=True, sleep=60))
+    assert call(fake, "status", "cs-aaaaaaab", "--json", timeout=0.5).status is CallStatus.TIMEOUT
+    (logged,) = fake.calls()
+    assert logged["key"] == "status" and logged["printed"] is None
+    fake.assert_outputs_valid()
+
+
+def test_a_finished_call_is_logged_as_printed(tmp_path: Path) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("list", step(list_doc(), exit=0))
+    call(fake, "list", "--json")
+    (logged,) = fake.calls()
+    assert logged["printed"] == {"stdout": json.dumps(list_doc()), "exit": 0}
+
+
+def test_concurrent_calls_each_get_their_own_step(tmp_path: Path) -> None:
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("list", *(step(str(n), unvalidated=True) for n in range(6)))
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: call(fake, "list", "--json"), range(6)))
+    assert sorted(r.stdout for r in results) == [str(n) for n in range(6)]
+    assert len(fake.calls()) == 6

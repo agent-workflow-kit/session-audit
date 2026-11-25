@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import errno
+import math
 import os
 import signal
 import stat
+import subprocess
 import sys
 import time
 from datetime import timedelta
@@ -71,7 +73,7 @@ def test_invalid_utf8_output_is_replaced_not_raised() -> None:
 
 
 def test_environment_is_exactly_what_the_caller_passes() -> None:
-    result = SystemGateway().run(["env"], timeout=10, env={"ONLY": "1"})
+    result = SystemGateway().run(["printenv"], timeout=10, env={"ONLY": "1"})
     assert result.stdout == "ONLY=1\n"
 
 
@@ -104,11 +106,36 @@ def test_bad_argv_is_refused(argv: list[str]) -> None:
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"timeout": 0}, {"timeout": -1}, {"timeout": 1, "stdout_limit": 0}]
+    "kwargs",
+    [
+        {"timeout": 0},
+        {"timeout": -1},
+        {"timeout": math.nan},
+        {"timeout": math.inf},
+        {"timeout": -math.inf},
+        {"timeout": 1, "stdout_limit": 0},
+    ],
 )
 def test_bad_limits_are_refused(kwargs: dict[str, float]) -> None:
     with pytest.raises(ValueError):
         SystemGateway().run(["true"], **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "env",
+    [{"A\0B": "x"}, {"A": "b\0"}, {"": "x"}, {"A=B": "x"}, {"A": 1}, {1: "x"}],
+)
+def test_a_bad_environment_is_refused(env: dict[str, str]) -> None:
+    with pytest.raises(ValueError):
+        SystemGateway().run(["true"], timeout=10, env=env)
+
+
+def test_stdin_with_a_lone_surrogate_is_refused_before_anything_starts(
+    _process_guard: list[subprocess.Popen[bytes]],
+) -> None:
+    with pytest.raises(ValueError):
+        SystemGateway().run(["cat"], timeout=10, stdin="bad \ud800 text")
+    assert _process_guard == []  # nothing was started, so nothing can be left behind
 
 
 def test_child_leads_its_own_process_group() -> None:
@@ -164,12 +191,31 @@ def test_stdout_over_the_cap_kills_the_group_and_is_a_failed_call() -> None:
     result = SystemGateway(kill_grace=2).run([PY, "-c", code], timeout=30, stdout_limit=1000)
     assert result.status is CallStatus.OUTPUT_LIMIT
     assert len(result.stdout) <= 1000 and result.returncode is None and not result.ok
+    assert "stdout cap" in result.detail and "after" not in result.detail
+
+
+def test_stdout_over_the_cap_kills_a_grandchild_too(tmp_path: Path) -> None:
+    pids = tmp_path / "grandchild.pid"
+    flood = "import sys\nwhile True: sys.stdout.write('x' * 65536); sys.stdout.flush()"
+    script = f"sleep 60 & echo $! > '{pids}'; exec '{PY}' -c \"{flood}\""
+    result = SystemGateway(kill_grace=2).run(["sh", "-c", script], timeout=30, stdout_limit=1000)
+    assert result.status is CallStatus.OUTPUT_LIMIT
+    assert wait_until_gone(read_pid(pids)), "the grandchild survived the group kill"
 
 
 def test_stdout_over_the_cap_of_a_program_that_already_exited() -> None:
     code = "import sys; sys.stdout.write('x' * 200000)"
     result = SystemGateway().run([PY, "-c", code], timeout=30, stdout_limit=1000)
     assert result.status is CallStatus.OUTPUT_LIMIT and not result.ok
+    assert "stdout cap" in result.detail
+
+
+def test_a_stderr_flood_cannot_starve_the_timeout() -> None:
+    code = "import sys\nwhile True: sys.stderr.write('e' * 65536); sys.stderr.flush()"
+    started = time.monotonic()
+    result = SystemGateway(kill_grace=2).run([PY, "-c", code], timeout=0.5, stdout_limit=10_000)
+    assert result.status is CallStatus.TIMEOUT
+    assert time.monotonic() - started < 15
 
 
 def test_stdout_exactly_at_the_cap_is_fine() -> None:
@@ -199,6 +245,110 @@ def test_a_grandchild_holding_the_pipes_does_not_hang_the_call(tmp_path: Path) -
             b"sleep"
         ):
             os.kill(leftover, signal.SIGKILL)
+
+
+def test_output_that_arrives_just_before_the_exit_is_taken_by_the_drain_after_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The selector-driven reads are switched off, so only the read after the leader's exit can
+    # deliver the output; the grandchild keeps the pipe open (no EOF) as in the real case.
+    original = SystemGateway._drain
+
+    def only_after_exit(stream, selector, buffer, limit):  # type: ignore[no-untyped-def]
+        if selector is None:
+            original(stream, selector, buffer, limit)
+
+    monkeypatch.setattr(SystemGateway, "_drain", staticmethod(only_after_exit))
+    pids = tmp_path / "grandchild.pid"
+    started = time.monotonic()
+    result = SystemGateway().run(
+        ["sh", "-c", f"sleep 30 & echo $! > '{pids}'; echo late-output"], timeout=20
+    )
+    leftover = read_pid(pids)
+    try:
+        assert result.ok and result.stdout == "late-output\n"
+        assert time.monotonic() - started < 10
+    finally:
+        if not gone(leftover) and Path(f"/proc/{leftover}/cmdline").read_bytes().startswith(
+            b"sleep"
+        ):
+            os.kill(leftover, signal.SIGKILL)
+
+
+def test_an_error_inside_the_supervision_still_ends_the_whole_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def boom(stream, selector, buffer, limit):  # type: ignore[no-untyped-def]
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(SystemGateway, "_drain", staticmethod(boom))
+    pids = tmp_path / "pids"
+    script = f"sleep 60 & echo $$ $! > '{pids}'; echo hi; wait"
+    with pytest.raises(RuntimeError, match="boom"):
+        SystemGateway(kill_grace=2).run(["sh", "-c", script], timeout=30)
+    leader, grandchild = (int(n) for n in pids.read_text(encoding="utf-8").split())
+    assert wait_until_gone(leader) and wait_until_gone(grandchild)
+
+
+# -- ending a group --------------------------------------------------------------------------
+
+MEMBER = """
+import pathlib, signal, sys, time
+def cleanup(*_):
+    time.sleep(0.5)
+    pathlib.Path(sys.argv[1]).write_text("cleaned")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, cleanup)
+pathlib.Path(sys.argv[2]).write_text("ready")
+time.sleep(60)
+"""
+
+
+def start_group(tmp_path: Path) -> subprocess.Popen[bytes]:
+    member = tmp_path / "member.py"
+    member.write_text(MEMBER, encoding="utf-8")
+    script = (
+        f"'{PY}' '{member}' '{tmp_path / 'cleaned'}' '{tmp_path / 'ready'}' & "
+        f"while [ ! -f '{tmp_path / 'ready'}' ]; do sleep 0.02; done; "
+        f"trap 'exit 0' TERM; : > '{tmp_path / 'leader-ready'}'; while :; do sleep 0.05; done"
+    )
+    popen = subprocess.Popen(["sh", "-c", script], process_group=0)
+    assert wait_for_file(tmp_path / "leader-ready"), "the group did not come up"
+    return popen
+
+
+def wait_for_file(path: Path, seconds: float = 10.0) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end and not path.exists():
+        time.sleep(0.02)
+    return path.exists()
+
+
+def test_end_group_waits_for_a_member_still_cleaning_up_after_the_leader_exits(
+    tmp_path: Path,
+) -> None:
+    leader = start_group(tmp_path)
+    started = time.monotonic()
+    SystemGateway(kill_grace=10)._end_group(leader)
+    assert (tmp_path / "cleaned").read_text(encoding="utf-8") == "cleaned"
+    assert time.monotonic() - started < 9  # it did not sit out the whole grace
+
+
+def test_end_group_still_kills_a_member_that_outlasts_the_grace(tmp_path: Path) -> None:
+    leader = start_group(tmp_path)
+    SystemGateway(kill_grace=0.2)._end_group(leader)  # the member needs 0.5 s to clean up
+    assert not (tmp_path / "cleaned").exists()
+
+
+def test_end_group_with_nothing_left_after_the_leader_returns_at_once() -> None:
+    leader = subprocess.Popen(
+        ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 0.05; done"], process_group=0
+    )
+    time.sleep(0.3)  # let the trap be installed
+    started = time.monotonic()
+    SystemGateway(kill_grace=30)._end_group(leader)
+    assert leader.returncode == 0
+    assert time.monotonic() - started < 10
 
 
 # -- clock and files -------------------------------------------------------------------------

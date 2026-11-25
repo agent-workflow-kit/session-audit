@@ -12,11 +12,18 @@ The API is defined here once; later modules extend it only when they need a new 
   failed call: its result is never read as an exit code, so it can never be mistaken for exit 0
   (success) or exit 10 (not found, for claude-session).
 - Untrusted or agent-generated text goes in ``stdin`` or in files, never in argv or env.
+
+todo(#28): ``run`` is the only way to start a program, and it returns when the program is gone.
+The hooks and the retro need a spawn/handle API instead: start the program, hand back its exact
+child PID (to signal that process, not the group), wait up to a given time (30 s for the retro),
+then stop it, with a ``kill_grace`` per call rather than per gateway. Add it with #28, together
+with a matching fake in ``tests/fake_gateway.py``.
 """
 
 from __future__ import annotations
 
 import enum
+import math
 import os
 import selectors
 import signal
@@ -33,6 +40,8 @@ KILL_GRACE_SECONDS = 5.0
 CRONTAB_TIMEOUT_SECONDS = 30.0
 _POLL_SECONDS = 0.05
 _READ_CHUNK = 65536
+_DRAIN_CHUNKS = 16
+_GROUP_POLL_SECONDS = 0.02
 
 
 class CallStatus(enum.Enum):
@@ -125,8 +134,25 @@ class SystemGateway:
     ) -> CallResult:
         if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
             raise ValueError("argv must be a non-empty list of strings without NUL")
-        if timeout <= 0 or stdout_limit <= 0:
-            raise ValueError("timeout and stdout_limit must be positive")
+        if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be a finite positive number")
+        if stdout_limit <= 0:
+            raise ValueError("stdout_limit must be positive")
+        if env is not None:
+            for name, value in env.items():
+                if (
+                    not isinstance(name, str)
+                    or not isinstance(value, str)
+                    or not name
+                    or "=" in name
+                    or "\0" in name
+                    or "\0" in value
+                ):
+                    raise ValueError(
+                        "env must map non-empty names (no '=' or NUL) to strings without NUL"
+                    )
+        # Strict: a lone surrogate is a bug in the caller, refused before anything is started.
+        data = stdin.encode("utf-8", "strict") if stdin is not None else None
         try:
             popen = subprocess.Popen(
                 list(argv),
@@ -140,19 +166,19 @@ class SystemGateway:
             )
         except OSError as exc:
             return CallResult(CallStatus.SPAWN_FAILED, detail=f"{type(exc).__name__}: {exc}")
-        return self._supervise(popen, stdin, timeout, stdout_limit)
+        return self._supervise(popen, data, timeout, stdout_limit)
 
     def _supervise(
         self,
         popen: subprocess.Popen[bytes],
-        stdin: str | None,
+        stdin: bytes | None,
         timeout: float,
         stdout_limit: int,
     ) -> CallResult:
         deadline = time.monotonic() + timeout
         out = bytearray()
         err = bytearray()
-        pending = stdin.encode("utf-8", "replace") if stdin is not None else b""
+        pending = stdin if stdin is not None else b""
         selector = selectors.DefaultSelector()
         try:
             assert popen.stdout is not None and popen.stderr is not None
@@ -180,6 +206,9 @@ class SystemGateway:
                 if len(out) > stdout_limit:
                     failure = CallStatus.OUTPUT_LIMIT
                     break
+                # todo(#25): when the leader exits normally the rest of its group is left running
+                # (only a failed call ends the group). The hooks (``sh -c``) must kill the
+                # remaining group members after a normal leader exit; add that with #25.
                 if popen.poll() is not None:
                     # The leader is gone: take what is already buffered, then stop reading, so a
                     # grandchild holding a pipe open cannot keep this call waiting.
@@ -194,12 +223,17 @@ class SystemGateway:
                     failure,
                     stdout=_text(out[:stdout_limit]),
                     stderr=_text(err[:stdout_limit]),
-                    detail=f"{failure.value} after {timeout:g}s (stdout cap {stdout_limit})",
+                    detail=_detail(failure, timeout, stdout_limit),
                 )
             code = popen.returncode
             text = _text(out[:stdout_limit]), _text(err[:stdout_limit])
             if len(out) > stdout_limit:
-                return CallResult(CallStatus.OUTPUT_LIMIT, stdout=text[0], stderr=text[1])
+                return CallResult(
+                    CallStatus.OUTPUT_LIMIT,
+                    stdout=text[0],
+                    stderr=text[1],
+                    detail=_detail(CallStatus.OUTPUT_LIMIT, timeout, stdout_limit),
+                )
             if code < 0:
                 return CallResult(CallStatus.SIGNALED, stdout=text[0], stderr=text[1], signal=-code)
             return CallResult(CallStatus.EXITED, code, text[0], text[1])
@@ -236,9 +270,12 @@ class SystemGateway:
         buffer: bytearray,
         limit: int,
     ) -> None:
-        """Read what is available; keep at most ``limit`` + 1 bytes (one over marks a breach)."""
+        """Read what is available; keep at most ``limit`` + 1 bytes (one over marks a breach).
+
+        At most ``_DRAIN_CHUNKS`` reads per call, so a program that writes without pause cannot
+        keep the caller here and starve its timeout and output-cap checks."""
         fileno = stream.fileno()
-        while True:
+        for _ in range(_DRAIN_CHUNKS):
             try:
                 chunk = os.read(fileno, _READ_CHUNK)
             except BlockingIOError:
@@ -257,11 +294,17 @@ class SystemGateway:
         """SIGTERM the child's process group, wait ``kill_grace`` for the leader, SIGKILL the
         group. The group id is the leader's pid, which is ours until the leader is reaped."""
         pgid = popen.pid
+        deadline = time.monotonic() + self._kill_grace
         _signal_group(pgid, signal.SIGTERM)
         try:
             popen.wait(timeout=self._kill_grace)
         except subprocess.TimeoutExpired:
             pass
+        # The leader may exit on TERM at once while other members still clean up: they get what
+        # is left of the grace too. No member left (the common case) means no sleep at all. A
+        # group id cannot be reused while a member lives, so polling it is safe.
+        while _group_alive(pgid) and time.monotonic() < deadline:
+            time.sleep(_GROUP_POLL_SECONDS)
         _signal_group(pgid, signal.SIGKILL)
         popen.wait()
 
@@ -286,6 +329,22 @@ class SystemGateway:
 
     def crontab_write(self, text: str) -> CallResult:
         return self.run(["crontab", "-"], timeout=CRONTAB_TIMEOUT_SECONDS, stdin=text)
+
+
+def _detail(failure: CallStatus, timeout: float, stdout_limit: int) -> str:
+    if failure is CallStatus.OUTPUT_LIMIT:
+        return f"stdout cap exceeded (cap {stdout_limit} bytes)"
+    return f"{failure.value} after {timeout:g}s"
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _signal_group(pgid: int, sig: int) -> None:

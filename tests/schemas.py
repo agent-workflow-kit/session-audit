@@ -19,6 +19,8 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 TESTS_ROOT = Path(__file__).resolve().parent
+# tests/schemas/ (the pinned copies below it) must never get an __init__.py: it would clash with
+# this module, tests/schemas.py, as the package ``tests.schemas``.
 OWN_SCHEMA_ROOT = TESTS_ROOT.parent / "schemas"
 PINNED_SCHEMA_ROOT = TESTS_ROOT / "schemas" / "claude-session"
 PINNED_VERSION = "0.45.3"

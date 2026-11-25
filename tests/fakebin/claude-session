@@ -14,15 +14,131 @@ Scenario: {"<key>": [step, ...]} where key is the subcommand (``list``, ``status
 given, or ``--version``. The nth call with a key gets step n; calls past the last repeat the
 last step. A step is {"stdout": <json or text>, "stderr": text, "exit": int, "sleep": seconds,
 "ignore_term": bool, "stdin": bool (read and log stdin), "pid_file": path}.
+
+Grammar: the commands start, exec, status, stop, list and forget follow claude-session's real
+argument grammar (argparse, no abbreviations): the global flags (--json, --config, --verbose,
+--quiet, --yes) are accepted only after the subcommand; only --version and -h/--help come
+before it; a flag the command does not have, a missing value, a missing or extra positional or
+``--`` is exit 2 with ``claude-session: error: ...`` on stderr (and the error envelope on stdout
+when --json is anywhere in argv); ``start`` without --json is exit 2. A refused call is logged
+under the key ``<usage>`` and consumes no step. Other commands are not checked.
+
+Call log: one line per call when it starts (key, argv, pid, id, stdin, ``printed``: null), a
+``{"stdin_of": <id>, "stdin": text}`` line when the step reads stdin, and a
+``{"done": <id>, "printed": {...}}`` line once its output is written, so a call killed while it
+sleeps never shows as printed. The nth-call count and the log append are one locked step.
 """
 
+import fcntl
 import json
 import os
+import re
 import signal
 import sys
 import time
 
 UNSCRIPTED = 99
+USAGE = 2
+
+NO_VALUE, ONE_VALUE, MANY_VALUES = 0, 1, "+"
+GLOBAL_FLAGS = {"--json": 0, "--config": 1, "--verbose": 0, "--quiet": 0, "--yes": 0}
+AUDIT_FLAGS = {"--actor": 1, "--decision-id": 1}
+LAUNCH_FLAGS = {
+    "--kind": 1, "--mode": 1, "--skill": 1, "--prompt-file": 1, "--input-file": 1,
+    "--plugin-dir": 1, "--repo": 1, "--label": 1, "--hook": 1, "--hook-timeout": 1,
+    "--cwd": 1, "--timeout": 1, "--max-turns": 1, "--model": 1, "--permission-profile": 1,
+    "--sandbox": 1, "--setting-sources": 1, "--reads-third-party": 0, "--auto-exit": 0,
+    "--no-auto-exit": 0, "--implicit-done": 0, "--no-implicit-done": 0, "--tools": "+",
+    "--env-allow": 1, "--env-allowlist-only": 1, "--outcome-file": 1, "--dry-run": 0,
+    **AUDIT_FLAGS,
+}
+RESUMABLE_FLAGS = {
+    "--fork": 0, "--reset": 1, "--allow-tainted": 0, "--override-escalation": 0, "--resume": 1,
+}
+# command -> (flags of its own, fewest positionals, most positionals)
+COMMANDS = {
+    "start": ({**LAUNCH_FLAGS, **RESUMABLE_FLAGS}, 0, 0),
+    "exec": ({**LAUNCH_FLAGS, "--session-id": 1, "--run": 1}, 0, 0),
+    "status": ({"--run": 1}, 1, 1),
+    "stop": ({"--grace": 1, "--dry-run": 0, **AUDIT_FLAGS}, 1, 1),
+    "list": (
+        {
+            "--label": 1, "--state": 1, "--kind": 1, "--launch-kind": 1, "--run-kind": 1,
+            "--mode": 1, "--needs-input": 0, "--pending": 0, "--repo": 1, "--since": 1,
+            "--limit": 1, "--forked-from": 1, "--report-status": 1, "--live": 0,
+            "--tainted": 0,
+        },
+        0,
+        0,
+    ),
+    "forget": (
+        {
+            "--older-than": 1, "--state": 1, "--kind": 1, "--label": 1, "--purge": 0,
+            "--dry-run": 0, **AUDIT_FLAGS,
+        },
+        0,
+        1,
+    ),
+}
+NEGATIVE_NUMBER = re.compile(r"^-\d+$|^-\d*\.\d+$")
+
+
+def is_option(token):
+    return token.startswith("-") and len(token) > 1 and not NEGATIVE_NUMBER.match(token)
+
+
+def grammar_error(argv):
+    """The usage error message for ``argv``, or None when the call is well formed."""
+    if not argv:
+        return "the following arguments are required: <command>"
+    if argv[0] in ("--version", "-h", "--help"):
+        return None
+    if is_option(argv[0]):
+        return "unrecognized arguments: " + argv[0]
+    sub, rest = argv[0], argv[1:]
+    if sub not in COMMANDS:
+        return None  # not checked
+    own, fewest, most = COMMANDS[sub]
+    flags = {**GLOBAL_FLAGS, **own}
+    positionals = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token == "--":
+            return "unrecognized arguments: --"
+        if not is_option(token):
+            positionals.append(token)
+            index += 1
+            continue
+        name, equals, _ = token.partition("=") if token.startswith("--") else (token, "", "")
+        if name not in flags:
+            return "unrecognized arguments: " + token
+        arity = flags[name]
+        if arity == NO_VALUE:
+            if equals:
+                return "argument %s: ignored explicit argument" % name
+            index += 1
+        elif equals:
+            index += 1
+        else:
+            values = 0
+            index += 1
+            while index < len(rest) and not is_option(rest[index]) and rest[index] != "--":
+                values += 1
+                index += 1
+                if arity == ONE_VALUE:
+                    break
+            if values == 0:
+                return "argument %s: expected %s argument" % (
+                    name, "at least one" if arity == MANY_VALUES else "one"
+                )
+    if len(positionals) < fewest:
+        return "the following arguments are required: id"
+    if len(positionals) > most:
+        return "unrecognized arguments: " + " ".join(positionals[most:])
+    if sub == "start" and "--json" not in rest:
+        return "start requires --json"
+    return None
 
 
 def call_key(argv):
@@ -37,30 +153,65 @@ def call_key(argv):
     return sub
 
 
+def append(path, entry):
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def log_start(log_path, key, argv, entry):
+    """Count the earlier calls with ``key`` and append this call's line, as one locked step."""
+    with open(log_path + ".lock", "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        seen = 0
+        if os.path.exists(log_path):
+            with open(log_path, encoding="utf-8") as handle:
+                for line in handle:
+                    if json.loads(line).get("key") == key:
+                        seen += 1
+        append(log_path, entry)
+    return seen
+
+
+def refuse(log_path, argv, message):
+    sys.stderr.write("claude-session: error: %s\n" % message)
+    text = ""
+    if "--json" in argv:
+        text = json.dumps({"error": {"code": "usage", "message": message}}) + "\n"
+        sys.stdout.write(text)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    entry = {"key": "<usage>", "argv": argv, "pid": os.getpid(), "stdin": None}
+    entry["printed"] = {"stdout": text, "exit": USAGE}
+    with open(log_path + ".lock", "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        append(log_path, entry)
+    return USAGE
+
+
 def main(argv):
     scenario_path = os.environ["FAKE_CLAUDE_SESSION_SCENARIO"]
     log_path = os.environ["FAKE_CLAUDE_SESSION_LOG"]
     with open(scenario_path, encoding="utf-8") as handle:
         scenario = json.load(handle)
+    message = grammar_error(argv)
+    if message is not None:
+        return refuse(log_path, argv, message)
     key = call_key(argv)
-    seen = 0
-    if os.path.exists(log_path):
-        with open(log_path, encoding="utf-8") as handle:
-            seen = sum(1 for line in handle if json.loads(line)["key"] == key)
+    call_id = "%d-%d" % (os.getpid(), time.time_ns())
+    entry = {"key": key, "argv": argv, "pid": os.getpid(), "id": call_id, "stdin": None}
     steps = scenario.get(key)
-    entry = {"key": key, "argv": argv, "pid": os.getpid(), "stdin": None, "printed": None}
     if not steps:
         entry["printed"] = {"stdout": "", "exit": UNSCRIPTED}
-        append(log_path, entry)
+        log_start(log_path, key, argv, entry)
         sys.stderr.write("fake claude-session: no step scripted for %r\n" % key)
         return UNSCRIPTED
+    entry["printed"] = None
+    seen = log_start(log_path, key, argv, entry)
     step = steps[min(seen, len(steps) - 1)]
     if step.get("stdin"):
-        entry["stdin"] = sys.stdin.read()
+        append(log_path, {"stdin_of": call_id, "stdin": sys.stdin.read()})
     stdout = step.get("stdout", "")
     text = stdout if isinstance(stdout, str) else json.dumps(stdout)
-    entry["printed"] = {"stdout": text, "exit": step.get("exit", 0)}
-    append(log_path, entry)
     if step.get("pid_file"):
         with open(step["pid_file"], "w", encoding="utf-8") as handle:
             handle.write(str(os.getpid()))
@@ -71,12 +222,9 @@ def main(argv):
     sys.stdout.write(text)
     sys.stdout.flush()
     sys.stderr.write(step.get("stderr", ""))
+    sys.stderr.flush()
+    append(log_path, {"done": call_id, "printed": {"stdout": text, "exit": step.get("exit", 0)}})
     return step.get("exit", 0)
-
-
-def append(path, entry):
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry) + "\n")
 
 
 if __name__ == "__main__":
