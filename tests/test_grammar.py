@@ -734,6 +734,10 @@ def test_when_result_is_utc():
         (0.25, timedelta(milliseconds=250)),
         (7200.0, sec(7200)),
         (0.1, timedelta(milliseconds=100)),
+        (0.3, timedelta(microseconds=300000)),
+        (0.7, timedelta(microseconds=700000)),
+        (1.001, timedelta(microseconds=1001000)),
+        (2.675, timedelta(microseconds=2675000)),
     ],
 )
 def test_duration_accepts(value, expected):
@@ -834,8 +838,12 @@ def test_duration_fraction_boundaries_are_exact():
     refuses(lambda: parse_duration("7200.0000000001", field=F, maximum=sec(7200)))
     refuses(lambda: parse_duration("120.000001m", field=F, maximum=sec(7200)))
     refuses(lambda: parse_duration("7200000.001ms", field=F, maximum=sec(7200)))
-    # a float is compared by its exact binary value, never rounded onto the maximum
+    # a float is read by its shortest decimal form (what the user typed), so 7.2 is 7.2 s,
+    # while a value that really is past the maximum is still refused
     refuses(lambda: parse_duration(7200.000000000001, field=F, maximum=sec(7200)))
+    assert parse_duration(7.2, field=F, maximum=sec(7.2)) == timedelta(microseconds=7200000)
+    got = parse_duration(0.015, field=F, maximum=sec(7200), minimum=timedelta(milliseconds=15))
+    assert got == timedelta(microseconds=15000)
     assert parse_duration(7200, field=F, maximum=sec(7200)) == sec(7200)
     refuses(lambda: parse_duration(0.000999, field=F, maximum=sec(7200), minimum=sec(1)))
     assert parse_duration("1.000", field=F, maximum=sec(7200), minimum=sec(1)) == sec(1)
@@ -844,6 +852,22 @@ def test_duration_fraction_boundaries_are_exact():
     assert got == timedelta(days=1, hours=12)
     refuses(lambda: parse_duration("1.5d", field=F, maximum=timedelta(days=3650)))
     assert isinstance(parse_duration("1.5s", field=F, maximum=sec(7200)), timedelta)
+
+
+def test_duration_extreme_floats_are_usage_errors():
+    refuses(lambda: parse_duration(1e308, field=F, maximum=sec(7200)))
+    refuses(lambda: parse_duration(5e-324, field=F, maximum=sec(7200)))
+    refuses(lambda: parse_duration(5e-324, field=F, maximum=sec(7200), minimum=timedelta(0)))
+
+
+def test_duration_truncated_to_zero_is_refused_even_with_a_zero_minimum():
+    for value in ("0.0000001", 1e-7, "0.0000009s"):
+        refuses(lambda v=value: parse_duration(v, field=F, maximum=sec(7200), minimum=timedelta(0)))
+
+
+def test_when_hint_names_seconds():
+    err = refuses(lambda: parse_when("2026-01-01T10:00Z", field=F, now=NOW, time_zone=UTC_ZONE))
+    assert err.hint and "HH:MM:SS" in err.hint
 
 
 def test_duration_huge_numbers_are_refused_quickly():

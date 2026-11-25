@@ -338,8 +338,8 @@ def parse_time_zone(value: object, *, field: str) -> ZoneInfo:
 
 
 _WHEN_HINT = (
-    "Use an ISO 8601 time with Z or an offset, a date YYYY-MM-DD, or a duration ago "
-    "such as 30m, 2h or 7d."
+    "Use YYYY-MM-DDTHH:MM:SS (optional .fraction) followed by Z or +HH:MM, a date "
+    "YYYY-MM-DD, or a duration ago such as 30m, 2h or 7d."
 )
 _AGO_HINT = "Use a duration ago: <n>s, <n>m, <n>h or <n>d."
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -444,8 +444,9 @@ def parse_duration(
     Text is ``[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?`` (``d`` too when ``allow_days``; no unit means
     seconds; no ``h``, no sign, 32 characters at most), the grammar of ``schemas/config.json``.
     A number is a finite positive int or float of seconds (a bool is refused). The value is held
-    exactly (``Decimal``, a float by its binary value) and compared with the bounds before
-    anything is rounded, so no input slips past a maximum. Zero in any form is refused; the
+    exactly (``Decimal``, a float by its shortest decimal form, as typed) and compared with the
+    bounds before anything is rounded, so no input slips past a maximum. Zero in any form, also
+    after truncation, is refused; the
     bounds are inclusive."""
     units = "ms, s, m or d" if allow_days else "ms, s or m"
     hint = f"Use <n>{{{units}}} (n may have a fraction) or seconds; zero is not allowed."
@@ -457,7 +458,7 @@ def parse_duration(
     elif isinstance(value, float):
         if not math.isfinite(value):
             raise _bad(field, "invalid duration", hint)
-        seconds = Decimal(value)
+        seconds = Decimal(repr(value))
     else:
         text = _text(value, field, "duration", hint)
         found = _DURATION.fullmatch(text)
@@ -471,6 +472,8 @@ def parse_duration(
     if seconds <= 0 or seconds < _seconds_of(minimum) or seconds > _seconds_of(maximum):
         raise _bad(field, "duration out of range", hint)
     micro = _EXACT.multiply(seconds, _MICRO).to_integral_value(rounding="ROUND_DOWN")
+    if micro == 0:
+        raise _bad(field, "duration out of range", hint)
     return timedelta(microseconds=int(micro))
 
 
