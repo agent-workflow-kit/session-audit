@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "usage",
+    "details": {
+      "field": "--limit"
+    },
+    "message": "a flag is out of range"
+  }
+}

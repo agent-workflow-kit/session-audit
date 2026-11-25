@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "not_found",
+    "details": {
+      "id": "0123abcd"
+    },
+    "message": "not found"
+  }
+}

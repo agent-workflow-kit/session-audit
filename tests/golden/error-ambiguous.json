@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "ambiguous",
+    "details": {
+      "matched": 2,
+      "matches": [
+        "a",
+        "b"
+      ]
+    },
+    "message": "ambiguous prefix"
+  }
+}

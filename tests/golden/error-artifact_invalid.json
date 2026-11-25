@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "artifact_invalid",
+    "details": {
+      "reason": "no_artifact",
+      "retro_id": "ra-abcdefg2"
+    },
+    "message": "the artifact is invalid"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "needs_human",
+    "details": {
+      "reason": "session_blocked",
+      "retro_id": "ra-abcdefg2"
+    },
+    "message": "a human is needed"
+  }
+}
