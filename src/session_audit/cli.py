@@ -194,11 +194,20 @@ def _signals() -> Iterator[None]:
     (``nohup``, a background job) stays ignored. The first delivery ignores the three again, so a
     second signal while the exit is unwinding cannot raise out of ``main`` (a signal during a
     command's own cleanup is the command's concern). SIGPIPE stays ignored so a closed pipe is an
-    ``EPIPE`` error on the write, which ends the run with exit 1. Everything is put back on exit."""
+    ``EPIPE`` error on the write, which ends the run with exit 1. Everything is put back on exit.
+
+    Contract: after the first SIGHUP/SIGINT/SIGTERM the three signals stay ``SIG_IGN`` until
+    ``main`` returns, so a command's cleanup is not interrupted by a second signal. A child
+    spawned during that cleanup inherits ``SIG_IGN`` for them (ignored dispositions survive
+    ``exec``).
+
+    TODO(#28): #28 owns the second-signal policy for command cleanup. It must reset the child
+    signal dispositions when spawning (``restore_signals=True`` or a ``preexec_fn``)."""
     previous: dict[int, Any] = {}
     owned: list[int] = []
 
     def handler(signum: int, _frame: object) -> None:
+        # Contract: stay SIG_IGN until main returns (see the docstring; TODO(#28) for children).
         for sig in owned:
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, signal.SIG_IGN)
