@@ -15,40 +15,40 @@ from session_audit.store import column_names, open_store
 
 from .storehelp import ClockedGateway, state_path
 
-I, T, B, R, V = "INTEGER", "TEXT", "BLOB", "REAL", ""
+N, T, B, R, V = "INTEGER", "TEXT", "BLOB", "REAL", ""
 
 COLUMNS: dict[str, list[tuple[str, str]]] = {
-    "files": [("id", I), ("path", B), ("dev", I), ("inode", I), ("size", I), ("offset", I),
-        ("head_len", I), ("head_sha", T), ("tail_sha", T), ("rules_version", I), ("skip_to_lf", I),
-        ("parse_errors", I), ("unknown_lines", I), ("min_ts", I), ("max_ts", I), ("last_ts", I),
+    "files": [("id", N), ("path", B), ("dev", N), ("inode", N), ("size", N), ("offset", N),
+        ("head_len", N), ("head_sha", T), ("tail_sha", T), ("rules_version", N), ("skip_to_lf", N),
+        ("parse_errors", N), ("unknown_lines", N), ("min_ts", N), ("max_ts", N), ("last_ts", N),
         ("first_cwd", T), ("first_entrypoint", T), ("last_version", T), ("cost_state_usd", R),
-        ("cost_invalid", I), ("copies_dropped", I), ("rereading", I), ("last_read", I),
+        ("cost_invalid", N), ("copies_dropped", N), ("rereading", N), ("last_read", N),
         ("status", T)],
-    "sessions": [("session_id", T), ("project_dir", T), ("main_file_id", I), ("first_ingest_at", I),
-        ("last_ingest_at", I)],
+    "sessions": [("session_id", T), ("project_dir", T), ("main_file_id", N), ("first_ingest_at", N),
+        ("last_ingest_at", N)],
     "agents": [("session_id", T), ("agent_id", T), ("parent_tool_call_id", T), ("agent_type", T),
-        ("file_id", I)],
-    "events": [("id", I), ("key", T), ("ref", T), ("file_id", I), ("file_path", B),
-        ("line_offset", I), ("kind", T), ("ts", I), ("slot", I), ("session_id", T), ("agent_id", T),
-        ("model", T), ("tool", T), ("input_tokens", I), ("output_tokens", I),
-        ("cache_read_tokens", I), ("cache_write_5m_tokens", I), ("cache_write_1h_tokens", I),
-        ("seconds", R), ("native", I), ("counted", I)],
-    "pruned_sessions": [("session_id", T), ("pruned_at", I)],
+        ("file_id", N)],
+    "events": [("id", N), ("key", T), ("ref", T), ("file_id", N), ("file_path", B),
+        ("line_offset", N), ("kind", T), ("ts", N), ("slot", N), ("session_id", T), ("agent_id", T),
+        ("model", T), ("tool", T), ("input_tokens", N), ("output_tokens", N),
+        ("cache_read_tokens", N), ("cache_write_5m_tokens", N), ("cache_write_1h_tokens", N),
+        ("seconds", R), ("native", N), ("counted", N)],
+    "pruned_sessions": [("session_id", T), ("pruned_at", N)],
     "harness_runs": [("csession_id", T), ("updated_at", T), ("claude_session_ids", T), ("kind", T),
-        ("labels", T), ("run", I), ("outcome", T), ("end_reason", T), ("cost_usd", R),
-        ("turns", I), ("skill", T), ("repo", T), ("final", I)],
+        ("labels", T), ("run", N), ("outcome", T), ("end_reason", T), ("cost_usd", R),
+        ("turns", N), ("skill", T), ("repo", T), ("final", N)],
     "retros": [("id", T), ("key", T), ("state", T), ("reason", T), ("scope", T),
-        ("resolved_scope", T), ("skill", T), ("model", T), ("created_at", I), ("started_at", I),
-        ("finished_at", I), ("csession_id", T), ("session_map", T), ("cost_usd", R), ("turns", I),
-        ("outcome", T), ("sandbox", I), ("again_of", T), ("lease_pid", I), ("lease_start", T),
-        ("lease_expires_at", I), ("counts", T), ("dropped", T), ("redacted", I), ("warnings", T),
+        ("resolved_scope", T), ("skill", T), ("model", T), ("created_at", N), ("started_at", N),
+        ("finished_at", N), ("csession_id", T), ("session_map", T), ("cost_usd", R), ("turns", N),
+        ("outcome", T), ("sandbox", N), ("again_of", T), ("lease_pid", N), ("lease_start", T),
+        ("lease_expires_at", N), ("counts", T), ("dropped", T), ("redacted", N), ("warnings", T),
         ("run_token", T), ("digest_sha256", T)],
     "retro_artifacts": [("retro_id", T), ("artifact", T), ("summary", T)],
     "retro_starts": [("day", T), ("retro_id", T)],
     "retro_sessions": [("csession_id", T), ("retro_id", T), ("csession_dir", T), ("private_dir", T),
-        ("project_dir", T), ("cleanup_state", T), ("forgotten_at", I), ("created_at", I)],
+        ("project_dir", T), ("cleanup_state", T), ("forgotten_at", N), ("created_at", N)],
     "meta": [("key", T), ("value", V)],
-    "schema_migrations": [("number", I), ("name", T), ("applied_at", I)],
+    "schema_migrations": [("number", N), ("name", T), ("applied_at", N)],
 }  # fmt: skip
 
 # The only columns that may hold model-written text: validated and redacted before they are
@@ -116,7 +116,10 @@ def test_text_columns_that_could_carry_a_message_are_length_limited(
 
 
 def test_the_event_key_is_unique_per_file(conn: sqlite3.Connection) -> None:
-    sql = "INSERT INTO events (key, file_id, line_offset, kind) VALUES ('kkkkkkkkkkkkkkkk', ?, 0, 'turn')"
+    sql = (
+        "INSERT INTO events (key, file_id, line_offset, kind) "
+        "VALUES ('kkkkkkkkkkkkkkkk', ?, 0, 'turn')"
+    )
     conn.execute(sql, (1,))
     conn.execute(sql, (2,))  # another file: a copy
     with pytest.raises(sqlite3.IntegrityError):

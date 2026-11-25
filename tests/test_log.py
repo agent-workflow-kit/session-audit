@@ -341,10 +341,12 @@ import sys
 from session_audit.gateway import SystemGateway
 from session_audit.log import LogWriter
 w = LogWriter(SystemGateway(), sys.argv[1])
-files = dict.fromkeys(["seen","new","changed","unchanged","unsafe","excluded","vanished","rewritten","remaining"], 1)
+names = ["seen", "new", "changed", "unchanged", "unsafe", "excluded", "vanished", "rewritten"]
+files = dict.fromkeys([*names, "remaining"], 1)
+lines = {"parsed": 1, "errors": 0, "oversized": 0, "unknown": 0}
 for _ in range(60):
-    w.append("auto:" + sys.argv[2], "ingest", complete=True, files=files,
-             lines={"parsed": 1, "errors": 0, "oversized": 0, "unknown": 0}, sessions={"new": 0, "updated": 0})
+    w.append("auto:" + sys.argv[2], "ingest", complete=True, files=files, lines=lines,
+             sessions={"new": 0, "updated": 0})
 """
 
 
