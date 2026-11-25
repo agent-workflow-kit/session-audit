@@ -73,6 +73,9 @@ def refuses(call, *, field: str = F, cls: type[GrammarError] = GrammarUsageError
         call()
     err = info.value
     assert err.field == field
+    if cls is GrammarUsageError:
+        assert err.exit_code == 2
+        assert err.code == "usage"
     return err
 
 
@@ -125,8 +128,9 @@ def test_non_text_values_are_usage_errors():
     for bad in (None, b"5s", 1.5, [5], True):
         refuses(lambda bad=bad: parse_session_id(bad, field=F))  # type: ignore[arg-type]
         refuses(lambda bad=bad: parse_when(bad, field=F, now=NOW, time_zone=UTC_ZONE))  # type: ignore[arg-type]
-    for bad in (None, b"5s", 1.5, [5], True):
+    for bad in (None, b"5s", [5], True):  # a float is a valid duration (seconds)
         refuses(lambda bad=bad: parse_duration(bad, field=F, maximum=sec(9)))  # type: ignore[arg-type]
+    for bad in (None, b"5s", 1.5, [5], True):
         refuses(lambda bad=bad: parse_size(bad, field=F))  # type: ignore[arg-type]
         refuses(lambda bad=bad: parse_int(bad, field=F, minimum=1, maximum=9))  # type: ignore[arg-type]
 
@@ -431,6 +435,13 @@ def test_time_zone_names():
         " UTC",
         "zone.tab",
         ".",
+        "localtime",
+        "posixrules",
+        "Factory",
+        "posix/UTC",
+        "posix/America/New_York",
+        "right/UTC",
+        "right/America/New_York",
     ],
 )
 def test_time_zone_refusals(text: str):
@@ -444,13 +455,12 @@ def test_time_zone_refusals(text: str):
 @pytest.mark.parametrize(
     ("text", "seconds"),
     [
-        ("0s", 0),
         ("1s", 1),
         ("90s", 90),
         ("5m", 300),
         ("2h", 7200),
         ("3d", 259200),
-        ("007d", 7 * 86400),
+        ("999999999s", 999999999),
     ],
 )
 def test_ago_units(text: str, seconds: int):
@@ -484,6 +494,13 @@ def test_ago_units(text: str, seconds: int):
         "5mm",
         "5m5s",
         "0x10s",
+        "0s",
+        "0m",
+        "00s",
+        "05m",
+        "007d",
+        "1234567890s",
+        "1" * 10 + "d",
     ],
 )
 def test_ago_refusals(text: str):
@@ -508,11 +525,8 @@ def test_when_iso_with_z_and_offsets():
     got = parse_when("2026-11-20T10:00:00+05:30", field=F, now=NOW, time_zone=UTC_ZONE)
     assert got == datetime(2026, 11, 20, 4, 30, tzinfo=UTC)
     assert got.utcoffset() == timedelta(0)
-    assert parse_when("2026-11-20T10:00-0800", field=F, now=NOW, time_zone=UTC_ZONE) == datetime(
-        2026, 11, 20, 18, tzinfo=UTC
-    )
-    assert parse_when("2026-11-20T10:00:00-08", field=F, now=NOW, time_zone=UTC_ZONE) == datetime(
-        2026, 11, 20, 18, tzinfo=UTC
+    assert parse_when("2026-11-20T10:00:00-08:00", field=F, now=NOW, time_zone=UTC_ZONE) == (
+        datetime(2026, 11, 20, 18, tzinfo=UTC)
     )
     assert parse_when(
         "2026-11-20T10:00:00.123456789Z", field=F, now=NOW, time_zone=UTC_ZONE
@@ -536,6 +550,12 @@ def test_when_iso_ignores_time_zone_and_clock():
     [
         "2026-11-20T10:00:00",  # no offset
         "2026-11-20T10:00",
+        "2026-11-20T10:00Z",  # seconds are required (defs.json)
+        "2026-11-20T10:00+05:30",
+        "2026-11-20T10:00-0800",
+        "2026-11-20T10:00:00-08",  # only +-HH:MM
+        "2026-11-20T10:00:00-0800",
+        "2026-11-20T10:00:00+05",
         "2026-11-20 10:00:00Z",
         "2026-11-20t10:00:00Z",
         "2026-11-20T10:00:00z",
@@ -704,6 +724,16 @@ def test_when_result_is_utc():
         ("007", sec(7)),
         ("7200", sec(7200)),
         ("120m", sec(7200)),
+        ("1.5s", timedelta(milliseconds=1500)),
+        ("1.5", timedelta(milliseconds=1500)),
+        ("0.5m", sec(30)),
+        ("250.5ms", timedelta(microseconds=250500)),
+        ("120.0m", sec(7200)),
+        ("007.50s", sec(7.5)),
+        (1.5, timedelta(milliseconds=1500)),
+        (0.25, timedelta(milliseconds=250)),
+        (7200.0, sec(7200)),
+        (0.1, timedelta(milliseconds=100)),
     ],
 )
 def test_duration_accepts(value, expected):
@@ -724,8 +754,17 @@ def test_duration_accepts(value, expected):
         "-1",
         "-5s",
         "+5s",
-        "5.5",
-        "5.5s",
+        "0.0",
+        "0.0s",
+        "0.00ms",
+        "00.0m",
+        ".5s",
+        "5.",
+        "5.s",
+        "5.5.5s",
+        "1.5h",
+        "1234567890s",
+        "1234567890.5s",
         "1e3",
         "5h",
         "5d",
@@ -748,6 +787,19 @@ def test_duration_accepts(value, expected):
         "5s5s",
         "9" * 400,
         "9" * 5000 + "s",
+        "1." + "0" * 40 + "s",
+        0.0,
+        -0.5,
+        -0.0,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        1e300,
+        True,
+        False,
+        None,
+        7200.5,
+        0.0005,
     ],
 )
 def test_duration_refusals(value):
@@ -774,6 +826,24 @@ def test_duration_maximum_and_minimum_are_inclusive():
     refuses(lambda: parse_duration("121m", field=F, maximum=sec(7200)))
     assert parse_duration("1s", field=F, maximum=sec(7200), minimum=sec(1)) == sec(1)
     refuses(lambda: parse_duration("999ms", field=F, maximum=sec(7200), minimum=sec(1)))
+
+
+def test_duration_fraction_boundaries_are_exact():
+    assert parse_duration("7200.0", field=F, maximum=sec(7200)) == sec(7200)
+    refuses(lambda: parse_duration("7200.000001", field=F, maximum=sec(7200)))
+    refuses(lambda: parse_duration("7200.0000000001", field=F, maximum=sec(7200)))
+    refuses(lambda: parse_duration("120.000001m", field=F, maximum=sec(7200)))
+    refuses(lambda: parse_duration("7200000.001ms", field=F, maximum=sec(7200)))
+    # a float is compared by its exact binary value, never rounded onto the maximum
+    refuses(lambda: parse_duration(7200.000000000001, field=F, maximum=sec(7200)))
+    assert parse_duration(7200, field=F, maximum=sec(7200)) == sec(7200)
+    refuses(lambda: parse_duration(0.000999, field=F, maximum=sec(7200), minimum=sec(1)))
+    assert parse_duration("1.000", field=F, maximum=sec(7200), minimum=sec(1)) == sec(1)
+    refuses(lambda: parse_duration("0.999999s", field=F, maximum=sec(7200), minimum=sec(1)))
+    got = parse_duration("1.5d", field=F, maximum=timedelta(days=3650), allow_days=True)
+    assert got == timedelta(days=1, hours=12)
+    refuses(lambda: parse_duration("1.5d", field=F, maximum=timedelta(days=3650)))
+    assert isinstance(parse_duration("1.5s", field=F, maximum=sec(7200)), timedelta)
 
 
 def test_duration_huge_numbers_are_refused_quickly():
@@ -813,11 +883,11 @@ def test_duration_limits_documented():
         ("200KB", 204800),
         ("1MB", 1048576),
         ("16MB", 16 * 1048576),
-        ("007KB", 7168),
+        ("9999999999", 9999999999),
     ],
 )
 def test_size_accepts(value, expected):
-    assert parse_size(value, field="digest.max_bytes") == expected
+    assert parse_size(value, field="digest.max_bytes", maximum=10**10) == expected
 
 
 @pytest.mark.parametrize(
@@ -854,6 +924,15 @@ def test_size_accepts(value, expected):
         "0x10",
         "1KBB",
         "9" * 5000 + "B",
+        "007KB",
+        "01",
+        "00",
+        "007",
+        "12345678901",
+        "12345678901B",
+        "99999999999MB",
+        True,
+        1.5,
     ],
 )
 def test_size_refusals(value):
@@ -866,6 +945,15 @@ def test_size_maximum():
     refuses(lambda: parse_size("1048577", field=F, maximum=1048576))
     refuses(lambda: parse_size(str(10**30), field=F))
     refuses(lambda: parse_size("99999999999MB", field=F))
+    # 11 digits are refused by the grammar even under a huge maximum
+    refuses(lambda: parse_size("12345678901", field=F, maximum=10**20))
+    assert parse_size("9999999999", field=F, maximum=10**20) == 9999999999
+
+
+def test_size_default_ceiling_is_one_gib():
+    assert grammar.DEFAULT_SIZE_MAX == 1 << 30
+    assert parse_size("1024MB", field=F) == 1 << 30
+    refuses(lambda: parse_size("1025MB", field=F))
 
 
 def test_int_range_for_counts_and_chars():
@@ -925,7 +1013,6 @@ def test_named_ranges():
         ("24h", "24h", 1440),
         ("5", "5m", 5),
         ("30", "30m", 30),
-        ("60", "1h", 60),
         (15, "15m", 15),
     ],
 )
@@ -960,6 +1047,8 @@ def test_ingest_every_accepts(text, canonical, minutes):
         "23h",
         "25h",
         "48h",
+        "60",
+        60,
         "1d",
         "30s",
         "1.5h",
@@ -1017,6 +1106,15 @@ def test_format_timestamp_ms_always_has_three_digits_truncated():
         format_timestamp_ms(datetime(2026, 1, 2, 3, 4, 5, 999999, tzinfo=UTC))
         == "2026-01-02T03:04:05.999Z"
     )
+
+
+def test_format_timestamp_out_of_range_after_utc_conversion_is_a_value_error():
+    low = datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=5)))
+    high = datetime(9999, 12, 31, 23, tzinfo=timezone(timedelta(hours=-5)))
+    for fn in (format_timestamp, format_timestamp_ms):
+        for moment in (low, high):
+            with pytest.raises(ValueError, match="timestamp out of range"):
+                fn(moment)
 
 
 def test_format_timestamp_needs_an_aware_datetime():

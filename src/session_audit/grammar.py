@@ -1,5 +1,7 @@
 """Every grammar a user types or a config holds, parsed in one place (interface.md, Time
-arguments, Config, Exit codes and Prefixes; ``schemas/defs.json`` for the id grammars).
+arguments, Config, Exit codes and Prefixes; ``schemas/defs.json`` for the session, claude-session,
+retro and timestamp grammars, ``schemas/hooks/*.json`` for the event id, ``schemas/config.json``
+for durations and sizes).
 
 * Parsers take the field at fault (a flag or a config key, always a constant of the caller) and
   raise a typed ``GrammarError`` that carries what the error envelope needs: ``code``,
@@ -15,10 +17,12 @@ arguments, Config, Exit codes and Prefixes; ``schemas/defs.json`` for the id gra
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from decimal import Context, Decimal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .textsafe import sanitize
@@ -83,20 +87,31 @@ _LABEL_VALUE = re.compile(r"[A-Za-z0-9._:/#@+=,-]{0,256}", _ASCII)
 _ACTOR = re.compile(r"(?:human|auto):[A-Za-z0-9._@/-]{1,64}", _ASCII)
 _DECISION_ID = re.compile(r"[A-Za-z0-9._:/@-]{1,128}", _ASCII)
 _ZONE_NAME = re.compile(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+){0,2}", _ASCII)
-_AGO = re.compile(r"([0-9]{1,12})([smhd])", _ASCII)
+_AGO = re.compile(r"([1-9][0-9]{0,8})([smhd])", _ASCII)
 _DATE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})", _ASCII)
 _ISO = re.compile(
-    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]{1,9}))?)?"
-    r"(?:(Z)|([+-])([0-9]{2})(?::?([0-9]{2}))?)",
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?"
+    r"(?:(Z)|([+-])([0-9]{2}):([0-9]{2}))",
     _ASCII,
 )
-_DURATION = re.compile(rf"([0-9]{{1,{_MAX_DIGITS}}})(ms|s|m|d)?", _ASCII)
-_SIZE = re.compile(rf"([0-9]{{1,{_MAX_DIGITS}}})(B|KB|MB)?", _ASCII)
+_DURATION = re.compile(r"([0-9]{1,9})(?:\.([0-9]+))?(ms|s|m|d)?", _ASCII)  # config.json duration
+_SIZE = re.compile(r"([1-9][0-9]{0,9})(B|KB|MB)?", _ASCII)  # config.json size
+_DURATION_MAX_LEN = 32
+_SIZE_MAX_LEN = 16
 _DIGITS = re.compile(rf"[0-9]{{1,{_MAX_DIGITS}}}", _ASCII)
 _INGEST_EVERY = re.compile(r"([1-9][0-9]{0,3})([mh]?)", _ASCII)
 
 _INGEST_MINUTES = frozenset({5, 6, 10, 12, 15, 20, 30})
 _INGEST_HOURS = frozenset({1, 2, 3, 4, 6, 8, 12, 24})
+_DURATION_UNITS = {
+    None: Decimal(1),
+    "ms": Decimal("0.001"),
+    "s": Decimal(1),
+    "m": Decimal(60),
+    "d": Decimal(86400),
+}
+_EXACT = Context(prec=2500)  # exact arithmetic for any input the grammar can hold
+_MICRO = Decimal(1_000_000)
 _SIZE_UNITS = {None: 1, "B": 1, "KB": 1024, "MB": 1024 * 1024}
 
 
@@ -303,10 +318,18 @@ def resolve_prefix(prefix: str, known: Iterable[str], *, field: str) -> str:
 # time
 
 
+# Names in the host's tz database that are not zones (a link to the local file, a rule file, a
+# test zone) and the duplicate trees ``posix/`` and ``right/``.
+_ZONE_REFUSED = frozenset({"localtime", "posixrules", "Factory"})
+_ZONE_REFUSED_ROOTS = frozenset({"posix", "right"})
+
+
 def parse_time_zone(value: object, *, field: str) -> ZoneInfo:
     hint = "A time zone is an IANA name such as UTC or America/New_York."
     text = _text(value, field, "time zone", hint)
     if len(text) > 64 or not _ZONE_NAME.fullmatch(text):
+        raise _bad(field, "invalid time zone", hint)
+    if text in _ZONE_REFUSED or text.partition("/")[0] in _ZONE_REFUSED_ROOTS:
         raise _bad(field, "invalid time zone", hint)
     try:
         return ZoneInfo(text)
@@ -323,7 +346,8 @@ _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
 def parse_ago(value: object, *, field: str) -> timedelta:
-    """``<n>(s|m|h|d)``: how long ago (the ``WHEN`` duration grammar; zero is allowed)."""
+    """``<n>(s|m|h|d)`` with n of 1 to 9 digits and no leading zero (the ``WHEN`` duration grammar
+    and the stored ``since``/``until`` of the schemas); zero is refused."""
     text = _text(value, field, "duration ago", _AGO_HINT)
     found = _AGO.fullmatch(text)
     if not found:
@@ -337,8 +361,9 @@ def parse_ago(value: object, *, field: str) -> timedelta:
 def parse_when(value: object, *, field: str, now: datetime, time_zone: tzinfo) -> datetime:
     """``WHEN`` as an aware UTC datetime. ``now`` is the gateway's clock (aware). A date is the
     first instant of that day in ``time_zone`` (a midnight that does not exist gives the
-    transition instant, an ambiguous one its first occurrence); ISO 8601 text needs ``Z`` or an
-    offset; bare digits are refused."""
+    transition instant, an ambiguous one its first occurrence); ISO 8601 text is
+    ``YYYY-MM-DDTHH:MM:SS[.f]`` (1 to 9 fraction digits, truncated to microseconds) then ``Z`` or
+    ``+HH:MM``/``-HH:MM`` (the stored pattern of ``schemas/defs.json``); bare digits are refused."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("parse_when needs an aware now")
     text = _text(value, field, "time", _WHEN_HINT)
@@ -365,7 +390,7 @@ def _iso(found: re.Match[str]) -> datetime:
     if found.group(8):
         zone = UTC
     else:
-        off_h, off_m = int(found.group(10)), int(found.group(11) or 0)
+        off_h, off_m = int(found.group(10)), int(found.group(11))
         if off_h > 23 or off_m > 59:
             raise ValueError("offset")
         delta = timedelta(hours=off_h, minutes=off_m)
@@ -376,7 +401,10 @@ def _iso(found: re.Match[str]) -> datetime:
 def _stamp(moment: datetime) -> str:
     if moment.tzinfo is None or moment.utcoffset() is None:
         raise ValueError("a timestamp needs an aware datetime")
-    u = moment.astimezone(UTC)
+    try:
+        u = moment.astimezone(UTC)
+    except OverflowError:
+        raise ValueError("timestamp out of range") from None
     return f"{u.year:04d}-{u.month:02d}-{u.day:02d}T{u.hour:02d}:{u.minute:02d}:{u.second:02d}"
 
 
@@ -411,45 +439,58 @@ def parse_duration(
     minimum: timedelta = timedelta(milliseconds=1),
     allow_days: bool = False,
 ) -> timedelta:
-    """``<n>(ms|s|m)`` or bare seconds (a str of digits or an int); ``d`` too when
-    ``allow_days``. No ``h``, no fraction, no sign; zero is refused; the bounds are inclusive."""
+    """A duration as a ``timedelta`` (whole microseconds, any finer part truncated).
+
+    Text is ``[0-9]{1,9}(\\.[0-9]+)?(ms|s|m)?`` (``d`` too when ``allow_days``; no unit means
+    seconds; no ``h``, no sign, 32 characters at most), the grammar of ``schemas/config.json``.
+    A number is a finite positive int or float of seconds (a bool is refused). The value is held
+    exactly (``Decimal``, a float by its binary value) and compared with the bounds before
+    anything is rounded, so no input slips past a maximum. Zero in any form is refused; the
+    bounds are inclusive."""
     units = "ms, s, m or d" if allow_days else "ms, s or m"
-    hint = f"Use <n>{{{units}}} or a whole number of seconds; zero is not allowed."
-    try:
-        if _is_int(value):
-            assert isinstance(value, int)
-            total = timedelta(seconds=value)
-        else:
-            found = _DURATION.fullmatch(_text(value, field, "duration", hint))
-            if not found:
-                raise _bad(field, "invalid duration", hint)
-            number, unit = int(found.group(1)), found.group(2)
-            if unit == "d" and not allow_days:
-                raise _bad(field, "invalid duration", hint)
-            total = {
-                None: timedelta(seconds=number),
-                "s": timedelta(seconds=number),
-                "ms": timedelta(milliseconds=number),
-                "m": timedelta(minutes=number),
-                "d": timedelta(days=number),
-            }[unit]
-    except OverflowError:
-        raise _bad(field, "duration out of range", hint) from None
-    if total <= timedelta(0) or total < minimum or total > maximum:
+    hint = f"Use <n>{{{units}}} (n may have a fraction) or seconds; zero is not allowed."
+    seconds: Decimal
+    if isinstance(value, bool):
+        raise _bad(field, "invalid duration", hint)
+    if isinstance(value, int):
+        seconds = Decimal(value)
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise _bad(field, "invalid duration", hint)
+        seconds = Decimal(value)
+    else:
+        text = _text(value, field, "duration", hint)
+        found = _DURATION.fullmatch(text)
+        if not found or len(text) > _DURATION_MAX_LEN:
+            raise _bad(field, "invalid duration", hint)
+        whole, fraction, unit = found.groups()
+        if unit == "d" and not allow_days:
+            raise _bad(field, "invalid duration", hint)
+        number = Decimal(f"{whole}.{fraction}" if fraction is not None else whole)
+        seconds = _EXACT.multiply(number, _DURATION_UNITS[unit])
+    if seconds <= 0 or seconds < _seconds_of(minimum) or seconds > _seconds_of(maximum):
         raise _bad(field, "duration out of range", hint)
-    return total
+    micro = _EXACT.multiply(seconds, _MICRO).to_integral_value(rounding="ROUND_DOWN")
+    return timedelta(microseconds=int(micro))
+
+
+def _seconds_of(delta: timedelta) -> Decimal:
+    return Decimal(delta // timedelta(microseconds=1)) / _MICRO
 
 
 def parse_size(value: object, *, field: str, maximum: int = DEFAULT_SIZE_MAX) -> int:
-    """A whole byte count, or a whole number with ``B``, ``KB`` or ``MB`` (1 KB = 1024 bytes).
-    No fraction, no zero."""
+    """A whole byte count, or a whole number with ``B``, ``KB`` or ``MB`` (1 KB = 1024 bytes):
+    the ``schemas/config.json`` pattern ``[1-9][0-9]{0,9}(B|KB|MB)?``, so no fraction, no zero,
+    no leading zero and at most 10 digits. ``maximum`` defaults to 1 GiB (the docs give none);
+    a key with its own maximum passes it."""
     hint = "Use a whole number of bytes, or a whole number followed by B, KB or MB."
     if _is_int(value):
         assert isinstance(value, int)
         total = value
     else:
-        found = _SIZE.fullmatch(_text(value, field, "size", hint))
-        if not found:
+        text = _text(value, field, "size", hint)
+        found = _SIZE.fullmatch(text)
+        if not found or len(text) > _SIZE_MAX_LEN:
             raise _bad(field, "invalid size", hint)
         total = int(found.group(1)) * _SIZE_UNITS[found.group(2)]
     if total < 1 or total > maximum:
@@ -489,10 +530,10 @@ class IngestEvery:
 def parse_ingest_every(value: object, *, field: str = "--ingest-every") -> IngestEvery:
     """``<n>m`` for n in {5, 6, 10, 12, 15, 20, 30}, ``<n>h`` for n in {1, 2, 3, 4, 6, 8, 12,
     24}, ``60m`` as ``1h``, or a bare integer (an int or digits) meaning minutes from the minute
-    set or 60."""
+    set only: a bare 60 is refused (write ``60m`` or ``1h``)."""
     hint = (
-        "Use <n>m with n in 5, 6, 10, 12, 15, 20, 30 (or 60), or <n>h with n in "
-        "1, 2, 3, 4, 6, 8, 12, 24."
+        "Use <n>m with n in 5, 6, 10, 12, 15, 20, 30, or <n>h with n in 1, 2, 3, 4, 6, 8, 12, "
+        "24; write 60m or 1h for an hour."
     )
     if _is_int(value):
         text = str(value)
@@ -506,6 +547,6 @@ def parse_ingest_every(value: object, *, field: str = "--ingest-every") -> Inges
         if number not in _INGEST_HOURS:
             raise _bad(field, "invalid interval", hint)
         return IngestEvery(number * 60)
-    if number not in _INGEST_MINUTES and number != 60:
+    if number not in _INGEST_MINUTES and not (unit == "m" and number == 60):
         raise _bad(field, "invalid interval", hint)
     return IngestEvery(number)
