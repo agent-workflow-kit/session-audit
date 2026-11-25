@@ -54,6 +54,7 @@ COMMANDS = (
         add_install_arguments,
         check_install,
         run_install,
+        refuses_unsafe_config=True,
     ),
     Command(
         ("cron", "uninstall"),
@@ -61,5 +62,6 @@ COMMANDS = (
         add_uninstall_arguments,
         check_uninstall,
         run_uninstall,
+        refuses_unsafe_config=True,
     ),
 )

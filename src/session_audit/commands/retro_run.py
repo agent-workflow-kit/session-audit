@@ -95,5 +95,13 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
 
 COMMANDS = (
-    Command(("retro", "run"), "run one retro", add_arguments, check, run, accepts_actor=True),
+    Command(
+        ("retro", "run"),
+        "run one retro",
+        add_arguments,
+        check,
+        run,
+        accepts_actor=True,
+        refuses_unsafe_config=True,
+    ),
 )

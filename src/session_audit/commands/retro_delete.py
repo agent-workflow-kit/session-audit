@@ -32,6 +32,12 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
 COMMANDS = (
     Command(
-        ("retro", "delete"), "delete stored retros", add_arguments, check, run, accepts_actor=True
+        ("retro", "delete"),
+        "delete stored retros",
+        add_arguments,
+        check,
+        run,
+        accepts_actor=True,
+        refuses_unsafe_config=True,
     ),
 )

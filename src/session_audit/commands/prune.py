@@ -24,5 +24,13 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
 
 COMMANDS = (
-    Command(("prune",), "apply the retention rules", add_arguments, check, run, accepts_actor=True),
+    Command(
+        ("prune",),
+        "apply the retention rules",
+        add_arguments,
+        check,
+        run,
+        accepts_actor=True,
+        refuses_unsafe_config=True,
+    ),
 )

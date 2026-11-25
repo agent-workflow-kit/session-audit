@@ -11,12 +11,16 @@ test runs something nobody scripted.
 
 from __future__ import annotations
 
+import errno
 import os
+import posixpath
+import stat as statmod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import BinaryIO
 
-from session_audit.gateway import DEFAULT_STDOUT_LIMIT, CallResult, CallStatus
+from session_audit.gateway import DEFAULT_STDOUT_LIMIT, CallResult, CallStatus, FileContent
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -41,9 +45,29 @@ class FakeClock:
         self._monotonic += seconds
 
 
+@dataclass
+class FakeEntry:
+    kind: str  # "file", "dir", "symlink" or "socket"
+    data: bytes = b""
+    uid: int = 1000
+    mode: int = 0o644
+    target: str = ""  # a symlink's target
+
+
 class FakeGateway:
+    """Besides the scripted programs and the clock, an in-memory file tree (``add_file``,
+    ``add_dir``, ``add_symlink``) for the modules that read files through the gateway. Paths are
+    absolute and normalized; a lookup is by exact path (a symlink is never followed on the way,
+    so a component that is a symlink must be checked by the caller, as the real gateway's
+    ``lstat`` allows)."""
+
     def __init__(self) -> None:
         self.clock = FakeClock()
+        self.files: dict[str, FakeEntry] = {}
+        self.user_id = 1000
+        self.time_zone: str | None = "UTC"
+        self.time_zone_env: Mapping[str, str] | None = None
+        self.reads: list[str] = []
         self.calls: list[dict[str, object]] = []
         self.crontab = ""
         self._rules: list[tuple[tuple[str, ...], list[CallResult]]] = []
@@ -75,14 +99,85 @@ class FakeGateway:
     def monotonic(self) -> float:
         return self.clock.monotonic()
 
+    # --- the file tree -------------------------------------------------------------------------
+    def add_dir(self, path: str, *, uid: int | None = None, mode: int = 0o700) -> None:
+        self.files[path] = FakeEntry("dir", uid=self.user_id if uid is None else uid, mode=mode)
+
+    def add_file(
+        self, path: str, data: bytes | str = b"", *, uid: int | None = None, mode: int = 0o600
+    ) -> None:
+        raw = data.encode("utf-8") if isinstance(data, str) else data
+        self.files[path] = FakeEntry(
+            "file", raw, uid=self.user_id if uid is None else uid, mode=mode
+        )
+
+    def add_socket(self, path: str, *, uid: int | None = None, mode: int = 0o600) -> None:
+        self.files[path] = FakeEntry("socket", uid=self.user_id if uid is None else uid, mode=mode)
+
+    def add_symlink(self, path: str, target: str, *, uid: int | None = None) -> None:
+        self.files[path] = FakeEntry(
+            "symlink", uid=self.user_id if uid is None else uid, mode=0o777, target=target
+        )
+
+    @staticmethod
+    def _result(entry: FakeEntry) -> os.stat_result:
+        kind = {
+            "file": statmod.S_IFREG,
+            "dir": statmod.S_IFDIR,
+            "symlink": statmod.S_IFLNK,
+            "socket": statmod.S_IFSOCK,
+        }
+        mode = kind[entry.kind] | entry.mode
+        return os.stat_result((mode, 1, 1, 1, entry.uid, entry.uid, len(entry.data), 0, 0, 0))
+
+    def _entry(self, path: str | bytes | os.PathLike[str]) -> FakeEntry:
+        name = os.fsdecode(path)
+        found = self.files.get(posixpath.normpath(name))
+        if found is None:
+            raise FileNotFoundError(errno.ENOENT, "no such file", name)
+        return found
+
     def open_read(self, path: str | bytes | os.PathLike[str]) -> BinaryIO:
-        raise NotImplementedError("file access is scripted by the issue that first needs it")
+        raise NotImplementedError(
+            "transcript reads are scripted by the issue that first needs them"
+        )
 
     def lstat(self, path: str | bytes | os.PathLike[str]) -> os.stat_result:
-        raise NotImplementedError
+        return self._result(self._entry(path))
+
+    def stat(self, path: str | bytes | os.PathLike[str]) -> os.stat_result:
+        entry = self._entry(path)
+        for _ in range(8):
+            if entry.kind != "symlink":
+                return self._result(entry)
+            entry = self._entry(entry.target)
+        raise OSError(errno.ELOOP, "too many levels of symbolic links")
+
+    def read_file(self, path: str | bytes | os.PathLike[str], limit: int) -> FileContent:
+        entry = self._entry(path)
+        self.reads.append(posixpath.normpath(os.fsdecode(path)))
+        if entry.kind == "symlink":
+            raise OSError(errno.ELOOP, "too many levels of symbolic links", os.fsdecode(path))
+        info = self._result(entry)
+        if entry.kind != "file":
+            return FileContent(b"", info)
+        return FileContent(entry.data[:limit], info, truncated=len(entry.data) > limit)
 
     def list_dir(self, path: str | bytes | os.PathLike[str]) -> list[str]:
-        raise NotImplementedError
+        base = posixpath.normpath(os.fsdecode(path))
+        if self._entry(base).kind != "dir":
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", base)
+        names = {
+            posixpath.basename(p) for p in self.files if posixpath.dirname(p) == base and p != base
+        }
+        return sorted(names)
+
+    def uid(self) -> int:
+        return self.user_id
+
+    def machine_time_zone(self, env: Mapping[str, str] | None = None) -> str | None:
+        self.time_zone_env = env
+        return self.time_zone
 
     def crontab_read(self) -> CallResult:
         return CallResult(CallStatus.EXITED, 0, stdout=self.crontab)

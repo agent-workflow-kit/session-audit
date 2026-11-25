@@ -27,6 +27,7 @@ import math
 import os
 import selectors
 import signal
+import stat as statmod
 import subprocess
 import sys
 import time
@@ -35,6 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, BinaryIO, Protocol
+from zoneinfo import ZoneInfo
 
 DEFAULT_STDOUT_LIMIT = 8 * 1024 * 1024
 KILL_GRACE_SECONDS = 5.0
@@ -79,6 +81,18 @@ class CallResult:
         return self.status is CallStatus.EXITED and self.returncode in codes
 
 
+@dataclass(frozen=True)
+class FileContent:
+    """What ``read_file`` returns: the bytes read (at most ``limit``), the ``fstat`` of the open
+    file (the authority on its type, owner and mode: it is the file that was read, not a path
+    that may have changed) and ``truncated`` when the file held more than ``limit`` bytes. A file
+    that is not a regular file is not read: ``data`` is empty and the caller checks ``stat``."""
+
+    data: bytes
+    stat: os.stat_result
+    truncated: bool = False
+
+
 class Gateway(Protocol):
     def run(
         self,
@@ -106,6 +120,26 @@ class Gateway(Protocol):
 
     def list_dir(self, path: str | bytes | os.PathLike[str]) -> list[str]:
         """The entry names of a directory, sorted."""
+        ...
+
+    def stat(self, path: str | bytes | os.PathLike[str]) -> os.stat_result:
+        """``stat`` that follows symlinks (for a directory the environment names, such as
+        ``$HOME``)."""
+        ...
+
+    def read_file(self, path: str | bytes | os.PathLike[str], limit: int) -> FileContent:
+        """Read at most ``limit`` bytes of a regular file without following a final symlink
+        (``OSError``/ELOOP) or blocking on a FIFO. Other failures are the open's ``OSError``."""
+        ...
+
+    def uid(self) -> int:
+        """The effective user id: whose files count as "owned by the user"."""
+        ...
+
+    def machine_time_zone(self, env: Mapping[str, str] | None = None) -> str | None:
+        """The IANA name of the machine's zone: ``TZ`` from ``env`` (the process environment when
+        None) when it names a zone, else ``/etc/localtime``, else ``/etc/timezone``; None when no
+        candidate is a valid zone name (a POSIX ``TZ`` such as ``EST5EDT`` is not one)."""
         ...
 
     def crontab_read(self) -> CallResult:
@@ -325,11 +359,70 @@ class SystemGateway:
     def list_dir(self, path: str | bytes | os.PathLike[str]) -> list[str]:
         return sorted(os.listdir(Path(os.fsdecode(path))))
 
+    def stat(self, path: str | bytes | os.PathLike[str]) -> os.stat_result:
+        return os.stat(path)
+
+    def read_file(self, path: str | bytes | os.PathLike[str], limit: int) -> FileContent:
+        if limit < 0:
+            raise ValueError("limit must not be negative")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not statmod.S_ISREG(info.st_mode):
+                return FileContent(b"", info)
+            chunks: list[bytes] = []
+            total = 0
+            while total <= limit:
+                chunk = os.read(fd, min(_READ_CHUNK, limit + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            data = b"".join(chunks)
+            return FileContent(data[:limit], info, truncated=len(data) > limit)
+        finally:
+            os.close(fd)
+
+    def uid(self) -> int:
+        return os.geteuid()
+
+    LOCALTIME = "/etc/localtime"
+    TIMEZONE_FILE = "/etc/timezone"
+
+    def machine_time_zone(self, env: Mapping[str, str] | None = None) -> str | None:
+        source = os.environ if env is None else env
+        candidates = [source.get("TZ", "").lstrip(":")]
+        try:
+            target = os.readlink(self.LOCALTIME)
+        except OSError:
+            target = ""
+        marker = "zoneinfo/"
+        if marker in target:
+            candidates.append(target.split(marker, 1)[1])
+        try:
+            with open(self.TIMEZONE_FILE, encoding="utf-8", errors="replace") as handle:
+                candidates.append(handle.readline().strip())
+        except OSError:
+            pass
+        for name in candidates:
+            if name and _is_zone(name):
+                return name
+        return None
+
     def crontab_read(self) -> CallResult:
         return self.run(["crontab", "-l"], timeout=CRONTAB_TIMEOUT_SECONDS)
 
     def crontab_write(self, text: str) -> CallResult:
         return self.run(["crontab", "-"], timeout=CRONTAB_TIMEOUT_SECONDS, stdin=text)
+
+
+def _is_zone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except Exception:  # not found, a malformed key, an unreadable file: not a usable name
+        return False
+    return True
 
 
 def _detail(failure: CallStatus, timeout: float, stdout_limit: int) -> str:

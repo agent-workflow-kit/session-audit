@@ -110,9 +110,9 @@ class _NoGateway:
 def test_version_works_with_a_broken_config_and_a_newer_store(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """Cannot fail today: nothing reads a config or a store yet. It pins the contract for #7,
-    which wires config loading and the store: ``--version`` must not touch either (here: no
-    command ``check`` or ``run`` and no gateway call happens)."""
+    """``--version`` must read neither a config nor a store, even a broken one or a missing
+    ``--config`` file: no command ``check`` or ``run`` and no gateway call happens (the config is
+    loaded in the composition root, after ``--version`` is answered)."""
     broken = tmp_path / "config.yaml"
     broken.write_text("{ not: [yaml", encoding="utf-8")
     state = Path(os.environ["XDG_STATE_HOME"]) / "session-audit"
@@ -309,13 +309,17 @@ def test_json_is_accepted_before_and_after_the_command(
 
 
 def test_a_global_flag_before_the_command_survives_the_subparser_defaults(
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    run(capsys, ["--config", "/c", "--verbose", "sessions"])
+    first, second = str(tmp_path / "c.yaml"), str(tmp_path / "d.yaml")
+    for name in (first, second):
+        Path(name).write_text("{}\n", encoding="utf-8")
+        os.chmod(name, 0o600)
+    run(capsys, ["--config", first, "--verbose", "sessions"])
     ctx = CALLS[0][2]
-    assert (ctx.config, ctx.verbose, ctx.quiet, ctx.json) == ("/c", True, False, False)
-    run(capsys, ["--config", "/c", "sessions", "--config", "/d", "--quiet"])
-    assert (CALLS[1][2].config, CALLS[1][2].quiet) == ("/d", True)
+    assert (ctx.config, ctx.verbose, ctx.quiet, ctx.json) == (first, True, False, False)
+    run(capsys, ["--config", first, "sessions", "--config", second, "--quiet"])
+    assert (CALLS[1][2].config, CALLS[1][2].quiet) == (second, True)
 
 
 def test_dry_run_and_yes_reach_the_context(capsys: pytest.CaptureFixture[str]) -> None:
@@ -372,6 +376,7 @@ def test_actor_default_comes_from_the_terminal_state(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("session_audit.args.os_user", lambda: "j o$hn")
+    monkeypatch.setattr("session_audit.config.os_user", lambda: "j o$hn")
     run(capsys, ["prune"], tty=False)
     run(capsys, ["prune"], tty=True)
     run(capsys, ["prune", "--actor", "human:given"], tty=True)

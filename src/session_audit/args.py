@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import re
-from datetime import UTC
 from typing import Any
 
 from . import errors
@@ -20,6 +19,8 @@ from .grammar import GrammarError, parse_actor, parse_int, parse_label, parse_wh
 PATH_MAX = 4096  # the stored project is capped here (interface, Session object)
 ACTOR_USER_MAX = 64
 _ACTOR_BAD = re.compile(r"[^A-Za-z0-9._@/-]")
+_DOTS = re.compile(r"\.{2,}")
+_NOT_ALNUM_LEAD = re.compile(r"^[^A-Za-z0-9]+")
 SKILL_MAX = 128
 MODEL_MAX = 128
 # schemas/defs.json#skill: the plugin part is wider than the name part after the colon.
@@ -74,11 +75,11 @@ def check_path(value: object, field: str) -> str:
 
 
 def check_when(ctx: Context, value: object, field: str) -> None:
-    """Check the ``WHEN`` grammar. A date is zone-dependent; the zone comes with the config
-    (TODO(#7): resolve ``--since``/``--until`` against ``time_zone`` where a command needs the
-    instant), so the check uses UTC, which accepts and refuses the same texts."""
+    """Check the ``WHEN`` grammar against the configured ``time_zone`` (a date is midnight there;
+    with an invalid config the defaults apply: the machine's time zone, UTC when it cannot be
+    told). Commands resolve the instant themselves."""
     try:
-        parse_when(value, field=field, now=ctx.gateway.now(), time_zone=UTC)
+        parse_when(value, field=field, now=ctx.gateway.now(), time_zone=ctx.settings.zone())
     except GrammarError as exc:
         raise errors.from_grammar(exc) from None
 
@@ -148,9 +149,12 @@ def check_actor(value: object) -> str:
 
 
 def normalize_user(name: str) -> str:
-    """The OS user name as an actor part: every character outside ``[A-Za-z0-9._@/-]`` becomes
-    ``_`` and the result is cut to 64 (``unknown`` when empty)."""
-    cleaned = _ACTOR_BAD.sub("_", name)[:ACTOR_USER_MAX]
+    """The OS user name as an actor part (and the default ``me.name``): every character outside
+    ``[A-Za-z0-9._@/-]`` becomes ``_``, every run of dots becomes ``_`` (no ``..``), leading
+    characters that are not a letter or digit are dropped, and the result is cut to 64
+    (``unknown`` when empty)."""
+    trimmed = _NOT_ALNUM_LEAD.sub("", name)  # before substitution: no underscore it makes is lost
+    cleaned = _DOTS.sub("_", _ACTOR_BAD.sub("_", trimmed))[:ACTOR_USER_MAX]
     return cleaned or "unknown"
 
 
@@ -163,7 +167,7 @@ def os_user() -> str:
 
 def default_actor(*, is_tty: bool, me_name: str | None = None) -> str:
     """``human:<user>`` from a terminal, otherwise ``auto:unknown``. ``<user>`` is ``me.name``
-    when set (TODO(#7): the config passes it), by default the OS user name, normalized."""
+    when set (the config's ``me.name``), by default the OS user name, normalized."""
     if not is_tty:
         return "auto:unknown"
     return "human:" + normalize_user(me_name if me_name else os_user())

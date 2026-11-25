@@ -469,3 +469,68 @@ def test_crontab_goes_through_the_program_named_crontab(
     assert gw.crontab_read().exit_is(1)
     assert gw.crontab_write("0 * * * * job\n").exit_is(1)
     assert log.read_text(encoding="utf-8").splitlines() == ["-l", "-", "0 * * * * job"]
+
+
+def test_read_file_reads_up_to_the_limit_and_reports_truncation(tmp_path: Path) -> None:
+    (tmp_path / "f").write_bytes(b"abcdef")
+    gw = SystemGateway()
+    whole = gw.read_file(tmp_path / "f", 6)
+    assert (whole.data, whole.truncated) == (b"abcdef", False)
+    cut = gw.read_file(tmp_path / "f", 5)
+    assert (cut.data, cut.truncated) == (b"abcde", True)
+    assert gw.read_file(tmp_path / "f", 0).truncated is True
+    assert stat.S_ISREG(whole.stat.st_mode) and whole.stat.st_uid == gw.uid()
+
+
+def test_read_file_refuses_a_symlink_and_does_not_read_a_fifo_or_directory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "t").write_bytes(b"x")
+    os.symlink(tmp_path / "t", tmp_path / "l")
+    gw = SystemGateway()
+    with pytest.raises(OSError) as raised:
+        gw.read_file(tmp_path / "l", 10)
+    assert raised.value.errno == errno.ELOOP
+    os.mkfifo(tmp_path / "p")
+    fifo = gw.read_file(tmp_path / "p", 10)
+    assert fifo.data == b"" and stat.S_ISFIFO(fifo.stat.st_mode)
+    assert stat.S_ISDIR(gw.read_file(tmp_path, 10).stat.st_mode)
+    with pytest.raises(FileNotFoundError):
+        gw.read_file(tmp_path / "missing", 10)
+
+
+def test_stat_follows_a_symlink(tmp_path: Path) -> None:
+    (tmp_path / "d").mkdir()
+    os.symlink(tmp_path / "d", tmp_path / "l")
+    gw = SystemGateway()
+    assert stat.S_ISDIR(gw.stat(tmp_path / "l").st_mode)
+    assert stat.S_ISLNK(gw.lstat(tmp_path / "l").st_mode)
+
+
+def test_machine_time_zone_prefers_tz_and_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    gw = SystemGateway()
+    assert gw.machine_time_zone({"TZ": ":Europe/Paris"}) == "Europe/Paris"
+    monkeypatch.setenv("TZ", "Asia/Tokyo")  # the passed mapping wins, not the process env
+    assert gw.machine_time_zone({"TZ": "Europe/Paris"}) == "Europe/Paris"
+    result = gw.machine_time_zone({})
+    assert result is None or isinstance(result, str)
+
+
+def test_a_posix_tz_string_falls_through_to_the_machine_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    zone_file = tmp_path / "timezone"
+    zone_file.write_text("Europe/Berlin\n", encoding="utf-8")
+    monkeypatch.setattr(SystemGateway, "LOCALTIME", str(tmp_path / "no-localtime"))
+    monkeypatch.setattr(SystemGateway, "TIMEZONE_FILE", str(zone_file))
+    gw = SystemGateway()
+    assert gw.machine_time_zone({"TZ": "EST5EDT,M3.2.0,M11.1.0"}) == "Europe/Berlin"
+    assert gw.machine_time_zone({"TZ": "Not/AZone"}) == "Europe/Berlin"
+    assert gw.machine_time_zone({}) == "Europe/Berlin"
+    link = tmp_path / "localtime"
+    link.symlink_to("/usr/share/zoneinfo/Asia/Tokyo")
+    monkeypatch.setattr(SystemGateway, "LOCALTIME", str(link))
+    assert gw.machine_time_zone({"TZ": "garbage"}) == "Asia/Tokyo"
+    zone_file.write_text("Not/AZone\n", encoding="utf-8")
+    link.unlink()
+    assert gw.machine_time_zone({"TZ": "garbage"}) is None
