@@ -449,7 +449,19 @@ def test_abbreviated_options_are_usage_errors(
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "error:" in err
+
+
+def test_argparse_errors_are_sanitized_for_hostile_flags(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--\x1b[2J‮"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "<U+001B>" in err
+    assert "<U+202E>" in err
     assert "\x1b" not in err
+    assert "‮" not in err
 
 
 def test_subparsers_do_not_allow_abbreviations() -> None:
