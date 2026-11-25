@@ -31,9 +31,9 @@ Dependencies: claude-session (binding A; optional for the deterministic half, re
 
 Where meaningful on every command: `--json`, `--config PATH`, `--verbose`, `--quiet`, `--dry-run`, `--yes`, `--version`. `--version` prints the version from package metadata and never `0.0.0`; it works with a broken config or a newer store.
 
-Commands that change the store accept `--actor ACTOR` (default `human:<user>` from a terminal, otherwise `auto:unknown`; `<user>` is `me.name`, by default the OS user name with every character outside `[A-Za-z0-9._@/-]` replaced by `_`, cut to 64). The actor is written to `log.jsonl`. No command takes an external action, so `--decision-id` is accepted only on `retro run` and records the ids that hook output returned.
+Global flags are accepted before or after the command name; `--verbose` and `--quiet` cannot be combined (exit 2 naming `--quiet`). `--dry-run` and `--yes` exist only on the commands whose synopsis lists them. Commands that change the store (`ingest`, `retro run`, `retro delete`, `prune`) accept `--actor ACTOR` (default `human:<user>` from a terminal, otherwise `auto:unknown`; `<user>` is `me.name`, by default the OS user name with every character outside `[A-Za-z0-9._@/-]` replaced by `_`, cut to 64). The actor is written to `log.jsonl`. No command takes an external action, so `--decision-id` is accepted only on `retro run` and records the ids that hook output returned.
 
-Errors go to stderr. With `--json` they are also printed on stdout as `{"error": {"code": "...", "message": "...", "details": {...}}}` (`schemas/cli/error.json`). A refusal (exit 20) carries `details.reason`.
+Errors go to stderr. With `--json` they are also printed on stdout as `{"error": {"code": "...", "message": "...", "details": {...}}}` (`schemas/cli/error.json`). A refusal (exit 20) carries `details.reason`. A usage error from the command line (an unknown flag, a missing value, an invalid choice) is exit 2 with a fixed message; `details.field` names the long option when the error is about one, and the text of the argument is never echoed. A failed write to standard output (a closed pipe or descriptor) ends the run with exit 1 whatever the command was doing, and a command whose implementation has not landed returns exit 1 `internal` after its flags validated.
 
 ## Exit codes
 
@@ -105,7 +105,7 @@ Linked from `ingest`, `sessions`, `usage`, `retro run`, `retro list` and `export
 
 ### `ingest`
 
-`session-audit ingest [--since WHEN] [--path PATH]... [--session CSESSION_ID] [--no-harness] [--rebuild] [--budget DURATION] [--dry-run] [--json]`
+`session-audit ingest [--since WHEN] [--path PATH]... [--session CSESSION_ID] [--no-harness] [--rebuild] [--budget DURATION] [--dry-run] [--yes] [--actor ACTOR] [--json]`
 
 Reads new transcript bytes into the store and, when claude-session is installed, captures harness snapshots. Idempotent. Never recovers retros. The ingest lease is a design guide §4.3 lease on `meta` with the rule in Retro lifecycle, Leases, so a killed ingest never wedges later runs. A second caller exits 0 with `already_running: true`.
 
@@ -113,9 +113,9 @@ Reads new transcript bytes into the store and, when claude-session is installed,
 - `--path`: restrict to files under this root (repeatable; resolved by components below a configured root; a path outside every root exits 2 naming `--path`).
 - `--session CSESSION_ID`: takes a claude-session id (other commands take Claude Code session ids). The id must match `^cs-[a-z2-7]{8}$` (else exit 2 naming `--session`, with a hint when the value is a Claude Code session id). Runs `claude-session status --json` (no lease needed) and stores the snapshot (`upsert_harness_run` in Harness enrichment); exit 10 when claude-session reports the id unknown. Then, when the ingest lease is free, it reads the transcript files of the snapshot's Claude session ids; when the lease is held it exits 0 with `files_deferred: true` (the running or next full ingest reads them). `--dry-run` with `--session` exits 2 (a dry run never calls claude-session). This is the target of the hook recipe in Harness enrichment.
 - `--no-harness`: skip claude-session entirely for this run.
-- `--rebuild`: re-read every transcript still on disk from the start and rebuild its events (see Upgrades). Rows of transcripts no longer on disk are kept. Requires `--yes` when stdin is not a terminal. With `--path`, `--since` or `--session` it exits 2; with `--dry-run` it prints how many files would be reread (`files.rewritten`); under a held lease it exits 0 `already_running` with a warning naming `--rebuild`.
+- `--rebuild`: re-read every transcript still on disk from the start and rebuild its events (see Upgrades). Rows of transcripts no longer on disk are kept. Requires `--yes` when stdin is not a terminal (`--dry-run` changes nothing and needs none). With `--path`, `--since` or `--session` it exits 2 (`details.field`: `--rebuild`); with `--dry-run` it prints how many files would be reread (`files.rewritten`); under a held lease it exits 0 `already_running` with a warning naming `--rebuild`.
 - `--budget`: overall time budget for the run (default `ingest.budget`, 300 s). A run that hits it stops cleanly, exits 0 with `complete: false`, and the next run resumes.
-- `--dry-run`: reads and parses but writes nothing and never calls claude-session; prints what would change. Combined with `--session` it exits 2.
+- `--dry-run`: reads and parses but writes nothing and never calls claude-session; prints what would change. Combined with `--session` it exits 2 (`details.field`: `--dry-run`).
 
 `--json` output: `schemas/cli/ingest.json` (the key list is in the schema). Ingest counts files (`seen`, `new`, `changed`, `unchanged`, `unsafe`, `excluded`, `vanished`, `rewritten`, `remaining`), lines (`parsed`, `errors`, `oversized`, `unknown`), sessions, harness and `warnings` (free strings, untrusted because they can name transcript paths). An `already_running` result has every count zero and `complete: false`; `files_deferred` is true only for a `--session` capture whose file reads were left to the lease holder.
 
@@ -176,13 +176,13 @@ Prints one retro. Default is readable text, with the mapping from session refs t
 
 ### `retro delete`
 
-`session-audit retro delete RETRO_ID... [--yes] [--json]`
+`session-audit retro delete RETRO_ID... [--yes] [--actor ACTOR] [--json]`
 
 Deletes retros, their `retro_artifacts` rows and their digests, in one transaction. Confirms on a terminal; without a terminal it needs `--yes` (exit 2 `confirmation_required`). Exit 20 `in_use` for a retro whose run is live. It is all or nothing: an unknown id exits 10 before anything is deleted, so `deleted` lists exactly the ids requested. It never removes `retro_starts` or `retro_sessions` rows: deleting a retro never touches its `retro_sessions` row, and a pending cleanup goes on.
 
 ### `prune`
 
-`session-audit prune [--dry-run] [--json]`
+`session-audit prune [--dry-run] [--actor ACTOR] [--json]`
 
 Applies the retention rules (see Retention) and runs the housekeeping step of Retro lifecycle (recovery, cleanup retries). It runs without claude-session: retention and local deletes still run, and recovery and cleanup wait with the warning `recovery_deferred`. Retention is configured policy, so it does not ask for confirmation; automation may run it. `prune --dry-run` lists planned recoveries and touches nothing. Output `schemas/cli/prune.json`: `{dry_run, tables, recoveries, warnings}`. `tables` counts deleted rows per table (`sessions`, `agents`, `events`, `files`, `harness_runs`, `retros`, `digests`, `log_entries`, `retro_starts`, `retro_sessions`, `pruned_sessions`); `recoveries` lists the retro ids recovered (or, with `--dry-run`, to be recovered); `warnings` is a closed set (`ingest_busy`, `recovery_deferred`). Warnings go to stderr in `retro run` and to `warnings` here.
 

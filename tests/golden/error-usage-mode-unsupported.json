@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "usage",
+    "details": {
+      "reason": "mode_unsupported"
+    },
+    "message": "interactive mode is not supported"
+  }
+}
