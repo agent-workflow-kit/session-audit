@@ -27,7 +27,7 @@ from .args import check_actor, check_path, default_actor
 from .command import Command, Context, Output, StdoutFailed
 from .commands import COMMANDS
 from .errors import CliError
-from .gateway import Gateway, SystemGateway, discard_stdout
+from .gateway import Gateway, SystemGateway, discard_stream
 from .textsafe import dumps_json, write_stderr
 
 PROG = "session-audit"
@@ -49,7 +49,7 @@ def _stderr(line: str) -> None:
     try:
         write_stderr(line)
     except (OSError, ValueError, AttributeError):
-        pass
+        discard_stream(sys.stderr)
 
 
 # argparse's own messages echo user text, so none of them is used: only their kind and, when
@@ -232,7 +232,7 @@ def _report(error: CliError, *, json_mode: bool, out: Output) -> int:
 
 
 def _stdout_failed(out: Output) -> int:
-    discard_stdout(out.stream())
+    discard_stream(out.stream())
     _stderr(f"{PROG}: error: cannot write to standard output")
     return 1
 

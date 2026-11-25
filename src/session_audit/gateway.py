@@ -393,13 +393,14 @@ def _text(data: bytes | bytearray) -> str:
     return bytes(data).decode("utf-8", "replace")
 
 
-def discard_stdout(stream: IO[str] | None) -> None:
-    """Point the process's real standard output at ``/dev/null`` after a failed write, so the
+def discard_stream(stream: IO[str] | None) -> None:
+    """Point a standard stream of the process at ``/dev/null`` after a failed write to it, so the
     bytes still buffered in ``stream`` cannot fail again when the interpreter flushes at exit
     (that would turn the exit status into 120 and print a traceback). Does nothing unless
-    ``stream`` is the interpreter's own ``sys.__stdout__`` (a test's capture object is left
-    alone)."""
-    if stream is None or stream is not sys.__stdout__:
+    ``stream`` is the interpreter's own ``sys.__stdout__`` or ``sys.__stderr__`` (a test's capture
+    object is left alone). Safe after any write failure: a descriptor that is open and failing is
+    only being replaced for a process that is ending, and one that is closed is simply reopened."""
+    if stream is None or stream not in (sys.__stdout__, sys.__stderr__):
         return
     try:
         fd = stream.fileno()
