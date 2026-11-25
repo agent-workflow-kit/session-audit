@@ -255,11 +255,12 @@ def _apply(
                 f"INSERT INTO {LEDGER} (number, name, applied_at) VALUES (?, ?, ?)",
                 (migration.number, migration.name, now_ms),
             )
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
-                "ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
-                (migration.number,),
-            )
+            if "meta" in _tables(conn):  # every real store has it (migration 800)
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+                    "ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
+                    (migration.number,),
+                )
         conn.execute("COMMIT")
     except BaseException:
         with contextlib.suppress(sqlite3.Error):
