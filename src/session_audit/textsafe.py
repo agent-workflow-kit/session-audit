@@ -13,6 +13,11 @@ everything else by a visible marker ``<U+XXXX>``:
 * a literal ``<U+`` becomes ``<U+003C>U+`` so a marker cannot be forged.
 
 Cost is linear: one pass over the code points, and a marker is at most ten characters.
+
+Category lookup uses the running interpreter's Unicode database, so the output for code points
+assigned in a newer Unicode version can differ across Python versions (for example U+2FFC is a
+marker on Python 3.12 and kept on 3.13). Anything that hashes sanitized text must treat that as a
+known source of drift.
 """
 
 from __future__ import annotations
@@ -57,8 +62,11 @@ def sanitize(s: str, limit: int | None = None) -> str:
     output is longer, the result is cut between units (a marker is one unit) and ends in ``…``,
     at most ``limit`` characters in all.
     """
-    if type(s) is not str:
+    if not isinstance(s, str):
         raise TypeError(f"sanitize needs a str, got {type(s).__name__}")
+    s = str.__str__(s)  # an exact str, also for str subclasses and enum members
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        raise ValueError("sanitize limit must be None or a positive int")
     cut = limit is not None and len(s) > limit
     if limit is not None:
         s = s[:limit]
@@ -99,9 +107,9 @@ def sanitize(s: str, limit: int | None = None) -> str:
 
 def fix_surrogates(s: str) -> str:
     """Replace each lone surrogate with U+FFFD, so the text always encodes as UTF-8."""
-    if type(s) is not str:
+    if not isinstance(s, str):
         raise TypeError(f"fix_surrogates needs a str, got {type(s).__name__}")
-    return _SURROGATES.sub("�", s)
+    return _SURROGATES.sub("�", str.__str__(s))
 
 
 def decode_utf8(data: bytes) -> str:
@@ -129,7 +137,14 @@ def _fixed(value: Any) -> Any:
     if isinstance(value, str):
         return fix_surrogates(value)
     if isinstance(value, dict):
-        return {_fixed(k): _fixed(v) for k, v in value.items()}
+        fixed: dict[Any, Any] = {}
+        for k, v in value.items():
+            key = fix_surrogates(k) if isinstance(k, str) else k  # json rejects other bad keys
+            if key in fixed:
+                shown = sanitize(str(key), 40)
+                raise ValueError(f"dumps_json: dict keys collide after fixing surrogates: {shown}")
+            fixed[key] = _fixed(v)
+        return fixed
     if isinstance(value, list | tuple):
         return [_fixed(v) for v in value]
     return value

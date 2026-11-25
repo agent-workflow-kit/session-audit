@@ -5,7 +5,9 @@ The source is pure ASCII: every special code point is written as an escape.
 
 from __future__ import annotations
 
+import enum
 import json
+import random
 import time
 import unicodedata
 
@@ -20,6 +22,7 @@ from session_audit.textsafe import (
     neutralize_untrusted,
     sanitize,
     show,
+    write_stderr,
 )
 
 ACUTE = "\u0301"
@@ -147,8 +150,70 @@ def test_limit_never_cuts_inside_a_marker() -> None:
     assert sanitize("ab\u202ecd", limit=11) == "ab<U+202E>\u2026"
 
 
-def test_limit_bounds_the_work_before_the_walk() -> None:
+def _count_category_calls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    calls = [0]
+    real = unicodedata.category
+
+    def counting(ch: str) -> str:
+        calls[0] += 1
+        return real(ch)
+
+    monkeypatch.setattr(textsafe.unicodedata, "category", counting)
+    return calls
+
+
+def test_limit_bounds_the_work_before_the_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _count_category_calls(monkeypatch)
     assert sanitize("x" * 1_000_000, limit=10) == "x" * 9 + "\u2026"
+    assert calls[0] <= 10 + 2
+
+
+def test_limit_of_one_gives_the_ellipsis_alone() -> None:
+    assert sanitize("abc", limit=1) == "\u2026"
+    assert sanitize("a", limit=1) == "a"
+    assert sanitize("", limit=1) == ""
+
+
+def test_limit_cuts_input_then_takes_the_ellipsis_path_with_a_marker() -> None:
+    # the input is cut to "ab<202E>c"; the marker does not fit, so the output ends after "ab"
+    assert sanitize("ab\u202ecd", limit=4) == "ab\u2026"
+    assert sanitize("\u202eab", limit=3) == "\u2026"
+
+
+def test_short_input_with_longer_output_is_cut() -> None:
+    assert sanitize("\u202e", limit=5) == "\u2026"
+    assert sanitize("\u202e", limit=9) == "<U+202E>"
+    assert sanitize("a\u202e", limit=8) == "a\u2026"
+
+
+def test_output_never_exceeds_the_limit_over_mixed_random_input() -> None:
+    rng = random.Random(1234)
+    pool = ["a", "\u00e9", " ", "\u202e", "\x1b", ACUTE, "<U+", "\U0010ffff", "\ud800", "\n"]
+    for _ in range(300):
+        s = "".join(rng.choice(pool) for _ in range(rng.randrange(0, 40)))
+        limit = rng.randrange(1, 30)
+        assert len(sanitize(s, limit=limit)) <= limit
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, False, 1.5, "3"])
+def test_limit_must_be_none_or_a_positive_int(limit: object) -> None:
+    with pytest.raises((ValueError, TypeError)):
+        sanitize("abc", limit=limit)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, False])
+def test_bad_integer_limits_raise_value_error(limit: int) -> None:
+    with pytest.raises(ValueError):
+        sanitize("abc", limit=limit)
+
+
+def test_sanitize_is_not_idempotent_by_design() -> None:
+    # A marker written by sanitize starts with a literal "<U+", which a second pass escapes
+    # again. Callers sanitize exactly once, at the point of output.
+    once = sanitize("\u202e")
+    assert once == "<U+202E>"
+    assert sanitize(once) == "<U+003C>U+202E>"
+    assert sanitize(sanitize("<U+202E>")) == "<U+003C>U+003C>U+202E>"
 
 
 def test_sanitize_rejects_non_str() -> None:
@@ -228,18 +293,87 @@ ADVERSARIAL = [
 
 
 @pytest.mark.parametrize("raw", ADVERSARIAL)
-def test_linear_time_at_64_kib(raw: str) -> None:
-    def cost(text: str) -> float:
-        t0 = time.perf_counter()
-        sanitize(text)
-        fix_surrogates(text)
-        neutralize_untrusted(text)
-        return time.perf_counter() - t0
+def test_sanitize_does_one_category_lookup_per_code_point(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _count_category_calls(monkeypatch)
+    sanitize(raw)
+    assert calls[0] <= len(raw)
 
-    small = cost(raw)
-    big = cost(raw * 4)
-    assert small < 3.0
-    assert big < max(10 * small, 1.0)
+
+@pytest.mark.parametrize("raw", ADVERSARIAL)
+def test_adversarial_input_finishes_within_a_generous_ceiling(raw: str) -> None:
+    t0 = time.perf_counter()
+    sanitize(raw)
+    fix_surrogates(raw)
+    neutralize_untrusted(raw)
+    assert time.perf_counter() - t0 < 10.0
+
+
+# str subclasses ----------------------------------------------------------------------------
+
+
+class _Plain(str):
+    pass
+
+
+class _Color(enum.StrEnum):
+    RED = "r\x1b\ud800"
+
+
+SUBCLASS_VALUES = [_Plain("a\x1b\ud800"), _Color.RED]
+
+
+@pytest.mark.parametrize("value", SUBCLASS_VALUES)
+def test_str_subclasses_are_accepted_everywhere(value: str) -> None:
+    assert type(fix_surrogates(value)) is str
+    assert fix_surrogates(value) == str.__str__(value).replace("\ud800", FFFD)
+    assert sanitize(fix_surrogates(value)) == show(value)
+    assert show(value).endswith(f"{FFFD}")
+    assert type(sanitize(value)) is str
+
+
+@pytest.mark.parametrize("value", SUBCLASS_VALUES)
+def test_str_subclass_in_dumps_json_as_value_and_as_key(value: str) -> None:
+    expected = str.__str__(value).replace("\ud800", FFFD)
+    assert json.loads(dumps_json({"k": value})) == {"k": expected}
+    assert json.loads(dumps_json({value: 1})) == {expected: 1}
+    assert json.loads(dumps_json([value])) == [expected]
+
+
+def test_str_subclass_in_write_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    write_stderr(_Color.RED)  # type: ignore[arg-type]
+    assert capsys.readouterr().err == f"r<U+001B>{FFFD}\n"
+
+
+# dumps_json keys ---------------------------------------------------------------------------
+
+
+def test_dumps_json_raises_when_keys_collapse_after_fixing() -> None:
+    with pytest.raises(ValueError, match="collide"):
+        dumps_json(dict([("\ud800", 1), ("\udc00", 2)]))
+
+
+def test_dumps_json_raises_when_a_fixed_key_collides_with_an_existing_fffd_key() -> None:
+    with pytest.raises(ValueError, match="collide"):
+        dumps_json({FFFD: 1, "\ud800": 2})
+
+
+def test_dumps_json_collision_message_does_not_echo_raw_key() -> None:
+    with pytest.raises(ValueError) as exc:
+        dumps_json(dict([("\x1b\ud800", 1), ("\x1b\udc00", 2)]))
+    assert "\x1b" not in str(exc.value)
+    assert "\ud800" not in str(exc.value)
+
+
+def test_dumps_json_leaves_non_str_keys_to_json() -> None:
+    with pytest.raises(TypeError, match="keys must be"):
+        dumps_json({(1, 2): 3})
+    assert json.loads(dumps_json({1: "a", None: "b"})) == {"1": "a", "null": "b"}
+
+
+def test_dumps_json_serializes_tuple_values_as_arrays() -> None:
+    assert json.loads(dumps_json({"a": (1, "x\ud800")})) == {"a": [1, f"x{FFFD}"]}
 
 
 # display -----------------------------------------------------------------------------------
@@ -304,3 +438,25 @@ def test_write_stderr_sanitizes_message_hint_and_warning(
 ) -> None:
     textsafe.write_stderr("error: bad \x1b[2J\u202e path\ud800")
     assert capsys.readouterr().err == f"error: bad <U+001B>[2J<U+202E> path{FFFD}\n"
+
+
+@pytest.mark.parametrize("flag", ["--ver", "--js", "--vers"])
+def test_abbreviated_options_are_usage_errors(
+    flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([flag])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "\x1b" not in err
+
+
+def test_subparsers_do_not_allow_abbreviations() -> None:
+    from session_audit.cli import build_parser
+
+    parser = build_parser()
+    assert parser.allow_abbrev is False
+    sub_action = next(a for a in parser._actions if a.dest == "command")  # noqa: SLF001
+    sub = sub_action.add_parser("x")  # type: ignore[attr-defined]
+    assert sub.allow_abbrev is False

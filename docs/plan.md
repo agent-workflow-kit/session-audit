@@ -21,6 +21,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `cli` | 0 | argparse subcommands, global flags, exit-code mapping, JSON envelopes |
 | `config` | 0 | YAML with drop-ins, Pydantic validation, ownership checks, price table |
 | `gateway` | 0 | the only process, filesystem-outside-store, clock and crontab access |
+| `textsafe` | 0 | sanitizer, fix_surrogates, untrusted neutralizer, display helpers |
 | `store` | 0, 2 | SQLite schema and migrations, leases, queries, file modes |
 | `reader` | 1 | discovery, safe open, incremental lines, change detection, budgets |
 | `parse` | 1 | tolerant line parsing into events by the transcript field map |

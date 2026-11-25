@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from . import __version__
 from .textsafe import write_stderr
@@ -16,6 +16,12 @@ USAGE_ERROR = 2
 
 class _Parser(argparse.ArgumentParser):
     """argparse echoes user text in its errors; print it through the sanitizer."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Abbreviations would change meaning when a later release adds an option
+        # (add_subparsers builds its parsers with this class, so they inherit it).
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
