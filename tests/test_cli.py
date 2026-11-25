@@ -309,13 +309,17 @@ def test_json_is_accepted_before_and_after_the_command(
 
 
 def test_a_global_flag_before_the_command_survives_the_subparser_defaults(
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    run(capsys, ["--config", "/c", "--verbose", "sessions"])
+    first, second = str(tmp_path / "c.yaml"), str(tmp_path / "d.yaml")
+    for name in (first, second):
+        Path(name).write_text("{}\n", encoding="utf-8")
+        os.chmod(name, 0o600)
+    run(capsys, ["--config", first, "--verbose", "sessions"])
     ctx = CALLS[0][2]
-    assert (ctx.config, ctx.verbose, ctx.quiet, ctx.json) == ("/c", True, False, False)
-    run(capsys, ["--config", "/c", "sessions", "--config", "/d", "--quiet"])
-    assert (CALLS[1][2].config, CALLS[1][2].quiet) == ("/d", True)
+    assert (ctx.config, ctx.verbose, ctx.quiet, ctx.json) == (first, True, False, False)
+    run(capsys, ["--config", first, "sessions", "--config", second, "--quiet"])
+    assert (CALLS[1][2].config, CALLS[1][2].quiet) == (second, True)
 
 
 def test_dry_run_and_yes_reach_the_context(capsys: pytest.CaptureFixture[str]) -> None:

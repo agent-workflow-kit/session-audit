@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import re
 import signal
 import sys
@@ -26,6 +27,7 @@ from . import __version__, errors
 from .args import check_actor, check_path, default_actor
 from .command import Command, Context, Output, StdoutFailed, stderr_line
 from .commands import COMMANDS
+from .config import load_config
 from .errors import CliError
 from .gateway import Gateway, SystemGateway, discard_stream
 from .textsafe import dumps_json
@@ -275,12 +277,39 @@ def _context(
         )
     if ctx.config is not None:
         check_path(ctx.config, "--config")
+    # The composition root of the config: loaded once, never raising. A broken config is reported
+    # by ``_dispatch`` after the command's own checks (Order of checks: flags first, then config).
+    loaded = load_config(gateway, os.environ, ctx.config)
+    ctx.settings = loaded.settings
+    ctx.config_issues = loaded.issues
+    ctx.config_error = loaded.error
     if command.accepts_actor:
         given = getattr(namespace, "actor", None)
-        # TODO(#7): this is the composition root: #7 loads the config here (``--config``, the
-        # defaults) and passes its ``me.name`` as ``me_name``, and ``time_zone`` to the checks.
-        ctx.actor = check_actor(given) if given is not None else default_actor(is_tty=tty)
+        ctx.actor = (
+            check_actor(given)
+            if given is not None
+            else default_actor(is_tty=tty, me_name=ctx.settings.me.name)
+        )
     return ctx
+
+
+def _check_config(ctx: Context, command: Command) -> None:
+    """The config step of every command: a command that changes something refuses an unsafe
+    config (exit 20), any other command reports it on stderr; an invalid config is exit 2 unless
+    the command reports it itself (``validate``)."""
+    if ctx.config_issues and command.refuses_unsafe_config:
+        raise errors.CliError(
+            "refused",
+            "the config is unsafe",
+            details={"reason": "config_unsafe"},
+            hint="; ".join(sorted({i.describe() for i in ctx.config_issues}))
+            + ". Fix the owner or the mode, and do not use symlinks.",
+        )
+    if ctx.config_error is not None and command.requires_config:
+        raise ctx.config_error
+    if ctx.config_issues and command.requires_config:
+        for text in sorted({i.describe() for i in ctx.config_issues}):
+            ctx.note(f"{PROG}: warning: config_unsafe: {text}")
 
 
 def _dispatch(
@@ -300,6 +329,7 @@ def _dispatch(
         raise errors.usage("A command is required", hint=HELP_HINT)
     ctx = _context(namespace, command, gateway, out, tty)
     command.check(ctx, namespace)
+    _check_config(ctx, command)
     return command.run(ctx, namespace)
 
 

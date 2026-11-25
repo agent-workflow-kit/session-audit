@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import re
-from datetime import UTC
 from typing import Any
 
 from . import errors
@@ -74,11 +73,10 @@ def check_path(value: object, field: str) -> str:
 
 
 def check_when(ctx: Context, value: object, field: str) -> None:
-    """Check the ``WHEN`` grammar. A date is zone-dependent; the zone comes with the config
-    (TODO(#7): resolve ``--since``/``--until`` against ``time_zone`` where a command needs the
-    instant), so the check uses UTC, which accepts and refuses the same texts."""
+    """Check the ``WHEN`` grammar against the configured ``time_zone`` (a date is midnight there;
+    the built-in UTC when the config is invalid). Commands resolve the instant themselves."""
     try:
-        parse_when(value, field=field, now=ctx.gateway.now(), time_zone=UTC)
+        parse_when(value, field=field, now=ctx.gateway.now(), time_zone=ctx.settings.zone())
     except GrammarError as exc:
         raise errors.from_grammar(exc) from None
 
@@ -163,7 +161,7 @@ def os_user() -> str:
 
 def default_actor(*, is_tty: bool, me_name: str | None = None) -> str:
     """``human:<user>`` from a terminal, otherwise ``auto:unknown``. ``<user>`` is ``me.name``
-    when set (TODO(#7): the config passes it), by default the OS user name, normalized."""
+    when set (the config's ``me.name``), by default the OS user name, normalized."""
     if not is_tty:
         return "auto:unknown"
     return "human:" + normalize_user(me_name if me_name else os_user())

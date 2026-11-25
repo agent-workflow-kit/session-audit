@@ -74,5 +74,6 @@ COMMANDS = (
         check,
         run,
         accepts_actor=True,
+        refuses_unsafe_config=True,
     ),
 )

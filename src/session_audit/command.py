@@ -10,11 +10,15 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from .gateway import Gateway, discard_stream
 from .textsafe import dumps_json, show, write_stderr
+
+if TYPE_CHECKING:
+    from .config import ConfigIssue, Settings
+    from .errors import CliError
 
 
 class StdoutFailed(Exception):
@@ -56,6 +60,12 @@ class Output:
             raise StdoutFailed(type(exc).__name__) from None
 
 
+def _default_settings() -> Settings:
+    from .config import Settings  # lazy: config imports args, which imports this module
+
+    return Settings()
+
+
 @dataclass
 class Context:
     """What a command runs with: the gateway (clock, processes, files), the global flags and the
@@ -71,6 +81,11 @@ class Context:
     yes: bool = False
     actor: str | None = None
     stdin_is_tty: bool = False
+    # The loaded config (the built-in defaults when it is invalid), its ownership problems and
+    # the error a command reports (set by ``cli._context``).
+    settings: Settings = field(default_factory=_default_settings)
+    config_issues: tuple[ConfigIssue, ...] = ()
+    config_error: CliError | None = None
 
     def emit_json(self, document: Any) -> None:
         """Print one ``--json`` document (ASCII, lone surrogates fixed, no NaN) and a newline."""
@@ -104,3 +119,8 @@ class Command:
     check: Callable[[Context, argparse.Namespace], None]
     run: Callable[[Context, argparse.Namespace], int]
     accepts_actor: bool = False
+    # False only for a command that reports a broken config itself (``validate``).
+    requires_config: bool = True
+    # True for the commands that change something: they exit 20 ``config_unsafe`` on any
+    # ownership issue of the config; the others report it on stderr.
+    refuses_unsafe_config: bool = False

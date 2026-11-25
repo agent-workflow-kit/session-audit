@@ -28,6 +28,11 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
 COMMANDS = (
     Command(
-        ("validate",), "check config, store, roots and claude-session", add_arguments, check, run
+        ("validate",),
+        "check config, store, roots and claude-session",
+        add_arguments,
+        check,
+        run,
+        requires_config=False,
     ),
 )
