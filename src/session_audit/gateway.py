@@ -22,7 +22,9 @@ with a matching fake in ``tests/fake_gateway.py``.
 
 from __future__ import annotations
 
+import contextlib
 import enum
+import fcntl
 import math
 import os
 import selectors
@@ -31,7 +33,8 @@ import stat as statmod
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +48,7 @@ _POLL_SECONDS = 0.05
 _READ_CHUNK = 65536
 _DRAIN_CHUNKS = 16
 _GROUP_POLL_SECONDS = 0.02
+_LOCK_POLL_SECONDS = 0.01
 
 
 class CallStatus(enum.Enum):
@@ -148,6 +152,33 @@ class Gateway(Protocol):
 
     def crontab_write(self, text: str) -> CallResult:
         """``crontab -`` with ``text`` on stdin."""
+        ...
+
+    # --- the state directory (the store's own files) ------------------------------------------
+    # sqlite3 opens ``state.db`` itself (the boundary test allows it); everything else the store
+    # needs from the file system (directories, ``log.jsonl``, ``log.lock``) goes through these.
+
+    def umask(self, mask: int) -> AbstractContextManager[None]:
+        """Set the process umask to ``mask`` for the duration of the block."""
+        ...
+
+    def mkdir(self, path: str | os.PathLike[str], mode: int) -> None:
+        """Create one directory with exactly ``mode`` whatever the umask (``FileExistsError`` when
+        it exists, even as a symlink). A parent that is missing is an error."""
+        ...
+
+    def open_private(
+        self, path: str | os.PathLike[str], *, create: bool, append: bool = False, mode: int = 0o600
+    ) -> BinaryIO:
+        """Open a regular file read-write, unbuffered, never following a final symlink and never
+        blocking on a FIFO. With ``create`` a missing file is created with exactly ``mode``
+        whatever the umask; an existing one is opened as it is. With ``append`` every write goes
+        to the end. The caller checks what it opened (``os.fstat`` on the handle)."""
+        ...
+
+    def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
+        """Take an exclusive ``flock`` on ``handle``, waiting at most ``timeout`` seconds; False
+        when it was not obtained. The lock ends when ``handle`` is closed."""
         ...
 
 
@@ -415,6 +446,60 @@ class SystemGateway:
 
     def crontab_write(self, text: str) -> CallResult:
         return self.run(["crontab", "-"], timeout=CRONTAB_TIMEOUT_SECONDS, stdin=text)
+
+    @contextlib.contextmanager
+    def umask(self, mask: int) -> Iterator[None]:
+        previous = os.umask(mask)
+        try:
+            yield
+        finally:
+            os.umask(previous)
+
+    def mkdir(self, path: str | os.PathLike[str], mode: int) -> None:
+        os.mkdir(path, mode)
+        # The mode asked for, not the mode the umask left: set through a descriptor that does not
+        # follow a symlink, so a path swapped after the mkdir is never changed.
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+
+    def open_private(
+        self, path: str | os.PathLike[str], *, create: bool, append: bool = False, mode: int = 0o600
+    ) -> BinaryIO:
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if append:
+            flags |= os.O_APPEND
+        fd = -1
+        created = False
+        if create:
+            try:
+                fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, mode)
+                created = True
+            except FileExistsError:
+                pass
+        try:
+            if fd < 0:
+                fd = os.open(path, flags)
+            if created:
+                os.fchmod(fd, mode)
+            return os.fdopen(fd, "r+b", buffering=0)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            raise
+
+    def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(_LOCK_POLL_SECONDS)
 
 
 def _is_zone(name: str) -> bool:

@@ -16,6 +16,7 @@ import os
 import posixpath
 import stat as statmod
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import BinaryIO
@@ -185,3 +186,18 @@ class FakeGateway:
     def crontab_write(self, text: str) -> CallResult:
         self.crontab = text
         return CallResult(CallStatus.EXITED, 0)
+
+    # --- the state directory: scripted by the tests that need it (they use a real directory) ---
+    def umask(self, mask: int) -> AbstractContextManager[None]:
+        raise NotImplementedError("state directory access is tested against real directories")
+
+    def mkdir(self, path: str | os.PathLike[str], mode: int) -> None:
+        raise NotImplementedError("state directory access is tested against real directories")
+
+    def open_private(
+        self, path: str | os.PathLike[str], *, create: bool, append: bool = False, mode: int = 0o600
+    ) -> BinaryIO:
+        raise NotImplementedError("state directory access is tested against real directories")
+
+    def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
+        raise NotImplementedError("state directory access is tested against real directories")
