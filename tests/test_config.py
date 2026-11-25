@@ -106,12 +106,25 @@ def test_machine_time_zone_is_the_default_and_an_invalid_one_falls_back() -> Non
     assert ok(gw).time_zone == "UTC"
 
 
+def test_the_time_zone_is_asked_with_the_passed_environment() -> None:
+    gw = tree()
+    ok(gw, {**ENV, "TZ": "Asia/Tokyo"})
+    assert gw.time_zone_env is not None and gw.time_zone_env["TZ"] == "Asia/Tokyo"
+
+
 def test_me_name_defaults_to_the_os_user_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("session_audit.config.os_user", lambda: "a b$c")
     assert ok(tree()).me.name == "a_b_c"
-    gw = tree()
-    write(gw, "me:\n  name: given\n")
-    assert ok(gw).me.name == "given"
+    for raw, wanted in (
+        ("..", "unknown"),
+        ("-x", "x"),
+        ("a..b", "a_b"),
+        ("../..", "unknown"),
+        ("", "unknown"),
+        ("a" * 70, "a" * 64),
+    ):
+        monkeypatch.setattr("session_audit.config.os_user", lambda raw=raw: raw)
+        assert ok(tree()).me.name == wanted, raw
 
 
 # --- locations -----------------------------------------------------------------------------------
@@ -154,7 +167,8 @@ def test_drop_ins_merge_in_lexical_order_maps_merge_lists_replace_hooks_append()
     gw.add_dir(DROPINS, mode=0o700)
     write(
         gw,
-        "retro:\n  max_sessions: 9\n  tools: [Read, Bash]\nhooks:\n  post-retro:\n    - cmd: three\n",
+        "retro:\n  max_sessions: 9\n  tools: [Read, Bash]\n"
+        "hooks:\n  post-retro:\n    - cmd: three\n",
         f"{DROPINS}/20-b.yaml",
     )
     write(
@@ -262,10 +276,12 @@ retro:
   env_allowlist: [PATH]
   tools: [Read]
   remove_run_transcripts: false
-digest: {max_bytes: 1MB, session_max_bytes: 5000B, prompt_chars: 30, assistant_chars: 40, arg_chars: 50, error_chars: 60}
+digest: {max_bytes: 1MB, session_max_bytes: 5000B, prompt_chars: 30, assistant_chars: 40,
+  arg_chars: 50, error_chars: 60}
 redaction: {mask_env: [TOK], extra_token_prefixes: [abc-]}
 schedule:
-  retro: {weekday: 0, hour: 23, scope: {since: 7d, until: 1d, labels: ["a=b"], project: /p, kind: review, outcome: done}}
+  retro: {weekday: 0, hour: 23, scope: {since: 7d, until: 1d, labels: ["a=b"], project: /p,
+    kind: review, outcome: done}}
 hooks:
   pre-retro: [{cmd: pre, timeout: 5}]
   post-attention: [{cmd: att, async: true}]
@@ -344,6 +360,28 @@ BAD = [
     ("redaction: {extra_token_prefixes: [ab]}", "redaction.extra_token_prefixes"),
     ("redaction: {extra_token_prefixes: ['a b c']}", "redaction.extra_token_prefixes"),
     ("me: {name: 'a b'}", "me.name"),
+    ("me: {name: .}", "me.name"),
+    ("me: {name: ..}", "me.name"),
+    ("me: {name: ../..}", "me.name"),
+    ("me: {name: a..b}", "me.name"),
+    ("me: {name: -a}", "me.name"),
+    ("me: {name: _a}", "me.name"),
+    ("transcript_roots: [/a/../b]", "transcript_roots"),
+    ("transcript_roots: [/a/./b]", "transcript_roots"),
+    ("transcript_roots: ['~/link/../p']", "transcript_roots"),
+    ("transcript_roots: ['~/..']", "transcript_roots"),
+    ("retro: {permission_profile: '~/link/../p.json'}", "retro.permission_profile"),
+    ("retro: {permission_profile: /a/../p.json}", "retro.permission_profile"),
+    ("retro: {permission_profile: /a/.}", "retro.permission_profile"),
+    ("limits: {retros_per_day: 0x10}", "limits.retros_per_day"),
+    ("limits: {retros_per_day: 0o10}", "limits.retros_per_day"),
+    ("limits: {retros_per_day: 010}", "limits.retros_per_day"),
+    ("limits: {retros_per_day: 0b11}", "limits.retros_per_day"),
+    ("limits: {retros_per_day: 1_0}", "limits.retros_per_day"),
+    ("limits: {retros_per_day: 1:30}", "limits.retros_per_day"),
+    ("cost: {mismatch_margin: 0:30}", "cost.mismatch_margin"),
+    ("cost: {mismatch_margin: 0_5.0}", "cost.mismatch_margin"),
+    ("ingest: {budget: 1_0}", "ingest.budget"),
     ("time_zone: Nowhere/Land", "time_zone"),
     ("time_zone: localtime", "time_zone"),
     ("transcript_roots: []", "transcript_roots"),
@@ -379,7 +417,7 @@ BAD = [
     ("hooks: {post-retro: [{cmd: x, timeout: 601}]}", "hooks.post-retro"),
     ("hooks: {post-retro: [{cmd: x, async: 1}]}", "hooks.post-retro"),
     ("hooks: {post-retro: cmd}", "hooks.post-retro"),
-    ("hooks: {other: []}", "hooks"),
+    ("hooks: {other: []}", "hooks.other"),
     ("retro: []", "retro"),
     ("retro:\n", "retro"),
 ]
@@ -412,14 +450,65 @@ def test_a_key_never_prints_its_value_even_a_secret_one() -> None:
         assert SECRET not in shown, text
 
 
-def test_unknown_keys_are_reported_as_their_parent() -> None:
+def test_an_unknown_key_is_named_only_when_it_is_a_safe_field_name() -> None:
     gw = tree()
     write(gw, "mystery: 1\n")
-    assert field_of(load(gw)) is None
+    assert field_of(load(gw)) == "mystery"
     write(gw, "retro:\n  nope: 1\n")
-    assert field_of(load(gw)) == "retro"
+    assert field_of(load(gw)) == "retro.nope"
     write(gw, "repos: {}\n")
-    assert load(gw).error is not None  # there is no repos layer
+    assert field_of(load(gw)) == "repos"  # there is no repos layer
+
+
+@pytest.mark.parametrize(
+    ("text", "parent"),
+    [
+        (f"retro: {{{SECRET}: 1}}", "retro"),  # upper case is not a field name
+        ("retro: {'a b': 1}", "retro"),
+        ("retro: {'a\\u001b[31m': 1}", "retro"),
+        (f"{SECRET}: 1", None),
+        ("retro: {" + "x" * 70 + ": 1}", "retro"),  # too long for the envelope field
+        ("hooks: {pre-retro: [{cmd: x, bogus: 1}]}", "hooks.pre-retro"),
+        (
+            "prices: {models: {m: {input: 1, output: 1, cache_read: 1, cache_write: 1, x: 1}}}",
+            "prices.models",
+        ),
+    ],
+)
+def test_a_hostile_unknown_key_is_never_echoed(text: str, parent: str | None) -> None:
+    gw = tree()
+    write(gw, text + "\n")
+    loaded = load(gw)
+    assert field_of(loaded) == parent
+    assert loaded.error is not None and SECRET not in repr(loaded.error.envelope())
+
+
+def test_an_invalid_harness_enabled_hints_to_quote_on_and_off() -> None:
+    gw = tree()
+    write(gw, "harness: {enabled: off}\n")
+    error = load(gw).error
+    assert error is not None and error.hint is not None and "quote" in error.hint.lower()
+    write(gw, "ingest: {budget: 0}\n")
+    error = load(gw).error
+    assert error is not None and error.hint is not None and "quote" not in error.hint.lower()
+
+
+def test_plain_decimal_numbers_still_load() -> None:
+    gw = tree()
+    write(
+        gw,
+        "limits: {retros_per_day: 7}\ncost: {mismatch_margin: 0.25}\n"
+        "ingest: {budget: 90, fail_threshold: +3}\nretro: {max_turns: 0012_}\n".replace(
+            "0012_", "12"
+        ),
+    )
+    s = ok(gw)
+    assert s.limits.retros_per_day == 7 and s.cost.mismatch_margin == 0.25
+    assert s.ingest.budget == timedelta(seconds=90) and s.ingest.fail_threshold == 3
+    write(gw, "cost: {mismatch_margin: .5}\n")
+    assert ok(gw).cost.mismatch_margin == 0.5
+    write(gw, "me: {name: a.b-c}\n")
+    assert ok(gw).me.name == "a.b-c"
 
 
 def test_a_valid_value_at_each_documented_boundary_is_accepted() -> None:
@@ -450,16 +539,58 @@ def test_a_scope_with_no_until_and_a_since_in_every_unit() -> None:
 
 
 def test_bundled_prices_are_complete_and_dated() -> None:
-    assert BUNDLED_PRICES.as_of is not None and len(BUNDLED_PRICES.models) >= 5
-    for price in BUNDLED_PRICES.models.values():
-        assert price.cache_write_1h is not None and price.input > 0
+    assert BUNDLED_PRICES.as_of == "2026-11-25"
+    assert set(BUNDLED_PRICES.models) == set(VERIFIED_PRICES)
+    for name, (inp, out, read, write, write_1h) in VERIFIED_PRICES.items():
+        price = BUNDLED_PRICES.models[name]
+        assert (price.input, price.output, price.cache_read) == (inp, out, read), name
+        assert (price.cache_write, price.cache_write_1h) == (write, write_1h), name
+
+
+# Verified on 2026-11-25 against the public pricing and model pages (see config.py).
+VERIFIED_PRICES = {
+    "claude-fable-5-2": (8.0, 40.0, 0.2, 10.0, 16.0),
+    "claude-opus-5-5": (4.0, 20.0, 0.2, 5.0, 8.0),
+    "claude-opus-4-8": (5.0, 25.0, 0.5, 6.25, 10.0),
+    "claude-opus-4-7": (5.0, 25.0, 0.5, 6.25, 10.0),
+    "claude-opus-4-6": (5.0, 25.0, 0.5, 6.25, 10.0),
+    "claude-opus-4-5": (5.0, 25.0, 0.5, 6.25, 10.0),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.1, 2.5, 4.0),
+    "claude-sonnet-4-6": (3.0, 15.0, 0.3, 3.75, 6.0),
+    "claude-sonnet-4-5": (3.0, 15.0, 0.3, 3.75, 6.0),
+    "claude-haiku-4-5": (1.0, 5.0, 0.1, 1.25, 2.0),
+}
+
+
+@pytest.mark.parametrize("model", ["claude-opus-4-6", "claude-opus-4-8", "claude-opus-4-8-x"])
+def test_a_later_opus_is_not_priced_as_the_retired_opus_4(model: str) -> None:
+    price = BUNDLED_PRICES.lookup(model)
+    assert price is not None and (price.input, price.output) == (5.0, 25.0)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-3-5-haiku-20241022",
+        "claude-3-7-sonnet-20250219",
+        "claude-opus-4-20250514",
+        "claude-opus-4-1-20250805",
+        "claude-sonnet-4-20250514",
+        "claude-haiku-5-5",
+        "claude-opus-4",
+        "claude-sonnet-4",
+    ],
+)
+def test_an_unlisted_model_has_no_price(model: str) -> None:
+    assert BUNDLED_PRICES.lookup(model) is None
 
 
 def test_config_prices_extend_and_replace_the_bundled_table() -> None:
     gw = tree()
     write(
         gw,
-        "prices:\n  models:\n    claude-haiku-4-5: {input: 9, output: 9, cache_read: 9, cache_write: 9}\n"
+        "prices:\n  models:\n"
+        "    claude-haiku-4-5: {input: 9, output: 9, cache_read: 9, cache_write: 9}\n"
         "    zzz: {input: 1, output: 2, cache_read: 3, cache_write: 4}\n",
     )
     p = ok(gw).prices
@@ -475,7 +606,8 @@ def test_price_lookup_is_exact_then_longest_prefix() -> None:
     p = BUNDLED_PRICES
     assert p.lookup("claude-opus-4-5") is p.models["claude-opus-4-5"]
     assert p.lookup("claude-opus-4-5-20251101") is p.models["claude-opus-4-5"]
-    assert p.lookup("claude-opus-4-20250514") is p.models["claude-opus-4"]
+    assert p.lookup("claude-haiku-4-5-20251001") is p.models["claude-haiku-4-5"]
+    assert p.lookup("claude-sonnet-5-5") is p.models["claude-sonnet-5-5"]
     assert p.lookup("claude-opus-3") is None and p.lookup("") is None
 
 
@@ -647,6 +779,17 @@ def test_a_non_regular_file_is_an_issue_and_is_not_read() -> None:
     gw = tree()
     gw.add_dir(CONFIG, mode=0o700)
     assert ("config", "not_regular") in issues(gw)
+
+
+@pytest.mark.parametrize("path", [CONFIG, f"{DROPINS}/a.yaml"])
+def test_a_socket_is_an_issue_and_is_never_opened(path: str) -> None:
+    gw = tree()
+    gw.add_dir(DROPINS, mode=0o700)
+    gw.add_socket(path)
+    loaded = load(gw)
+    subject = "config" if path == CONFIG else "dropin"
+    assert (subject, "not_regular") in {(i.subject, i.kind) for i in loaded.issues}
+    assert gw.reads == [] and loaded.error is None
 
 
 def test_a_root_owned_ancestor_above_home_is_not_checked() -> None:

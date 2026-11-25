@@ -10,8 +10,9 @@ Rules that hold everywhere in this module:
 
 * A message is a fixed string and never holds a config value. An error names the key (``field``)
   and never the value; a Pydantic error is read only through its ``loc`` and ``type``, never
-  printed (it holds the input). An unknown key is reported as its parent, so the key text, which
-  is untrusted, is not echoed either.
+  printed (it holds the input). An unknown key is named (its dotted path) only when that path
+  fully matches the envelope's field pattern, otherwise it is reported as its parent, so key
+  text, which is untrusted, is never echoed beyond that closed alphabet.
 * YAML is read with a ``SafeLoader`` subclass that also refuses anchors, aliases (so no
   expansion or cycle bomb), merge keys, duplicate keys, non-string keys, nesting deeper than
   ``MAX_DEPTH`` and more than ``MAX_NODES`` nodes, and does not turn dates into objects. The
@@ -25,6 +26,7 @@ Rules that hold everywhere in this module:
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat as statmod
@@ -87,7 +89,7 @@ PROGRAM_DIR = "session-audit"
 CONFIG_NAME = "config.yaml"
 DROPIN_DIR = "config.d"
 DROPIN_SUFFIX = ".yaml"
-PRICE_MAX = 1_000_000.0  # USD per million tokens; no schema maximum, a cap keeps sums finite
+PRICE_MAX = 1_000_000.0  # USD per million tokens; the schema's "maximum" of every price field
 
 ENV_TIMEOUT = "SESSION_AUDIT_TIMEOUT"
 ENV_MODEL = "SESSION_AUDIT_MODEL"
@@ -95,10 +97,12 @@ ENV_MODEL = "SESSION_AUDIT_MODEL"
 _ASCII = re.ASCII
 _PLAIN_TEXT = re.compile(r"[^\x00-\x1f\x7f-\x9f\ud800-\udfff]+")
 _FIELD_SEGMENT = re.compile(r"[a-z_][a-z0-9_-]*", _ASCII)
+_ENVELOPE_FIELD = re.compile(r"[a-z_][a-z0-9_.-]{0,63}", _ASCII)  # errors.py: the "field" pattern
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}", _ASCII)
 _TOOL_NAME = re.compile(r"[A-Z][A-Za-z]{1,31}", _ASCII)
 _CMD_NAME = re.compile(r"[A-Za-z0-9._/+-]{1,256}", _ASCII)
-_ME_NAME = re.compile(r"[A-Za-z0-9._@/-]{1,64}", _ASCII)
+# Starts with a letter or digit and holds no "..": the name is a path-like actor part.
+_ME_NAME = re.compile(r"(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._@/-]{0,63}", _ASCII)
 _PREFIX = re.compile(r"[A-Za-z0-9_-]{3,64}", _ASCII)
 _MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}", _ASCII)
 _AS_OF = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", _ASCII)
@@ -121,13 +125,24 @@ class _Rejected(Exception):
 # --- the YAML loader ------------------------------------------------------------------------
 
 
+# YAML 1.1 reads ``010`` as octal, ``0x10`` as hex, ``0b11`` as binary, ``1_0`` as 10 and
+# ``1:30`` as 90 (sexagesimal); none of those is meant in a config. The implicit int and float
+# resolvers are replaced by strict decimal ones, so such a scalar stays a string and fails the
+# validation of the key it is in.
+_DROPPED_TAGS = frozenset(
+    {"tag:yaml.org,2002:timestamp", "tag:yaml.org,2002:int", "tag:yaml.org,2002:float"}
+)
+_DECIMAL_INT = re.compile(r"^[-+]?(?:0|[1-9][0-9]*)$")
+_DECIMAL_FLOAT = re.compile(r"^[-+]?(?:(?:0|[1-9][0-9]*)\.[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$")
+
+
 class _Loader(yaml.SafeLoader):
     """``SafeLoader`` without anchors, aliases, merge keys, duplicate or non-string keys, with
     bounded depth and node count, and without implicit timestamps (a date stays a string, as
     the schema's ``as_of`` is)."""
 
     yaml_implicit_resolvers = {
-        first: [item for item in resolvers if item[0] != "tag:yaml.org,2002:timestamp"]
+        first: [item for item in resolvers if item[0] not in _DROPPED_TAGS]
         for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
     }
 
@@ -166,6 +181,10 @@ class _Loader(yaml.SafeLoader):
                     raise _Rejected("a key appears twice")
                 seen.add(key)
         return super().construct_mapping(node, deep)
+
+
+_Loader.add_implicit_resolver("tag:yaml.org,2002:int", _DECIMAL_INT, list("-+0123456789"))
+_Loader.add_implicit_resolver("tag:yaml.org,2002:float", _DECIMAL_FLOAT, list("-+0123456789."))
 
 
 def _check_plain(value: object, depth: int = 0) -> None:
@@ -371,15 +390,22 @@ def _home_of(info: ValidationInfo) -> str:
     return str(context.get("home", "/"))
 
 
+def _has_dot_segment(path: str) -> bool:
+    """A ``.`` or ``..`` segment: ``normpath`` would resolve it lexically, which a symlink in
+    front of a ``..`` makes wrong, so such a path is refused rather than normalized."""
+    return any(segment in (".", "..") for segment in path.split("/"))
+
+
 def _absolute_path(maximum: int) -> BeforeValidator:
     """A path of 1 to ``maximum`` characters without NUL; a leading ``~`` is the home directory;
-    the result must be absolute (a relative path would depend on the working directory)."""
+    the result must be absolute (a relative path would depend on the working directory) and has
+    no ``.`` or ``..`` segment."""
 
     def check(value: object, info: ValidationInfo) -> str:
         if not isinstance(value, str) or not 1 <= len(value) <= maximum or "\x00" in value:
             _fail()
         path = _expand(value, _home_of(info))
-        if not path.startswith("/"):
+        if not path.startswith("/") or _has_dot_segment(path):
             _fail()
         return path
 
@@ -468,22 +494,31 @@ def _price(
     )
 
 
-# List prices in USD per million tokens, as published when ``as_of`` was written. A model not in
-# the table has no estimated cost (its tokens count as ``unknown_tokens``); a price in the config
-# replaces or extends this table, and ``validate`` warns when the table is older than 180 days.
+# List prices in USD per million tokens (base input, output, cache read, 5 minute cache write,
+# 1 hour cache write), copied on 2026-11-25 (``as_of``) from
+# https://platform.claude.com/docs/en/about-claude/pricing; each id is the one given on
+# https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions and
+# https://platform.claude.com/docs/en/models/overview (a dated snapshot id matches its key as a
+# prefix). A model not in the table has no estimated cost (its tokens count as
+# ``unknown_tokens``); a price in the config replaces or extends this table, and ``validate``
+# warns when the table is older than 180 days. Only entries verified against those pages are
+# listed: no ``claude-3-*``, and no bare ``claude-opus-4``, ``claude-opus-4-1`` or
+# ``claude-sonnet-4`` prefix (it would match later models, priced differently).
+# todo(#14): tiered pricing (haiku 5.5 etc.) not representable; such models count as
+# unknown_tokens
 BUNDLED_PRICES = PriceTable(
-    as_of="2025-11-24",
+    as_of="2026-11-25",
     models={
+        "claude-fable-5-2": _price(8.0, 40.0, 0.2, 10.0, 16.0),
+        "claude-opus-5-5": _price(4.0, 20.0, 0.2, 5.0, 8.0),
+        "claude-opus-4-8": _price(5.0, 25.0, 0.5, 6.25, 10.0),
+        "claude-opus-4-7": _price(5.0, 25.0, 0.5, 6.25, 10.0),
+        "claude-opus-4-6": _price(5.0, 25.0, 0.5, 6.25, 10.0),
         "claude-opus-4-5": _price(5.0, 25.0, 0.5, 6.25, 10.0),
-        "claude-opus-4-1": _price(15.0, 75.0, 1.5, 18.75, 30.0),
-        "claude-opus-4": _price(15.0, 75.0, 1.5, 18.75, 30.0),
+        "claude-sonnet-5-5": _price(2.0, 10.0, 0.1, 2.5, 4.0),
+        "claude-sonnet-4-6": _price(3.0, 15.0, 0.3, 3.75, 6.0),
         "claude-sonnet-4-5": _price(3.0, 15.0, 0.3, 3.75, 6.0),
-        "claude-sonnet-4": _price(3.0, 15.0, 0.3, 3.75, 6.0),
-        "claude-3-7-sonnet": _price(3.0, 15.0, 0.3, 3.75, 6.0),
-        "claude-3-5-sonnet": _price(3.0, 15.0, 0.3, 3.75, 6.0),
         "claude-haiku-4-5": _price(1.0, 5.0, 0.1, 1.25, 2.0),
-        "claude-3-5-haiku": _price(0.8, 4.0, 0.08, 1.0, 1.6),
-        "claude-3-haiku": _price(0.25, 1.25, 0.03, 0.3, 0.5),
     },
 )
 
@@ -710,7 +745,7 @@ def _roots(value: object, info: ValidationInfo) -> tuple[str, ...]:
         if not isinstance(item, str) or not 1 <= len(item) <= 4096 or "\x00" in item:
             _fail()
         root = _expand(item, home)
-        if not root.startswith("/"):
+        if not root.startswith("/") or _has_dot_segment(root):
             _fail()
         roots.append(root)
     return tuple(roots)
@@ -726,7 +761,15 @@ def _zone(value: object) -> str:
 class Settings(_Model):
     """The merged, validated config. ``Settings()`` is the built-in default config, except that
     the three computed defaults (``transcript_roots``, ``time_zone`` and ``me.name``) hold
-    placeholders until ``resolve_settings`` fills them."""
+    placeholders until ``resolve_settings`` fills them.
+
+    Under an unsafe config (``LoadedConfig.issues`` not empty) the exec-bearing keys
+    (``harness.claude_session_cmd``, ``hooks``, ``retro.plugin_dirs``,
+    ``retro.permission_profile``) are still applied here.
+    """
+
+    # todo(#33): commands that execute harness/hooks (validate --probe, retro run) must not
+    # honor exec-bearing keys while ctx.config_issues is non-empty
 
     transcript_roots: Annotated[tuple[str, ...], BeforeValidator(_roots)] = ()
     time_zone: Annotated[str, BeforeValidator(_zone)] = "UTC"
@@ -835,6 +878,8 @@ def _directory_issues(
 def profile_issues(gateway: Gateway, path: str, home: str) -> list[ConfigIssue]:
     """The ownership rule for ``retro.permission_profile``: the file and every directory above it
     (checked before a launch; a missing file is the caller's concern)."""
+    # todo(#26): call profile_issues before launching the retro with a permission profile
+    # todo(#33): validate reports profile_issues
     uid = gateway.uid()
     path = os.path.normpath(path)
     issues: list[ConfigIssue] = []
@@ -915,12 +960,15 @@ class _Reader:
         if statmod.S_ISLNK(info.st_mode):
             self.issues.append(ConfigIssue(subject, "symlink"))
             return None
+        if not statmod.S_ISREG(info.st_mode):  # a socket, FIFO or directory is never opened
+            self.issues.append(ConfigIssue(subject, "not_regular"))
+            return None
         try:
             content = self.gateway.read_file(path, MAX_FILE_BYTES)
         except FileNotFoundError:
             return None
         except OSError as exc:
-            if exc.errno == 40:  # ELOOP: swapped for a symlink since the lstat
+            if exc.errno == errno.ELOOP:  # swapped for a symlink since the lstat
                 self.issues.append(ConfigIssue(subject, "symlink"))
                 return None
             raise _invalid("a config file cannot be read") from None
@@ -990,21 +1038,39 @@ def _field_of(loc: tuple[Any, ...], kind: str) -> str | None:
     return field[:64] or None
 
 
+def _unknown_key_path(loc: tuple[Any, ...]) -> str | None:
+    """The dotted path of an unknown key when every part is a string and the whole fits the
+    envelope's field pattern; None otherwise (the caller reports the parent)."""
+    if not loc or not all(isinstance(p, str) for p in loc):
+        return None
+    path = ".".join(loc)
+    if not _ENVELOPE_FIELD.fullmatch(path):
+        return None
+    if (
+        tuple(loc[: len(_PRICES_FIELD)]) == _PRICES_FIELD
+        or tuple(loc[: len(_SCOPE_FIELD)]) == _SCOPE_FIELD
+    ):
+        return None  # reported as that key, whatever is under it
+    return path
+
+
 def _from_validation(error: ValidationError) -> CliError:
     first = error.errors(include_url=False, include_context=False, include_input=False)[0]
     kind = first["type"]
     field = _field_of(first["loc"], kind)
     if field is not None and field.split(".")[0:2] == ["prices", "models"]:
         field = "prices.models"
+    hint = "See config.example.yaml for every key and its range."
     if kind == "extra_forbidden":
         message = "the config has a key that is not known"
+        field = _unknown_key_path(first["loc"]) or field
     elif kind == "missing":
         message = "the config lacks a required key"
-        if field is not None:
-            pass
     else:
         message = "the config has an invalid value"
-    return _invalid(message, field, hint="See config.example.yaml for every key and its range.")
+        if field == "harness.enabled":
+            hint = 'Use auto, "on" or "off"; quote on/off, as YAML reads them as booleans.'
+    return _invalid(message, field, hint=hint)
 
 
 def validate_document(document: dict[str, Any], home: str) -> Settings:
@@ -1035,7 +1101,7 @@ def resolve_settings(settings: Settings, gateway: Gateway, env: Mapping[str, str
     if "transcript_roots" not in given:
         update["transcript_roots"] = default_roots(env, home)
     if "time_zone" not in given:
-        machine = gateway.machine_time_zone()
+        machine = gateway.machine_time_zone(env)
         try:
             update["time_zone"] = parse_time_zone(machine, field="time_zone").key
         except GrammarError:

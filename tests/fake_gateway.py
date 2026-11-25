@@ -47,7 +47,7 @@ class FakeClock:
 
 @dataclass
 class FakeEntry:
-    kind: str  # "file", "dir" or "symlink"
+    kind: str  # "file", "dir", "symlink" or "socket"
     data: bytes = b""
     uid: int = 1000
     mode: int = 0o644
@@ -66,6 +66,7 @@ class FakeGateway:
         self.files: dict[str, FakeEntry] = {}
         self.user_id = 1000
         self.time_zone: str | None = "UTC"
+        self.time_zone_env: Mapping[str, str] | None = None
         self.reads: list[str] = []
         self.calls: list[dict[str, object]] = []
         self.crontab = ""
@@ -110,6 +111,9 @@ class FakeGateway:
             "file", raw, uid=self.user_id if uid is None else uid, mode=mode
         )
 
+    def add_socket(self, path: str, *, uid: int | None = None, mode: int = 0o600) -> None:
+        self.files[path] = FakeEntry("socket", uid=self.user_id if uid is None else uid, mode=mode)
+
     def add_symlink(self, path: str, target: str, *, uid: int | None = None) -> None:
         self.files[path] = FakeEntry(
             "symlink", uid=self.user_id if uid is None else uid, mode=0o777, target=target
@@ -117,7 +121,12 @@ class FakeGateway:
 
     @staticmethod
     def _result(entry: FakeEntry) -> os.stat_result:
-        kind = {"file": statmod.S_IFREG, "dir": statmod.S_IFDIR, "symlink": statmod.S_IFLNK}
+        kind = {
+            "file": statmod.S_IFREG,
+            "dir": statmod.S_IFDIR,
+            "symlink": statmod.S_IFLNK,
+            "socket": statmod.S_IFSOCK,
+        }
         mode = kind[entry.kind] | entry.mode
         return os.stat_result((mode, 1, 1, 1, entry.uid, entry.uid, len(entry.data), 0, 0, 0))
 
@@ -166,7 +175,8 @@ class FakeGateway:
     def uid(self) -> int:
         return self.user_id
 
-    def machine_time_zone(self) -> str | None:
+    def machine_time_zone(self, env: Mapping[str, str] | None = None) -> str | None:
+        self.time_zone_env = env
         return self.time_zone
 
     def crontab_read(self) -> CallResult:

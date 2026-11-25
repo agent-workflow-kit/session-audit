@@ -509,8 +509,28 @@ def test_stat_follows_a_symlink(tmp_path: Path) -> None:
 
 def test_machine_time_zone_prefers_tz_and_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     gw = SystemGateway()
-    monkeypatch.setenv("TZ", ":Europe/Paris")
-    assert gw.machine_time_zone() == "Europe/Paris"
-    monkeypatch.delenv("TZ")
-    result = gw.machine_time_zone()
+    assert gw.machine_time_zone({"TZ": ":Europe/Paris"}) == "Europe/Paris"
+    monkeypatch.setenv("TZ", "Asia/Tokyo")  # the passed mapping wins, not the process env
+    assert gw.machine_time_zone({"TZ": "Europe/Paris"}) == "Europe/Paris"
+    result = gw.machine_time_zone({})
     assert result is None or isinstance(result, str)
+
+
+def test_a_posix_tz_string_falls_through_to_the_machine_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    zone_file = tmp_path / "timezone"
+    zone_file.write_text("Europe/Berlin\n", encoding="utf-8")
+    monkeypatch.setattr(SystemGateway, "LOCALTIME", str(tmp_path / "no-localtime"))
+    monkeypatch.setattr(SystemGateway, "TIMEZONE_FILE", str(zone_file))
+    gw = SystemGateway()
+    assert gw.machine_time_zone({"TZ": "EST5EDT,M3.2.0,M11.1.0"}) == "Europe/Berlin"
+    assert gw.machine_time_zone({"TZ": "Not/AZone"}) == "Europe/Berlin"
+    assert gw.machine_time_zone({}) == "Europe/Berlin"
+    link = tmp_path / "localtime"
+    link.symlink_to("/usr/share/zoneinfo/Asia/Tokyo")
+    monkeypatch.setattr(SystemGateway, "LOCALTIME", str(link))
+    assert gw.machine_time_zone({"TZ": "garbage"}) == "Asia/Tokyo"
+    zone_file.write_text("Not/AZone\n", encoding="utf-8")
+    link.unlink()
+    assert gw.machine_time_zone({"TZ": "garbage"}) is None

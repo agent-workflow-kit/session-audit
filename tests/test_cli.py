@@ -110,9 +110,9 @@ class _NoGateway:
 def test_version_works_with_a_broken_config_and_a_newer_store(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """Cannot fail today: nothing reads a config or a store yet. It pins the contract for #7,
-    which wires config loading and the store: ``--version`` must not touch either (here: no
-    command ``check`` or ``run`` and no gateway call happens)."""
+    """``--version`` must read neither a config nor a store, even a broken one or a missing
+    ``--config`` file: no command ``check`` or ``run`` and no gateway call happens (the config is
+    loaded in the composition root, after ``--version`` is answered)."""
     broken = tmp_path / "config.yaml"
     broken.write_text("{ not: [yaml", encoding="utf-8")
     state = Path(os.environ["XDG_STATE_HOME"]) / "session-audit"

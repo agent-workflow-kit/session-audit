@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, BinaryIO, Protocol
+from zoneinfo import ZoneInfo
 
 DEFAULT_STDOUT_LIMIT = 8 * 1024 * 1024
 KILL_GRACE_SECONDS = 5.0
@@ -135,9 +136,10 @@ class Gateway(Protocol):
         """The effective user id: whose files count as "owned by the user"."""
         ...
 
-    def machine_time_zone(self) -> str | None:
-        """The IANA name of the machine's zone (``TZ``, ``/etc/localtime``, ``/etc/timezone``),
-        or None when it cannot be told. The caller validates the name."""
+    def machine_time_zone(self, env: Mapping[str, str] | None = None) -> str | None:
+        """The IANA name of the machine's zone: ``TZ`` from ``env`` (the process environment when
+        None) when it names a zone, else ``/etc/localtime``, else ``/etc/timezone``; None when no
+        candidate is a valid zone name (a POSIX ``TZ`` such as ``EST5EDT`` is not one)."""
         ...
 
     def crontab_read(self) -> CallResult:
@@ -385,29 +387,42 @@ class SystemGateway:
     def uid(self) -> int:
         return os.geteuid()
 
-    def machine_time_zone(self) -> str | None:
-        name = os.environ.get("TZ", "").lstrip(":")
-        if name:
-            return name
+    LOCALTIME = "/etc/localtime"
+    TIMEZONE_FILE = "/etc/timezone"
+
+    def machine_time_zone(self, env: Mapping[str, str] | None = None) -> str | None:
+        source = os.environ if env is None else env
+        candidates = [source.get("TZ", "").lstrip(":")]
         try:
-            target = os.readlink("/etc/localtime")
+            target = os.readlink(self.LOCALTIME)
         except OSError:
             target = ""
         marker = "zoneinfo/"
         if marker in target:
-            return target.split(marker, 1)[1] or None
+            candidates.append(target.split(marker, 1)[1])
         try:
-            with open("/etc/timezone", encoding="utf-8", errors="replace") as handle:
-                first = handle.readline().strip()
+            with open(self.TIMEZONE_FILE, encoding="utf-8", errors="replace") as handle:
+                candidates.append(handle.readline().strip())
         except OSError:
-            return None
-        return first or None
+            pass
+        for name in candidates:
+            if name and _is_zone(name):
+                return name
+        return None
 
     def crontab_read(self) -> CallResult:
         return self.run(["crontab", "-l"], timeout=CRONTAB_TIMEOUT_SECONDS)
 
     def crontab_write(self, text: str) -> CallResult:
         return self.run(["crontab", "-"], timeout=CRONTAB_TIMEOUT_SECONDS, stdin=text)
+
+
+def _is_zone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except Exception:  # not found, a malformed key, an unreadable file: not a usable name
+        return False
+    return True
 
 
 def _detail(failure: CallStatus, timeout: float, stdout_limit: int) -> str:

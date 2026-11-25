@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import json
 import os
+import socket
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,26 @@ def test_a_command_that_changes_something_refuses_an_unsafe_config(
     error = json.loads(out)["error"]
     assert error["code"] == "refused" and error["details"] == {"reason": "config_unsafe"}
     assert "writable by group or other" in err and str(config_dir) not in err + out
+
+
+@pytest.mark.parametrize("where", ["config.yaml", "config.d/a.yaml"])
+def test_a_socket_as_the_config_or_a_drop_in_is_config_unsafe(
+    capsys: pytest.CaptureFixture[str],
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    directory = config_dir / "config.d" if where.startswith("config.d") else config_dir
+    directory.mkdir(mode=0o700, exist_ok=True)
+    monkeypatch.chdir(directory)  # a relative name keeps the path under the socket length limit
+    sock = socket.socket(socket.AF_UNIX)
+    try:
+        sock.bind(where.rsplit("/", 1)[-1])
+        code, out, _ = run(capsys, ["prune", "--json"])
+    finally:
+        sock.close()
+    assert code == 20 and SEEN == []
+    assert json.loads(out)["error"]["details"] == {"reason": "config_unsafe"}
 
 
 @pytest.mark.parametrize("argv", READ_ONLY)

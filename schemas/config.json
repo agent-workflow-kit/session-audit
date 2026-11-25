@@ -118,23 +118,28 @@
             "properties": {
               "input": {
                 "type": "number",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 1000000
               },
               "output": {
                 "type": "number",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 1000000
               },
               "cache_read": {
                 "type": "number",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 1000000
               },
               "cache_write": {
                 "type": "number",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 1000000
               },
               "cache_write_1h": {
                 "type": "number",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 1000000
               }
             },
             "required": [
@@ -665,8 +670,8 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 64,
-          "pattern": "^[A-Za-z0-9._@/-]{1,64}(?![\\s\\S])",
-          "description": "Actor name. Default: the OS user name with every character outside [A-Za-z0-9._@/-] replaced by _, cut to 64."
+          "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._@/-]{0,63}(?![\\s\\S])",
+          "description": "Actor name: starts with a letter or digit, no \"..\". Default: the OS user name with every character outside [A-Za-z0-9._@/-] replaced by _, every run of dots by one _, leading characters that are not a letter or digit dropped, cut to 64."
         }
       },
       "required": [],
