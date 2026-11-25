@@ -45,6 +45,7 @@ class RealToolRefused(AssertionError):
 # Programs that run other programs, so a protected program can hide behind them.
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish"})
 RUNNERS = SHELLS | {"env", "xargs", "nohup", "timeout", "setsid", "perl", "ruby", "node"}
+_SHELL_C = re.compile(r"-[A-Za-z]*c$")
 _PYTHON = re.compile(r"python[0-9.]*$")
 _WORD = re.compile(r"[\w./+-]+")
 
@@ -111,9 +112,10 @@ def guard_argv(
     names = list(words)
     if shell and isinstance(argv, str):
         names = _shell_words(argv)
-    elif Path(words[0]).name in SHELLS and "-c" in words[1:]:
-        index = words.index("-c", 1)
-        if index + 1 < len(words):
+    elif Path(words[0]).name in SHELLS:
+        # A short-flag cluster ending in c (-c, -ec, -lc) takes the command string next.
+        index = next((i for i, w in enumerate(words[1:], 1) if _SHELL_C.match(w)), None)
+        if index is not None and index + 1 < len(words):
             names += _shell_words(words[index + 1])
     for name in names:
         _check_program(name, search, allowed_roots, forbidden_roots)

@@ -224,6 +224,10 @@ def test_a_refused_call_consumes_no_step(tmp_path: Path) -> None:
     "argv",
     [
         ["--version"],
+        ["status", "cs-aaaaaaab", "--version"],
+        ["list", "--version"],
+        ["status", "--version"],  # argparse exits at --version before the missing id is noticed
+        ["list", "--bogus", "--version"],
         ["start", "--json", "--kind", "audit", "--label", "a=b", "--label", "c=d"],
         ["start", "--json", "--tools", "Read", "Grep", "--no-auto-exit", "--implicit-done"],
         ["start", "--json", "--resume", "cs-aaaaaaab", "--fork", "--reset", "prompt"],

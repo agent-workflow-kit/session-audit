@@ -340,15 +340,60 @@ def test_end_group_still_kills_a_member_that_outlasts_the_grace(tmp_path: Path) 
     assert not (tmp_path / "cleaned").exists()
 
 
-def test_end_group_with_nothing_left_after_the_leader_returns_at_once() -> None:
+def test_end_group_with_nothing_left_after_the_leader_returns_at_once(tmp_path: Path) -> None:
+    ready = tmp_path / "ready"
     leader = subprocess.Popen(
-        ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 0.05; done"], process_group=0
+        ["sh", "-c", f"trap 'exit 0' TERM; : > '{ready}'; while :; do sleep 0.05; done"],
+        process_group=0,
     )
-    time.sleep(0.3)  # let the trap be installed
+    assert wait_for_file(ready), "the trap was not installed"
     started = time.monotonic()
     SystemGateway(kill_grace=30)._end_group(leader)
     assert leader.returncode == 0
     assert time.monotonic() - started < 10
+
+
+def test_a_group_of_only_zombies_is_not_alive() -> None:
+    leader = subprocess.Popen([PY, "-c", "pass"], process_group=0)  # exits, stays unreaped
+    try:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and gateway._group_member_states(leader.pid) != ["Z"]:
+            time.sleep(0.02)
+        assert gateway._group_member_states(leader.pid) == ["Z"]
+        os.killpg(leader.pid, 0)  # the plain probe still sees the group
+        assert not gateway._group_alive(leader.pid)
+    finally:
+        leader.wait()
+
+
+def test_a_group_with_a_running_member_is_alive() -> None:
+    leader = subprocess.Popen(["sleep", "30"], process_group=0)
+    try:
+        assert gateway._group_alive(leader.pid)
+    finally:
+        leader.kill()
+        leader.wait()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("123 (sleep) S 1 456 456 0 -1", ("S", 456)),
+        ("123 (a b) Z 1 77 77 0 -1", ("Z", 77)),
+        ("123 (we ird) ) (x) R 1 88 88 0", ("R", 88)),
+        ("123 (cut) S 1", None),
+        ("garbage", None),
+        ("123 (x) S 1 notanumber 5", None),
+    ],
+)
+def test_proc_stat_is_parsed_from_the_last_parenthesis(
+    text: str, expected: tuple[str, int] | None
+) -> None:
+    assert gateway._parse_proc_stat(text) == expected
+
+
+def test_group_states_are_unknown_without_a_readable_proc(tmp_path: Path) -> None:
+    assert gateway._group_member_states(1, proc=str(tmp_path / "missing")) is None
 
 
 # -- clock and files -------------------------------------------------------------------------

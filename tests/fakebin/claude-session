@@ -11,9 +11,10 @@ Environment:
 
 Scenario: {"<key>": [step, ...]} where key is the subcommand (``list``, ``status``, ``start``,
 ``exec``, ``forget``, ``stop``...), ``start --dry-run`` or ``exec --dry-run`` when --dry-run is
-given, or ``--version``. The nth call with a key gets step n; calls past the last repeat the
-last step. A step is {"stdout": <json or text>, "stderr": text, "exit": int, "sleep": seconds,
-"ignore_term": bool, "stdin": bool (read and log stdin), "pid_file": path}.
+given, or ``--version`` (also after a subcommand). The nth call with a key gets step n; calls
+past the last repeat the last step. A step is {"stdout": <json or text>, "stderr": text,
+"exit": int, "sleep": seconds, "ignore_term": bool, "stdin": bool (read and log stdin),
+"pid_file": path}.
 
 Grammar: the commands start, exec, status, stop, list and forget follow claude-session's real
 argument grammar (argparse, no abbreviations): the global flags (--json, --config, --verbose,
@@ -101,6 +102,7 @@ def grammar_error(argv):
     own, fewest, most = COMMANDS[sub]
     flags = {**GLOBAL_FLAGS, **own}
     positionals = []
+    unknown = []
     index = 0
     while index < len(rest):
         token = rest[index]
@@ -111,8 +113,12 @@ def grammar_error(argv):
             index += 1
             continue
         name, equals, _ = token.partition("=") if token.startswith("--") else (token, "", "")
+        if name == "--version" and not equals:
+            return None  # every subcommand takes --version; argparse prints it and exits 0 at once
         if name not in flags:
-            return "unrecognized arguments: " + token
+            unknown.append(token)  # argparse reports unrecognized arguments only at the end
+            index += 1
+            continue
         arity = flags[name]
         if arity == NO_VALUE:
             if equals:
@@ -132,6 +138,8 @@ def grammar_error(argv):
                 return "argument %s: expected %s argument" % (
                     name, "at least one" if arity == MANY_VALUES else "one"
                 )
+    if unknown:
+        return "unrecognized arguments: " + " ".join(unknown)
     if len(positionals) < fewest:
         return "the following arguments are required: id"
     if len(positionals) > most:
@@ -142,7 +150,7 @@ def grammar_error(argv):
 
 
 def call_key(argv):
-    if argv and argv[0] == "--version":
+    if "--version" in argv:  # grammar_error let it through: argparse prints it and exits at once
         return "--version"
     words = [a for a in argv if not a.startswith("-")]
     if not words:

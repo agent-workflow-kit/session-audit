@@ -343,8 +343,42 @@ def _group_alive(pgid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
-    return True
+        pass
+    members = _group_member_states(pgid)
+    # killpg(pgid, 0) succeeds for a group of unreaped zombies (a container without an init);
+    # nothing is left to wait for then. Without /proc, or on any failure, the group is alive.
+    return not members or any(state != "Z" for state in members)
+
+
+def _parse_proc_stat(text: str) -> tuple[str, int] | None:
+    """``(state, pgrp)`` from the text of ``/proc/<pid>/stat``, or None when it does not parse.
+    The command name is in parentheses and may itself hold spaces and parentheses, so the
+    fields are counted from the last ``)``."""
+    rest = text[text.rfind(")") + 1 :].split()
+    if len(rest) < 3 or not rest[2].lstrip("-").isdigit():
+        return None
+    return rest[0], int(rest[2])
+
+
+def _group_member_states(pgid: int, proc: str = "/proc") -> list[str] | None:
+    """The states of the processes in group ``pgid`` from ``proc``, or None when ``proc`` cannot
+    be read as expected."""
+    try:
+        names = [n for n in os.listdir(proc) if n.isdigit()]
+    except OSError:
+        return None
+    states: list[str] = []
+    for name in names:
+        try:
+            with open(f"{proc}/{name}/stat", encoding="utf-8", errors="replace") as handle:
+                parsed = _parse_proc_stat(handle.read())
+        except OSError:
+            continue  # it exited meanwhile
+        if parsed is None:
+            return None
+        if parsed[1] == pgid:
+            states.append(parsed[0])
+    return states
 
 
 def _signal_group(pgid: int, sig: int) -> None:

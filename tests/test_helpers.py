@@ -187,6 +187,8 @@ def test_the_tripwire_fails_loudly_if_a_script_gets_past_the_popen_guard(tmp_pat
     "argv",
     [
         ["sh", "-c", "claude-session --version"],
+        ["sh", "-ec", "crontab -l"],
+        ["bash", "-lc", "claude x"],
         ["bash", "-c", "true; crontab -l"],
         ["sh", "-c", "x=$(crontab -l); echo $x"],
         ["sh", "-c", "'/usr/bin/crontab' -l"],
