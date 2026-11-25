@@ -28,6 +28,7 @@ import os
 import selectors
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -390,3 +391,22 @@ def _signal_group(pgid: int, sig: int) -> None:
 
 def _text(data: bytes | bytearray) -> str:
     return bytes(data).decode("utf-8", "replace")
+
+
+def discard_stdout(stream: IO[str] | None) -> None:
+    """Point the process's real standard output at ``/dev/null`` after a failed write, so the
+    bytes still buffered in ``stream`` cannot fail again when the interpreter flushes at exit
+    (that would turn the exit status into 120 and print a traceback). Does nothing unless
+    ``stream`` is the interpreter's own ``sys.__stdout__`` (a test's capture object is left
+    alone)."""
+    if stream is None or stream is not sys.__stdout__:
+        return
+    try:
+        fd = stream.fileno()
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, fd)
+        finally:
+            os.close(null)
+    except (OSError, ValueError):
+        pass

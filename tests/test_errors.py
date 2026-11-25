@@ -37,7 +37,9 @@ def _samples() -> dict[str, CliError]:
         ),
         "not_found": CliError("not_found", "not found", details={"id": "0123abcd"}),
         "vetoed": CliError(
-            "vetoed", "a pre-retro hook vetoed the run", details={"reason": "hook_vetoed", "retro_id": RETRO_ID, "hook": "pre-retro"}
+            "vetoed",
+            "a pre-retro hook vetoed the run",
+            details={"reason": "hook_vetoed", "retro_id": RETRO_ID, "hook": "pre-retro"},
         ),
         "failed": CliError(
             "failed",

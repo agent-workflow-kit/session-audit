@@ -204,7 +204,9 @@ def from_grammar(error: GrammarError) -> CliError:
     """Map a grammar failure straight into the envelope. Grammar messages are fixed text; a detail
     key outside the closed set is dropped, never printed."""
     details = {k: v for k, v in error.details.items() if k in DETAIL_KEYS}
-    return CliError(error.code, error.message, exit_code=error.exit_code, details=details, hint=error.hint)
+    return CliError(
+        error.code, error.message, exit_code=error.exit_code, details=details, hint=error.hint
+    )
 
 
 def claude_session_failed(result: CallResult) -> CliError:
