@@ -423,14 +423,12 @@ def test_module_exports() -> None:
 def test_usage_error_with_escape_sequences_is_sanitized_on_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    with pytest.raises(SystemExit) as exc:
-        main(["--bogus\x1b[31m\u202e"])
-    assert exc.value.code == 2
+    assert main(["--bogus\x1b[31m\u202e"]) == 2
     err = capsys.readouterr().err
+    # The usage error is a fixed text: the hostile flag is not echoed at all (see test_cli.py).
     assert "\x1b" not in err
     assert "\u202e" not in err
-    assert "<U+001B>" in err
-    assert "<U+202E>" in err
+    assert "bogus" not in err
 
 
 def test_write_stderr_sanitizes_message_hint_and_warning(
@@ -444,9 +442,7 @@ def test_write_stderr_sanitizes_message_hint_and_warning(
 def test_abbreviated_options_are_usage_errors(
     flag: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    with pytest.raises(SystemExit) as exc:
-        main([flag])
-    assert exc.value.code == 2
+    assert main([flag]) == 2
     err = capsys.readouterr().err
     assert "error:" in err
 
@@ -454,20 +450,19 @@ def test_abbreviated_options_are_usage_errors(
 def test_argparse_errors_are_sanitized_for_hostile_flags(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    with pytest.raises(SystemExit) as exc:
-        main(["--\x1b[2J‮"])
-    assert exc.value.code == 2
+    assert main(["--\x1b[2J‮"]) == 2
     err = capsys.readouterr().err
-    assert "<U+001B>" in err
-    assert "<U+202E>" in err
     assert "\x1b" not in err
     assert "‮" not in err
+    assert "2J" not in err
 
 
 def test_subparsers_do_not_allow_abbreviations() -> None:
     from session_audit.cli import build_parser
+    from session_audit.command import Output
+    from session_audit.commands import COMMANDS
 
-    parser = build_parser()
+    parser = build_parser(COMMANDS, Output())
     assert parser.allow_abbrev is False
     sub_action = next(a for a in parser._actions if a.dest == "command")  # noqa: SLF001
     sub = sub_action.add_parser("x")  # type: ignore[attr-defined]

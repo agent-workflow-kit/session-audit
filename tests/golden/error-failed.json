@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "failed",
+    "details": {
+      "reason": "claude_session_error",
+      "retryable": false
+    },
+    "message": "the operation failed"
+  }
+}

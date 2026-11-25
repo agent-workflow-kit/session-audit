@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "config_invalid",
+    "details": {
+      "field": "retro.timeout"
+    },
+    "message": "the config is invalid"
+  }
+}

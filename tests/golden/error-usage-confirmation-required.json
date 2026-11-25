@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "usage",
+    "details": {
+      "reason": "confirmation_required"
+    },
+    "message": "confirmation required"
+  }
+}

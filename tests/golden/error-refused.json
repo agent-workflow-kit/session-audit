@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "refused",
+    "details": {
+      "limit": 3,
+      "matched": 3,
+      "reason": "daily_limit"
+    },
+    "message": "refused"
+  }
+}
