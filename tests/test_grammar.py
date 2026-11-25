@@ -367,7 +367,7 @@ def test_resolve_ambiguous_prefix_caps_and_sorts_the_matches():
     assert err.code == "ambiguous"
     assert err.details["matched"] == 45
     assert err.details["matches"] == sorted(ids[:45])[:20]
-    assert len(err.details["matches"]) == 20
+    assert len(list(err.details["matches"])) == 20  # type: ignore[call-overload]
     assert err.field == "--session"
 
 
