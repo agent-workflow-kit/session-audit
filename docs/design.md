@@ -160,7 +160,7 @@ A bad line, an unsafe file or an unknown shape is counted and skipped, never fat
 
 ## Dependencies
 
-`pyyaml` (required: the standard library cannot read YAML) and `pydantic` (config and artifact validation, as the design guide specifies). Nothing else: the reader, parser, store and cron block use the standard library. Time zones come from the host's IANA tz database at runtime (present on Linux and macOS); `tzdata` is a dev-only dependency so the tests do not depend on the host's data.
+`pyyaml` (required: the standard library cannot read YAML; used only through a `SafeLoader` subclass that also refuses anchors, aliases, merge and duplicate keys, never a full loader) and `pydantic` (config and artifact validation, as the design guide specifies). Nothing else: the reader, parser, store and cron block use the standard library. Time zones come from the host's IANA tz database at runtime (present on Linux and macOS); `tzdata` is a dev-only dependency so the tests do not depend on the host's data.
 
 ## Platform
 
