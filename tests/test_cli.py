@@ -376,6 +376,7 @@ def test_actor_default_comes_from_the_terminal_state(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("session_audit.args.os_user", lambda: "j o$hn")
+    monkeypatch.setattr("session_audit.config.os_user", lambda: "j o$hn")
     run(capsys, ["prune"], tty=False)
     run(capsys, ["prune"], tty=True)
     run(capsys, ["prune", "--actor", "human:given"], tty=True)
