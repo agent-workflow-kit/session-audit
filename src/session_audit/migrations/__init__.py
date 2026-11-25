@@ -22,6 +22,8 @@ so a branch that lands late still applies on stores that already took a higher n
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from .base import Migration
 from .m800_initial_schema import MIGRATION as M800
 
@@ -38,4 +40,26 @@ MIGRATIONS: tuple[Migration, ...] = (
     # #31: 3100
 )
 
-__all__ = ["MIGRATIONS", "Migration"]
+
+def validate_registry(migrations: Sequence[Migration]) -> None:
+    """A registry is a tuple of ``Migration`` with unique numbers in ascending order (each number
+    is within its issue's range: ``Migration`` checks that itself). Anything else is a programming
+    error, raised as ``ValueError`` before the store is touched: a duplicate number would be
+    silently skipped, and an unsorted tuple hides a merge that went wrong."""
+    seen: set[int] = set()
+    previous = 0
+    for migration in migrations:
+        if migration.number in seen:
+            raise ValueError(f"migration number {migration.number} is registered twice")
+        if migration.number < previous:
+            raise ValueError(
+                f"migration {migration.number} is listed after {previous}; keep the registry "
+                "in ascending order"
+            )
+        seen.add(migration.number)
+        previous = migration.number
+
+
+validate_registry(MIGRATIONS)
+
+__all__ = ["MIGRATIONS", "Migration", "validate_registry"]

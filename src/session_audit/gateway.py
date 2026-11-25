@@ -115,6 +115,10 @@ class Gateway(Protocol):
 
     def monotonic(self) -> float: ...
 
+    def sleep(self, seconds: float) -> None:
+        """Wait ``seconds`` (a bounded poll between retries)."""
+        ...
+
     def open_read(self, path: str | bytes | os.PathLike[str]) -> BinaryIO:
         """Open a file for reading without following a final symlink or blocking on a FIFO.
         The caller checks what it opened (``os.fstat``); nothing is checked here."""
@@ -168,12 +172,19 @@ class Gateway(Protocol):
         ...
 
     def open_private(
-        self, path: str | os.PathLike[str], *, create: bool, append: bool = False, mode: int = 0o600
+        self,
+        path: str | os.PathLike[str],
+        *,
+        create: bool,
+        append: bool = False,
+        mode: int = 0o600,
+        read_only: bool = False,
     ) -> BinaryIO:
-        """Open a regular file read-write, unbuffered, never following a final symlink and never
-        blocking on a FIFO. With ``create`` a missing file is created with exactly ``mode``
-        whatever the umask; an existing one is opened as it is. With ``append`` every write goes
-        to the end. The caller checks what it opened (``os.fstat`` on the handle)."""
+        """Open a regular file read-write (read-only with ``read_only``, which excludes ``create``
+        and ``append``), unbuffered, never following a final symlink and never blocking on a FIFO.
+        With ``create`` a missing file is created with exactly ``mode`` whatever the umask; an
+        existing one is opened as it is. With ``append`` every write goes to the end. The caller
+        checks what it opened (``os.fstat`` on the handle)."""
         ...
 
     def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
@@ -380,6 +391,9 @@ class SystemGateway:
     def monotonic(self) -> float:
         return time.monotonic()
 
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
     def open_read(self, path: str | bytes | os.PathLike[str]) -> BinaryIO:
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         return os.fdopen(os.open(path, flags), "rb")
@@ -456,7 +470,13 @@ class SystemGateway:
             os.umask(previous)
 
     def mkdir(self, path: str | os.PathLike[str], mode: int) -> None:
-        os.mkdir(path, mode)
+        # umask 0 for the call: a umask such as 0777 would create the directory with no permission
+        # bits, and it could then not be opened to be fixed. The mode is then set exactly below.
+        previous = os.umask(0)
+        try:
+            os.mkdir(path, mode)
+        finally:
+            os.umask(previous)
         # The mode asked for, not the mode the umask left: set through a descriptor that does not
         # follow a symlink, so a path swapped after the mkdir is never changed.
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -466,9 +486,18 @@ class SystemGateway:
             os.close(fd)
 
     def open_private(
-        self, path: str | os.PathLike[str], *, create: bool, append: bool = False, mode: int = 0o600
+        self,
+        path: str | os.PathLike[str],
+        *,
+        create: bool,
+        append: bool = False,
+        mode: int = 0o600,
+        read_only: bool = False,
     ) -> BinaryIO:
-        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if read_only and (create or append):
+            raise ValueError("a read-only open cannot create or append")
+        flags = (os.O_RDONLY if read_only else os.O_RDWR) | os.O_NOFOLLOW
+        flags |= os.O_NONBLOCK | os.O_CLOEXEC
         if append:
             flags |= os.O_APPEND
         fd = -1
@@ -484,7 +513,7 @@ class SystemGateway:
                 fd = os.open(path, flags)
             if created:
                 os.fchmod(fd, mode)
-            return os.fdopen(fd, "r+b", buffering=0)
+            return os.fdopen(fd, "rb" if read_only else "r+b", buffering=0)
         except BaseException:
             if fd >= 0:
                 os.close(fd)

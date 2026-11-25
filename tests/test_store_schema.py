@@ -103,16 +103,98 @@ def test_text_columns_that_could_carry_a_message_are_length_limited(
                 "VALUES (?, 2, 0, 'message', ?)",
                 ("b" * 16, "x" * 129),
             )
-    with pytest.raises(sqlite3.IntegrityError):  # a hash is exactly 16 characters, not a sentence
-        conn.execute(
-            "INSERT INTO events (key, file_id, line_offset, kind) VALUES (?, 3, 0, 'message')",
-            ("a whole sentence of user text",),
-        )
+    for bad in ("short", "a whole paragraph of user text, much longer than any hash is " * 2):
+        with pytest.raises(sqlite3.IntegrityError):  # a hash is 16 to 64 characters
+            conn.execute(
+                "INSERT INTO events (key, file_id, line_offset, kind) VALUES (?, 3, 0, 'message')",
+                (bad,),
+            )
     with pytest.raises(sqlite3.IntegrityError):  # a kind is one of seven words
         conn.execute(
             "INSERT INTO events (key, file_id, line_offset, kind) VALUES (?, 4, 0, 'hello')",
             ("c" * 16,),
         )
+
+
+# A valid row for each table: the columns without a default that the schema requires.
+BASE_ROWS: dict[str, dict[str, object]] = {
+    "files": {"path": b"/p", "dev": 1, "inode": 1},
+    "sessions": {"session_id": "s", "project_dir": "p", "first_ingest_at": 0, "last_ingest_at": 0},
+    "agents": {"session_id": "s", "agent_id": "a"},
+    "events": {"key": "k" * 16, "file_id": 1, "line_offset": 0, "kind": "turn"},
+    "pruned_sessions": {"session_id": "s", "pruned_at": 0},
+    "harness_runs": {"csession_id": "c", "updated_at": "u"},
+    "retros": {"id": "ra-aaaaaaaa", "key": "k" * 64, "state": "done", "created_at": 0},
+    "retro_artifacts": {"retro_id": "r", "artifact": "{}"},
+    "retro_starts": {"day": "2026-01-01", "retro_id": "r"},
+    "retro_sessions": {
+        "csession_id": "c",
+        "retro_id": "r",
+        "csession_dir": "d",
+        "project_dir": "p",
+        "created_at": 0,
+    },
+    "meta": {"key": "k", "value": "v"},
+    "schema_migrations": {"number": 1, "name": "n", "applied_at": 0},
+}
+JSON_COLUMNS = {
+    ("harness_runs", "claude_session_ids"),
+    ("harness_runs", "labels"),
+    ("retros", "resolved_scope"),
+    ("retros", "session_map"),
+    ("retros", "counts"),
+    ("retros", "dropped"),
+    ("retros", "warnings"),
+}
+
+
+def _insert(conn: sqlite3.Connection, table: str, row: dict[str, object]) -> None:
+    names = ", ".join(row)
+    marks = ", ".join("?" for _ in row)
+    conn.execute(f"INSERT INTO {table} ({names}) VALUES ({marks})", list(row.values()))
+
+
+def test_the_base_rows_cover_every_table(conn: sqlite3.Connection) -> None:
+    assert set(BASE_ROWS) == set(COLUMNS)
+    for table, row in BASE_ROWS.items():
+        _insert(conn, table, row)  # a valid row is accepted, so a refusal below is the column
+
+
+def _oversize_cases() -> list[tuple[str, str]]:
+    cases = [
+        (t, c)
+        for t, cols in COLUMNS.items()
+        for c, kind in cols
+        if (kind == T or (t, c) == ("meta", "value")) and (t, c) not in UNTRUSTED
+    ]
+    assert len(cases) > 40
+    return cases
+
+
+@pytest.mark.parametrize(("table", "column"), _oversize_cases())
+def test_every_text_column_refuses_an_oversize_value(
+    conn: sqlite3.Connection, table: str, column: str
+) -> None:
+    big = "x" * 70_000
+    value = f'"{big}"' if (table, column) in JSON_COLUMNS else big  # valid JSON: only size fails
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert(conn, table, {**BASE_ROWS[table], column: value})
+
+
+@pytest.mark.parametrize(("table", "column"), sorted(JSON_COLUMNS))
+def test_a_json_column_refuses_text_that_is_not_json(
+    conn: sqlite3.Connection, table: str, column: str
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        _insert(conn, table, {**BASE_ROWS[table], column: "not json at all"})
+
+
+def test_untrusted_columns_are_the_only_unbounded_text(conn: sqlite3.Connection) -> None:
+    _insert(
+        conn,
+        "retro_artifacts",
+        {"retro_id": "r", "artifact": "x" * 70_000, "summary": "y" * 70_000},
+    )
 
 
 def test_the_event_key_is_unique_per_file(conn: sqlite3.Connection) -> None:
@@ -195,4 +277,74 @@ def test_a_migration_may_add_a_column_an_index_and_a_meta_key() -> None:
             "CREATE INDEX files_extra ON files (extra)",
             "INSERT INTO meta (key, value) VALUES ('k', 1)",
         ),
+    )
+
+
+# --- what a migration may write -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO meta (key, value) VALUES ('k', 1) ON CONFLICT (key) DO UPDATE SET value = 2",
+        "INSERT INTO meta (key, value) VALUES ('k', 1) ON CONFLICT DO NOTHING",
+        "insert into meta (key, value) select name, 1 from sqlite_master",
+        "INSERT INTO meta SELECT 'a', 1",
+        "INSERT INTO meta (key, value) SELECT key, value FROM meta",
+        "INSERT INTO meta (key, value) VALUES ('k', (SELECT count(*) FROM files))",
+        "INSERT INTO meta (key, value) VALUES ('k', 1) RETURNING value",
+        "INSERT INTO meta (key, value) VALUES ('a', 1), ('b', 2)",
+        "INSERT INTO meta (key, value) WITH x AS (SELECT 1) SELECT 'a', 1 FROM x",
+        "WITH x AS (SELECT 1) INSERT INTO meta (key, value) SELECT 'a', 1 FROM x",
+        "INSERT INTO meta (value, key) VALUES (1, 'k')",
+        "INSERT INTO meta VALUES ('k', 1)",
+        "INSERT INTO meta (key) VALUES ('k')",
+        "INSERT INTO meta_other (key, value) VALUES ('k', 1)",
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('k', 1)",
+        "INSERT INTO meta (key, value) VALUES ('k', 1) -- x",
+    ],
+)
+def test_a_meta_write_other_than_a_literal_seed_is_refused(statement: str) -> None:
+    with pytest.raises(ValueError):
+        Migration(900, "bad", (statement,))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO meta (key, value) VALUES ('k', 1)",
+        "insert  or  ignore into META ( key , value ) values ( 'a b', 'it''s' )",
+        "INSERT INTO meta (key, value)\nVALUES ('k', -1.5);",
+        "INSERT INTO meta (key, value) VALUES ('k', NULL)",
+    ],
+)
+def test_a_literal_meta_seed_is_accepted(statement: str) -> None:
+    Migration(900, "fine", (statement,))
+
+
+def test_event_hash_columns_accept_16_to_64_characters(conn: sqlite3.Connection) -> None:
+    for i, size in enumerate((16, 40, 64)):
+        conn.execute(
+            "INSERT INTO events (key, ref, file_id, line_offset, kind) VALUES (?, ?, ?, 0, 'turn')",
+            ("a" * size, "b" * size, i),
+        )
+    for size in (15, 65):
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO events (key, file_id, line_offset, kind) VALUES (?, 9, 0, 'turn')",
+                ("a" * size,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO events (key, ref, file_id, line_offset, kind) "
+                "VALUES ('a' || hex(randomblob(8)), ?, 9, 0, 'turn')",
+                ("b" * size,),
+            )
+
+
+def test_paths_and_names_take_4096_characters(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO sessions (session_id, project_dir, first_ingest_at, last_ingest_at) "
+        "VALUES ('s', ?, 0, 0)",
+        ("p" * 4096,),
     )

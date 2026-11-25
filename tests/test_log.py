@@ -163,6 +163,8 @@ HOSTILE: list[dict[str, Any]] = [
     entry("ingest", ts="2026-01-01T00:00:00Z"),
     entry("ingest", ts="2026-01-01T00:00:00.000Z\n"),
     entry("ingest", ts="2026-01-01T00:00:00.0000Z"),
+    entry("ingest", ts="\u0662\u0660\u0662\u0666-01-01T00:00:00.000Z"),  # Arabic-Indic digits
+    entry("ingest", ts="2026-01-01T00:00:00.00\uff10Z"),  # a full-width zero
     entry("ingest", action="other"),
     entry("retro_state", retro_id="ra-ABCDEFGH"),
     entry("retro_state", retro_id="ra-abcdefgh\n"),
@@ -367,3 +369,16 @@ def test_concurrent_processes_never_interleave(state: str) -> None:
     assert len(written) == 180
     for line in written:
         validate(json.loads(line), "session-audit/log.json")
+
+
+def test_ts_cannot_be_overridden_by_fields(state: str) -> None:
+    writer = LogWriter(ClockedGateway(), state)
+    with pytest.raises(ValueError, match="cannot set ts"):
+        writer.append(ACTOR, "ingest", ts="2026-01-01T00:00:00.000Z", **GOOD["ingest"])
+    assert not (Path(state) / "log.jsonl").exists()
+
+
+def test_a_ts_field_cannot_backdate_an_entry(state: str) -> None:
+    writer = LogWriter(ClockedGateway(), state)
+    with pytest.raises(ValueError):
+        writer.append(ACTOR, "ingest", ts="1999-01-01T00:00:00.000Z", **GOOD["ingest"])

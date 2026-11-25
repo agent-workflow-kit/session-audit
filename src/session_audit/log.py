@@ -1,8 +1,10 @@
 """The ``log.jsonl`` writer (interface.md, Log; ``schemas/log.json``).
 
 Hash-only and closed: an entry is validated against models that mirror ``schemas/log.json``
-(``tests/test_log.py`` checks that both accept and refuse the same documents), so a field that
-could hold transcript or model text cannot be written. An entry that does not validate is a bug
+(``tests/test_log.py`` checks that the writer accepts a strict subset of what the schema accepts:
+it refuses everything the schema refuses, and also the documents the schema allows but the
+writer never produces, such as a count of ``1.0``), so a field that could hold transcript or
+model text cannot be written. An entry that does not validate is a bug
 in the caller and raises ``ValueError``; the log is never half-written.
 
 An append takes ``log.lock`` (an exclusive ``flock``, waited for at most ``LOCK_TIMEOUT`` seconds)
@@ -29,9 +31,12 @@ LOG_NAME = "log.jsonl"
 LOCK_NAME = "log.lock"
 LOCK_TIMEOUT = 5.0
 
+_RESERVED = frozenset({"ts", "actor", "action"})
 _Count = Annotated[int, Field(strict=True, ge=0)]
 _Actor = Annotated[str, Field(pattern=r"^(human|auto):[A-Za-z0-9._@/-]{1,64}$", max_length=70)]
-_Timestamp = Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")]
+_Timestamp = Annotated[
+    str, Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
+]
 _Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 _RetroId = Annotated[str, Field(pattern=r"^ra-[a-z2-7]{8}$")]
 _CsessionId = Annotated[str, Field(pattern=r"^cs-[a-z2-7]{8}$")]
@@ -184,7 +189,11 @@ class LogWriter:
         self._directory = directory
 
     def append(self, actor: str, action: str, **fields: Any) -> str:
-        """Validate and append one entry, and return the line written."""
+        """Validate and append one entry, and return the line written. ``ts``, ``actor`` and
+        ``action`` are set here and cannot be given in ``fields`` (a ``ValueError``)."""
+        reserved = sorted(_RESERVED & fields.keys())
+        if reserved:
+            raise ValueError(f"log entry fields cannot set {', '.join(reserved)}")
         entry = {"ts": timestamp_ms(self._gateway.now()), "actor": actor, "action": action}
         entry.update(fields)
         line = render(entry) + "\n"

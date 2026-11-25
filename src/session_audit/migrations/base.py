@@ -9,8 +9,17 @@ from dataclasses import dataclass
 _ALLOWED = re.compile(
     r"\s*(CREATE\s+(UNIQUE\s+)?INDEX\s+(IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s"
     r"|CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?\w+\s*\("
-    r"|ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN\s"
-    r"|INSERT\s+(OR\s+IGNORE\s+)?INTO\s+meta\b)",
+    r"|ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN\s)",
+    re.IGNORECASE,
+)
+
+# The only data a migration may write: seed a ``meta`` key with literals. Exactly this shape, so
+# no ``ON CONFLICT ... DO UPDATE`` (an overwrite), ``SELECT`` (copying other tables), ``WITH`` or
+# ``RETURNING`` can ride along.
+_LITERAL = r"(?:'(?:[^']|'')*'|-?[0-9]+(?:\.[0-9]+)?|NULL)"
+_META_SEED = re.compile(
+    r"\s*INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+meta\s*\(\s*key\s*,\s*value\s*\)\s*"
+    rf"VALUES\s*\(\s*{_LITERAL}\s*,\s*{_LITERAL}\s*\)\s*;?\s*",
     re.IGNORECASE,
 )
 
@@ -25,8 +34,9 @@ class Migration:
     the numbers of those already applied (branches may land in any order). A migration may refer
     only to objects created by itself or by a migration with a lower number.
 
-    ``statements`` are single SQL statements (no ``;`` chains). ``INSERT INTO meta`` is allowed
-    for seeding a key; nothing else outside CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN.
+    ``statements`` are single SQL statements (no ``;`` chains). ``INSERT [OR IGNORE] INTO meta
+    (key, value) VALUES (<literal>, <literal>)`` is allowed for seeding a key and nothing else that
+    writes data; nothing else outside CREATE TABLE, CREATE INDEX and ALTER TABLE ADD COLUMN.
     """
 
     number: int
@@ -41,5 +51,6 @@ class Migration:
         if not self.statements:
             raise ValueError("a migration needs at least one statement")
         for statement in self.statements:
-            if not _ALLOWED.match(statement) or ";" in statement.strip().rstrip(";"):
+            seed = _META_SEED.fullmatch(statement) is not None
+            if not (seed or _ALLOWED.match(statement)) or ";" in statement.strip().rstrip(";"):
                 raise ValueError(f"migration {self.number}: only additive single statements")

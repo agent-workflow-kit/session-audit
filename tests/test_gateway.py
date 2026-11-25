@@ -553,7 +553,7 @@ def test_umask_is_set_for_the_block_and_restored(tmp_path: Path) -> None:
         os.umask(before)
 
 
-@pytest.mark.parametrize("mask", [0o000, 0o022, 0o277])
+@pytest.mark.parametrize("mask", [0o000, 0o022, 0o277, 0o777])
 def test_mkdir_gives_exactly_the_mode_whatever_the_umask(tmp_path: Path, mask: int) -> None:
     before = os.umask(mask)
     try:
@@ -637,3 +637,27 @@ def test_lock_exclusive_waits_then_gives_up_and_releases_on_close(tmp_path: Path
     first.close()
     assert gateway.lock_exclusive(second, 1.0)
     second.close()
+
+
+def test_open_private_read_only_opens_a_file_the_user_cannot_write(tmp_path: Path) -> None:
+    path = tmp_path / "f"
+    path.write_bytes(b"data")
+    path.chmod(0o400)
+    gateway = SystemGateway()
+    if os.geteuid() != 0:
+        with pytest.raises(PermissionError):
+            gateway.open_private(path, create=False)
+    handle = gateway.open_private(path, create=False, read_only=True)
+    try:
+        assert handle.read() == b"data"
+        with pytest.raises(OSError):
+            handle.write(b"x")
+    finally:
+        handle.close()
+
+
+def test_open_private_read_only_refuses_create_and_append(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        SystemGateway().open_private(tmp_path / "f", create=True, read_only=True)
+    with pytest.raises(ValueError):
+        SystemGateway().open_private(tmp_path / "f", create=False, append=True, read_only=True)

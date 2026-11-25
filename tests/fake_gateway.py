@@ -100,6 +100,9 @@ class FakeGateway:
     def monotonic(self) -> float:
         return self.clock.monotonic()
 
+    def sleep(self, seconds: float) -> None:
+        self.clock.advance(seconds)
+
     # --- the file tree -------------------------------------------------------------------------
     def add_dir(self, path: str, *, uid: int | None = None, mode: int = 0o700) -> None:
         self.files[path] = FakeEntry("dir", uid=self.user_id if uid is None else uid, mode=mode)
@@ -195,7 +198,13 @@ class FakeGateway:
         raise NotImplementedError("state directory access is tested against real directories")
 
     def open_private(
-        self, path: str | os.PathLike[str], *, create: bool, append: bool = False, mode: int = 0o600
+        self,
+        path: str | os.PathLike[str],
+        *,
+        create: bool,
+        append: bool = False,
+        mode: int = 0o600,
+        read_only: bool = False,
     ) -> BinaryIO:
         raise NotImplementedError("state directory access is tested against real directories")
 

@@ -6,14 +6,19 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
 from session_audit import store as store_module
 from session_audit.errors import CliError
-from session_audit.migrations import MIGRATIONS, Migration
+from session_audit.migrations import MIGRATIONS, Migration, validate_registry
+from session_audit.migrations.m800_initial_schema import MIGRATION as M800
 from session_audit.store import inspect_store, open_store, state_dir
 
 from .storehelp import V1, V2, V3, ClockedGateway, extra, foreign_gateway, ledger, state_path
@@ -316,7 +321,9 @@ def test_inspect_is_read_only_on_an_open_store(tmp_path: Path) -> None:
 
 
 @NOT_ROOT
-@pytest.mark.parametrize("bad", [0o777, 0o770, 0o750, 0o707, 0o755, 0o500, 0o600])
+@pytest.mark.parametrize(
+    "bad", [0o777, 0o770, 0o750, 0o707, 0o755, 0o500, 0o600, 0o2700, 0o1700, 0o4700]
+)
 def test_an_existing_directory_with_a_wrong_mode_is_refused_and_not_repaired(
     tmp_path: Path, bad: int
 ) -> None:
@@ -380,7 +387,7 @@ def test_a_foreign_owned_database_is_refused(tmp_path: Path) -> None:
 
 
 @NOT_ROOT
-@pytest.mark.parametrize("bad", [0o644, 0o660, 0o606, 0o666, 0o400 | 0o040])
+@pytest.mark.parametrize("bad", [0o644, 0o660, 0o606, 0o666, 0o400 | 0o040, 0o2600, 0o1600, 0o4600])
 def test_a_database_with_a_wrong_mode_is_refused_and_not_repaired(tmp_path: Path, bad: int) -> None:
     directory = state_path(tmp_path)
     open_store(ClockedGateway(), directory).close()
@@ -417,7 +424,7 @@ def test_a_hard_linked_database_is_refused(tmp_path: Path) -> None:
 
 
 @NOT_ROOT
-@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
 def test_a_side_file_with_a_wrong_mode_is_refused(tmp_path: Path, suffix: str) -> None:
     directory = state_path(tmp_path)
     open_store(ClockedGateway(), directory).close()
@@ -551,3 +558,245 @@ def test_checkpoint_truncates_the_wal_and_deleted_bytes_are_gone(tmp_path: Path)
         assert os.path.getsize(f"{directory}/state.db-wal") == 0
     assert secret not in Path(f"{directory}/state.db").read_bytes()
     assert b"SECRET-MARKER" not in Path(f"{directory}/state.db").read_bytes()
+
+
+# --- the review round 1 items ---------------------------------------------------------------
+
+CHILD_OPEN = """
+import sys, time
+from session_audit.gateway import SystemGateway
+from session_audit.migrations import MIGRATIONS
+from session_audit.store import open_store
+directory, start = sys.argv[1], float(sys.argv[2])
+while time.time() < start:
+    pass
+open_store(SystemGateway(), directory).close()
+"""
+
+
+def test_concurrent_first_opens_in_processes_all_succeed(tmp_path: Path) -> None:
+    """The switch to WAL fails at once while another process holds the file: it is retried."""
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    env = {**os.environ, "PYTHONPATH": src}
+    for round_ in range(4):
+        directory = state_path(tmp_path / f"r{round_}")
+        start = str(time.time() + 1.5)
+        children = [
+            subprocess.Popen(
+                [sys.executable, "-c", CHILD_OPEN, directory, start],
+                env=env,
+                stderr=subprocess.PIPE,
+            )
+            for _ in range(5)
+        ]
+        for child in children:
+            code = child.wait(timeout=120)
+            assert code == 0, child.stderr.read() if child.stderr else b""
+        assert ledger(directory) == [800]
+
+
+def test_a_wal_switch_that_stays_busy_gives_up_at_the_budget(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()  # now WAL, so use a rollback-mode database
+    for name in os.listdir(directory):
+        if name != "state.db":
+            os.unlink(f"{directory}/{name}")
+    raw = sqlite3.connect(f"{directory}/state.db", isolation_level=None)
+    raw.execute("PRAGMA journal_mode=DELETE")
+    raw.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    try:
+        with pytest.raises(CliError) as caught:
+            open_store(ClockedGateway(), directory, busy_timeout_ms=300)
+    finally:
+        raw.execute("ROLLBACK")
+        raw.close()
+    assert caught.value.details == {"reason": "store_unwritable", "retryable": True}
+    assert time.monotonic() - started < 10
+
+
+def test_checkpoint_with_a_reader_open_is_a_retryable_error(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    secret = "SECRET-MARKER-" + "x" * 200
+    with open_store(ClockedGateway(), directory, busy_timeout_ms=100) as store:
+        with store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO retro_artifacts (retro_id, artifact) VALUES ('r', ?)", (secret,)
+            )
+        store.checkpoint()
+        reader = sqlite3.connect(f"{directory}/state.db", isolation_level=None)
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM meta").fetchall()
+        with store.transaction() as conn:
+            conn.execute("DELETE FROM retro_artifacts")
+        try:
+            with pytest.raises(CliError) as caught:
+                store.checkpoint()
+        finally:
+            reader.execute("ROLLBACK")
+            reader.close()
+        assert caught.value.details == {"reason": "store_unwritable", "retryable": True}
+        assert directory not in (caught.value.hint or "")
+        store.checkpoint()  # the reader is gone: now it finishes
+    assert b"SECRET-MARKER" not in Path(f"{directory}/state.db").read_bytes()
+
+
+def test_inspect_of_a_cleanly_closed_store_creates_no_side_files(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    before = sorted(os.listdir(directory))
+    assert before == ["state.db"]
+    assert inspect_store(ClockedGateway(), directory).state == "ok"
+    assert sorted(os.listdir(directory)) == before
+
+
+def test_inspect_with_a_wal_present_still_sees_the_log(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    with open_store(ClockedGateway(), directory, migrations=V1) as store:
+        with store.transaction() as conn:
+            conn.execute("INSERT INTO schema_migrations VALUES (99999, 'future', 1)")
+        assert os.path.exists(f"{directory}/state.db-wal")
+        assert inspect_store(ClockedGateway(), directory, migrations=V1).state == "newer"
+
+
+def make_foreign_ledger(directory: str, number: object) -> None:
+    """A store whose ledger table is not ours: ``number`` can hold anything."""
+    os.makedirs(directory, mode=0o700)
+    conn = sqlite3.connect(f"{directory}/state.db", isolation_level=None)
+    conn.execute("CREATE TABLE schema_migrations (number, name, applied_at)")
+    conn.execute("INSERT INTO schema_migrations VALUES (?, 'x', 0)", (number,))
+    conn.close()
+    os.chmod(f"{directory}/state.db", 0o600)
+
+
+@pytest.mark.parametrize("number", ["abc", None, 1.5, b"\x00"])
+def test_a_malformed_ledger_is_store_unwritable_not_a_crash(tmp_path: Path, number: object) -> None:
+    directory = state_path(tmp_path)
+    make_foreign_ledger(directory, number)
+    error = refused(directory, "failed", "store_unwritable")
+    assert "abc" not in (error.hint or "")
+    with pytest.raises(CliError) as caught:
+        inspect_store(ClockedGateway(), directory)
+    assert caught.value.details["reason"] == "store_unwritable"
+
+
+def test_a_bad_statement_in_a_transaction_is_a_bug_not_a_store_error(tmp_path: Path) -> None:
+    with open_store(ClockedGateway(), state_path(tmp_path)) as store:
+        for sql in ("SELECT nosuchcol FROM files", "SELECT * FROM nosuchtable", "SELEC 1"):
+            with pytest.raises(sqlite3.OperationalError) as caught, store.transaction() as conn:
+                conn.execute(sql)
+            assert not isinstance(caught.value, CliError)
+        assert store.conn.in_transaction is False
+
+
+def test_a_constraint_violation_is_not_a_store_error(tmp_path: Path) -> None:
+    with open_store(ClockedGateway(), state_path(tmp_path)) as store:
+        with pytest.raises(sqlite3.IntegrityError), store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO events (key, file_id, line_offset, kind) VALUES ('s', 1, 0, 'x')"
+            )
+
+
+@pytest.mark.parametrize("code", [5, 6, 8, 10, 11, 13, 14, 26, 5 | (1 << 8), 10 | (2 << 8)])
+def test_storage_failure_codes_map_to_store_unwritable(code: int) -> None:
+    exc = sqlite3.OperationalError("whatever")
+    exc.sqlite_errorcode = code
+    assert store_module.is_storage_failure(exc)
+
+
+@pytest.mark.parametrize("code", [1, 19, 20, 21, 25])
+def test_other_result_codes_are_not_storage_failures(code: int) -> None:
+    exc = sqlite3.OperationalError("database is locked")  # the text must not decide
+    exc.sqlite_errorcode = code
+    assert not store_module.is_storage_failure(exc)
+
+
+@pytest.mark.parametrize("mask", [0o777, 0o000])
+def test_open_store_creates_the_directories_under_any_umask(tmp_path: Path, mask: int) -> None:
+    before = os.umask(mask)
+    try:
+        directory = state_path(tmp_path)
+        open_store(ClockedGateway(), directory).close()
+    finally:
+        os.umask(before)
+    assert mode(directory) == 0o700 and mode(f"{directory}/state.db") == 0o600
+
+
+def test_a_symlinked_journal_is_refused(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"")
+    os.symlink(target, f"{directory}/state.db-journal")
+    refused(directory, "failed", "store_unwritable")
+    with pytest.raises(CliError):
+        inspect_store(ClockedGateway(), directory)
+    assert target.read_bytes() == b""
+
+
+def test_a_duplicate_migration_number_is_a_programming_error(tmp_path: Path) -> None:
+    clash = (M800, extra(900, "t_a"), extra(900, "t_b"))
+    with pytest.raises(ValueError, match="twice"):
+        open_store(ClockedGateway(), state_path(tmp_path), migrations=clash)
+    with pytest.raises(ValueError, match="twice"):
+        inspect_store(ClockedGateway(), state_path(tmp_path), migrations=clash)
+    assert not os.path.exists(state_path(tmp_path))  # nothing was created
+
+
+def test_an_unsorted_registry_is_a_programming_error(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="ascending"):
+        open_store(
+            ClockedGateway(),
+            state_path(tmp_path),
+            migrations=(M800, extra(1300, "b"), extra(900, "a")),
+        )
+
+
+def test_the_real_registry_is_valid() -> None:
+    validate_registry(MIGRATIONS)
+
+
+class WriteDenied(ClockedGateway):
+    """A file system where state.db can be read but not opened for writing (read-only mount)."""
+
+    def open_private(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        create: bool,
+        append: bool = False,
+        mode: int = 0o600,
+        read_only: bool = False,
+    ) -> BinaryIO:
+        if not read_only:
+            raise PermissionError(13, "denied", os.fspath(path))
+        return super().open_private(path, create=create, append=append, mode=mode, read_only=True)
+
+
+def test_inspect_reads_a_database_that_cannot_be_opened_for_writing(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    assert inspect_store(WriteDenied(), directory).state == "ok"
+
+
+def test_open_gives_a_distinct_hint_when_state_db_is_not_writable(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    error = refused(directory, "failed", "store_unwritable", WriteDenied())
+    assert error.hint == "state.db is not writable"
+    assert error.details["retryable"] is False
+
+
+@NOT_ROOT
+def test_a_0400_database_is_refused_by_both_paths_without_a_crash(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    os.chmod(f"{directory}/state.db", 0o400)
+    try:
+        error = refused(directory, "failed", "store_unwritable")
+        assert error.hint == "state.db is not writable"
+        with pytest.raises(CliError) as caught:
+            inspect_store(ClockedGateway(), directory)
+        assert caught.value.details["reason"] == "store_unwritable"
+    finally:
+        os.chmod(f"{directory}/state.db", 0o600)
