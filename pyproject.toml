@@ -1,6 +1,6 @@
 [project]
 name = "session-audit"
-version = "0.0.2"
+version = "0.0.3"
 description = "Analyze Claude session transcripts and outcomes: retros and usage analytics."
 readme = "README.md"
 requires-python = ">=3.12"
