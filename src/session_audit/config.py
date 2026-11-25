@@ -466,7 +466,7 @@ def _as_of(value: object) -> str:
 
 class PriceTable(_Model):
     """USD per million tokens per model. A model matches by exact name first, then by the longest
-    configured prefix."""
+    configured prefix that ends at a ``-`` boundary in the model id."""
 
     as_of: Annotated[str | None, BeforeValidator(_as_of)] = None
     models: Annotated[dict[str, ModelPrice], BeforeValidator(_models)] = Field(default_factory=dict)
@@ -477,7 +477,7 @@ class PriceTable(_Model):
             return exact
         best: str | None = None
         for name in self.models:
-            if model.startswith(name) and (best is None or len(name) > len(best)):
+            if model.startswith(name + "-") and (best is None or len(name) > len(best)):
                 best = name
         return None if best is None else self.models[best]
 
@@ -1043,6 +1043,8 @@ def _unknown_key_path(loc: tuple[Any, ...]) -> str | None:
     envelope's field pattern; None otherwise (the caller reports the parent)."""
     if not loc or not all(isinstance(p, str) for p in loc):
         return None
+    if "." in loc[-1]:
+        return None  # a dot in the key's own name would read as a nested key
     path = ".".join(loc)
     if not _ENVELOPE_FIELD.fullmatch(path):
         return None

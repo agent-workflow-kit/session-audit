@@ -20,7 +20,7 @@ PATH_MAX = 4096  # the stored project is capped here (interface, Session object)
 ACTOR_USER_MAX = 64
 _ACTOR_BAD = re.compile(r"[^A-Za-z0-9._@/-]")
 _DOTS = re.compile(r"\.{2,}")
-_ACTOR_LEAD = "._@/-"
+_NOT_ALNUM_LEAD = re.compile(r"^[^A-Za-z0-9]+")
 SKILL_MAX = 128
 MODEL_MAX = 128
 # schemas/defs.json#skill: the plugin part is wider than the name part after the colon.
@@ -153,7 +153,8 @@ def normalize_user(name: str) -> str:
     ``[A-Za-z0-9._@/-]`` becomes ``_``, every run of dots becomes ``_`` (no ``..``), leading
     characters that are not a letter or digit are dropped, and the result is cut to 64
     (``unknown`` when empty)."""
-    cleaned = _DOTS.sub("_", _ACTOR_BAD.sub("_", name)).lstrip(_ACTOR_LEAD)[:ACTOR_USER_MAX]
+    trimmed = _NOT_ALNUM_LEAD.sub("", name)  # before substitution: no underscore it makes is lost
+    cleaned = _DOTS.sub("_", _ACTOR_BAD.sub("_", trimmed))[:ACTOR_USER_MAX]
     return cleaned or "unknown"
 
 

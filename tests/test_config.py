@@ -118,6 +118,9 @@ def test_me_name_defaults_to_the_os_user_normalized(monkeypatch: pytest.MonkeyPa
     for raw, wanted in (
         ("..", "unknown"),
         ("-x", "x"),
+        ("_bob", "bob"),
+        ("bob", "bob"),
+        ("$bob", "bob"),
         ("a..b", "a_b"),
         ("../..", "unknown"),
         ("", "unknown"),
@@ -465,6 +468,7 @@ def test_an_unknown_key_is_named_only_when_it_is_a_safe_field_name() -> None:
     [
         (f"retro: {{{SECRET}: 1}}", "retro"),  # upper case is not a field name
         ("retro: {'a b': 1}", "retro"),
+        ("retro: {a.b: 1}", "retro"),  # a dot in the key's own name would read as nesting
         ("retro: {'a\\u001b[31m': 1}", "retro"),
         (f"{SECRET}: 1", None),
         ("retro: {" + "x" * 70 + ": 1}", "retro"),  # too long for the envelope field
@@ -609,6 +613,31 @@ def test_price_lookup_is_exact_then_longest_prefix() -> None:
     assert p.lookup("claude-haiku-4-5-20251001") is p.models["claude-haiku-4-5"]
     assert p.lookup("claude-sonnet-5-5") is p.models["claude-sonnet-5-5"]
     assert p.lookup("claude-opus-3") is None and p.lookup("") is None
+
+
+@pytest.mark.parametrize(
+    ("model", "key"),
+    [
+        ("claude-opus-4-5", "claude-opus-4-5"),
+        ("claude-opus-4-5-20251101", "claude-opus-4-5"),
+        ("claude-opus-4-50", None),
+        ("claude-opus-4-5x", None),
+    ],
+)
+def test_price_prefix_needs_a_dash_boundary(model: str, key: str | None) -> None:
+    p = BUNDLED_PRICES
+    assert p.lookup(model) is (None if key is None else p.models[key])
+
+
+def test_config_prices_follow_the_same_boundary_rule() -> None:
+    gw = tree()
+    write(
+        gw,
+        "prices:\n  models:\n    zzz: {input: 1, output: 2, cache_read: 3, cache_write: 4}\n",
+    )
+    p = ok(gw).prices
+    assert p.lookup("zzz-1") is p.models["zzz"]
+    assert p.lookup("zzz1") is None and p.lookup("zzzz") is None
 
 
 # --- hostile YAML --------------------------------------------------------------------------------

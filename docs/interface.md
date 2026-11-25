@@ -411,7 +411,7 @@ Tokens are exact. A dollar figure always carries a basis.
 - `cost` objects have `reported_usd` (null means no reported cost, never 0 for missing), `estimated_usd` and `unknown_tokens`. They are never added into one number. `usage` totals show each basis separately. The Session object's `harness.cost_usd` is claude-session's cost of that run, shown as given, never added to `cost`.
 - A session whose `reported_usd` is not null and differs from `estimated_usd` by more than `cost.mismatch_margin` (default 10 percent) gets the `cost_mismatch` flag; neither figure is changed.
 - Message events store `cache_write_5m` and `cache_write_1h` (from `cache_creation.ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`; when absent, all of `cache_creation_input_tokens` counts as 5-minute); `tokens.cache_write` is their sum.
-- The price table is the config key `prices` (USD per million tokens per model: `input`, `output`, `cache_read`, `cache_write` and optional `cache_write_1h`, default `cache_write`). A table is bundled with an `as_of` date and replaced or extended by config. A model matches by exact name first, then by the longest configured prefix.
+- The price table is the config key `prices` (USD per million tokens per model: `input`, `output`, `cache_read`, `cache_write` and optional `cache_write_1h`, default `cache_write`). A table is bundled with an `as_of` date and replaced or extended by config. A model matches by exact name first, then by the longest configured prefix that ends at a `-` boundary of the model id (`claude-opus-4-5` prices `claude-opus-4-5-20251101`, not `claude-opus-4-50`).
 
 ## Harness enrichment
 
