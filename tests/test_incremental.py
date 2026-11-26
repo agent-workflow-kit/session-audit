@@ -365,25 +365,123 @@ def test_same_inode_and_content_rewritten_is_not_a_reread(f: Path) -> None:
     assert run.reason is Reason.CONTINUE
 
 
+def _with(p: Progress, **kw: object) -> Progress:
+    return Progress(**{**p.__dict__, **kw})  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
-    "mutate",
+    ("mutate", "reason"),
     [
-        lambda p: Progress(**{**p.__dict__, "head_len": 3}),
-        lambda p: Progress(**{**p.__dict__, "head_sha": None}),
-        lambda p: Progress(**{**p.__dict__, "tail_sha": None}),
-        lambda p: Progress(**{**p.__dict__, "offset": p.offset + 1}),
-        lambda p: Progress(**{**p.__dict__, "offset": -1}),
-        lambda p: Progress(**{**p.__dict__, "head_len": 5000}),
+        (lambda p: _with(p, head_len=3), Reason.HEAD),
+        (lambda p: _with(p, head_sha=None), Reason.HEAD),
+        (lambda p: _with(p, tail_sha=None), Reason.TAIL),
+        (lambda p: _with(p, offset=p.offset + 1), Reason.HEAD),
+        (lambda p: _with(p, offset=-1), Reason.HEAD),
+        (lambda p: _with(p, head_len=5000), Reason.HEAD),
+        (lambda p: _with(p, offset=1000), Reason.SHRUNK),
     ],
 )
 def test_an_inconsistent_stored_row_is_reread_not_trusted(
+    f: Path, mutate: Callable[[Progress], Progress], reason: Reason
+) -> None:
+    write(f, b"one\ntwo\n")
+    _, run = read(f)
+    p = run.checkpoint()
+    append(f, b"three\n")  # larger than the tampered offsets, so the head and tail checks run
+    _, again = read(f, mutate(p))
+    assert again.reason is reason
+    assert again.counts.lines == 3
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: _with(p, offset="abc"),
+        lambda p: _with(p, head_len=4.0),
+        lambda p: _with(p, head_sha=b"x"),
+        lambda p: _with(p, tail_sha=5),
+        lambda p: _with(p, dev="1"),
+        lambda p: _with(p, inode=None),
+        lambda p: _with(p, rules_version="1"),
+        lambda p: _with(p, offset=True),
+        lambda p: _with(p, skip_to_lf="no"),
+    ],
+)
+def test_a_row_with_wrongly_typed_columns_is_reread_and_never_raises(
     f: Path, mutate: Callable[[Progress], Progress]
 ) -> None:
     write(f, b"one\ntwo\n")
     _, run = read(f)
-    _, again = read(f, mutate(run.checkpoint()))
+    lines, again = read(f, mutate(run.checkpoint()))
     assert again.reason.reread
-    assert again.counts.lines == 2
+    assert len(lines) == 2
+
+
+def test_a_hostile_row_with_offset_zero_and_skip_to_lf_skips_the_first_record(f: Path) -> None:
+    """Documented outcome: offset 0 is trusted as unchanged, so the pending skip discards the
+    first record (through its LF) and the read goes on from the next line."""
+    write(f, b"one\ntwo\n")
+    _, run = read(f)
+    hostile = _with(
+        run.checkpoint(), offset=0, head_len=0, head_sha=None, tail_sha=None, skip_to_lf=True
+    )
+    lines, again = read(f, hostile)
+    assert again.reason is Reason.CONTINUE
+    assert lines == [(4, b"two\n")]
+
+
+def test_ids_of_2_pow_63_and_above_are_stored_and_compared(f: Path, tmp_path: Path) -> None:
+    write(f, b"one\ntwo\n")
+    stat = f.stat()  # stand in for a filesystem with huge ids
+    fake = os.stat_result((stat.st_mode, 2**64 - 1, 2**64 - 5, *tuple(stat)[3:]))
+    handle = opened(f)
+    handle.stat = fake
+    try:
+        first = IncrementalRead(
+            handle, None, gateway=Ticking(), rules_version=1, file_budget=BUDGET, run_deadline=None
+        )
+        list(first)
+        saved = first.checkpoint()
+        with open_store(ClockedGateway(), str(tmp_path / "state")) as store:
+            with store.transaction() as conn:
+                inc.save_progress(conn, bytes(f), saved)
+            loaded = inc.load_progress(store.conn, bytes(f))
+        assert loaded == saved
+        again = IncrementalRead(
+            handle,
+            loaded,
+            gateway=Ticking(),
+            rules_version=1,
+            file_budget=BUDGET,
+            run_deadline=None,
+        )
+        assert again.reason is Reason.CONTINUE
+        other = os.stat_result((stat.st_mode, 2**64 - 2, 2**64 - 5, *tuple(stat)[3:]))
+        handle.stat = other
+        moved = IncrementalRead(
+            handle,
+            loaded,
+            gateway=Ticking(),
+            rules_version=1,
+            file_budget=BUDGET,
+            run_deadline=None,
+        )
+        assert moved.reason is Reason.IDENTITY
+    finally:
+        handle.close()
+
+
+def test_a_budget_stopped_file_has_size_above_offset_and_is_read_again(f: Path) -> None:
+    """The stored size is not a change signal: a file stopped by a budget keeps size > offset
+    and the next run continues from the offset."""
+    write(f, lines_of(5))
+    lines, run = read(f, gateway=Ticking(step=1.0), budget=timedelta(seconds=2))
+    p = run.checkpoint()
+    assert run.stop is Stop.FILE_BUDGET
+    assert p.size > p.offset
+    rest, again = read(f, p)
+    assert again.reason is Reason.CONTINUE
+    assert len(lines) + len(rest) == 5
 
 
 def test_force_and_older_rules_reread_a_file_that_is_unchanged(f: Path) -> None:
@@ -661,7 +759,8 @@ def scratch() -> Iterator[Path]:
 
 def test_a_140_mb_file_reads_in_one_pass_within_the_stated_bound(scratch: Path) -> None:
     """Fact (design, Live verification): a 140 MB file parses in under a second with
-    line-by-line reading. Here only the reading is timed, with a generous bound (60 s) so a slow
+    line-by-line reading (measured: about 1 s here). Only the reading is timed, and the 60 s bound
+    is deliberately loose so a slow
     shared machine never makes it flaky; it also proves the work is linear (one pass)."""
     path = scratch / "big.jsonl"
     line = b'{"type":"assistant","n":%07d,"pad":"' + b"p" * 960 + b'"}\n'

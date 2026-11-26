@@ -67,7 +67,7 @@ Facts relied on, with the run that established them. Each becomes a regression t
 | Timestamps are not monotonic (about a fifth of lines step backwards), so min and max are used | Survey | Synthetic corpus |
 | About 30 days of transcripts are retained; resumed sessions append to the same file; compaction is a boundary line | Survey | Synthetic corpus |
 | Cost appears only in dedicated cost lines and can disagree with tokens | Survey (one of five sessions far off) | `cost_mismatch` flag test |
-| Corrupt lines, NUL bytes and unterminated final lines exist; a 140 MB file parses in under a second with line-by-line reading | Survey | Reader robustness tests |
+| Corrupt lines, NUL bytes and unterminated final lines exist; a 140 MB file parses in under a second with line-by-line reading (re-measured for the incremental reader: about 1 s; its test bound of 60 s is deliberately loose for slow CI) | Survey | Reader robustness tests |
 | Secret-shaped strings occur in tool output | Survey (counts only) | Redaction tests |
 | Transcripts record no labels or environment; a harness session is linkable only through the Claude Code session id that claude-session records | Survey | Join tests |
 | A transcript file name equals the `sessionId` of every top-level line; subagent lines carry the parent's `sessionId` and their own `agentId`; no message uuid repeats across files in the surveyed corpus (forks were not observable); `cache_creation` has 5-minute and 1-hour counters | Survey (spike A) | Discovery, identity and cache-write fixtures |

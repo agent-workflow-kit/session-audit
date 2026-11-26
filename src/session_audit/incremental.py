@@ -108,6 +108,27 @@ def decode_line(line: bytes) -> str:
     return line.decode("utf-8", errors="replace")
 
 
+def _signed(n: int) -> int:
+    """An unsigned 64-bit id as SQLite's signed INTEGER holds it (st_dev and st_ino can be
+    2**63 or more); stored and live values are both mapped, so they stay comparable."""
+    return n - 2**64 if n >= 2**63 else n
+
+
+def _is_int(x: object) -> bool:
+    return type(x) is int
+
+
+def _well_typed(p: Progress) -> bool:
+    """False for a stored row whose columns are not of the stored types (a tampered store)."""
+    ints = (p.dev, p.inode, p.size, p.offset, p.head_len, p.rules_version)
+    hashes = (p.head_sha, p.tail_sha)
+    return (
+        all(_is_int(n) for n in ints)
+        and all(h is None or type(h) is str for h in hashes)
+        and type(p.skip_to_lf) is bool
+    )
+
+
 def _sha(data: bytes | bytearray) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -158,9 +179,11 @@ class IncrementalRead:
             return Reason.NEW
         if force:
             return Reason.FORCED
+        if not _well_typed(prev):
+            return Reason.HEAD  # an inconsistent stored row is reread, never trusted
         if prev.rules_version < self._rules:
             return Reason.RULES
-        if (prev.dev, prev.inode) != (self._info.st_dev, self._info.st_ino):
+        if (prev.dev, prev.inode) != (_signed(self._info.st_dev), _signed(self._info.st_ino)):
             return Reason.IDENTITY
         offset = prev.offset
         if offset < 0 or self._info.st_size < offset:
@@ -189,8 +212,8 @@ class IncrementalRead:
         """The progress after everything consumed so far (the lines yielded, any record skipped
         and any pending skip). Call between two iterations."""
         return Progress(
-            dev=self._info.st_dev,
-            inode=self._info.st_ino,
+            dev=_signed(self._info.st_dev),
+            inode=_signed(self._info.st_ino),
             size=max(self._info.st_size, self._pos),
             offset=self._pos,
             head_len=len(self._head),
