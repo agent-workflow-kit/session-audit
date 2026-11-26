@@ -26,15 +26,16 @@ import re
 import stat as statmod
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, BinaryIO, Literal
+from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol
 
 from . import errors
 from .gateway import DirHandle, Gateway
 from .textsafe import fix_surrogates, sanitize
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from .command import Context
-    from .store import Store
 
 SCAN_CAP = 100_000  # directory entries listed per root per run
 META_CAP = 64 * 1024  # bytes read of agent-<id>.meta.json
@@ -619,7 +620,14 @@ def parse_meta(data: bytes) -> AgentMeta | None:
 # --- the store's side of the rules ---------------------------------------------------------------
 
 
-def store_excluded(store: Store) -> Callable[[str], bool]:
+class _HasConn(Protocol):
+    """A ``Store``, or any read-only view of one (a dry run never opens the store for writing)."""
+
+    @property
+    def conn(self) -> sqlite3.Connection: ...
+
+
+def store_excluded(store: _HasConn) -> Callable[[str], bool]:
     """Ingest rules 7: the ``excluded(project_dir_name)`` rule, reading ``retro_sessions`` on
     every call (never a set loaded earlier)."""
 
@@ -636,7 +644,7 @@ def store_excluded(store: Store) -> Callable[[str], bool]:
     return excluded
 
 
-def store_pruned_at(store: Store) -> Callable[[str], int | None]:
+def store_pruned_at(store: _HasConn) -> Callable[[str], int | None]:
     """The prune time (epoch milliseconds) of a pruned session, else None."""
 
     def pruned_at(session_id: str) -> int | None:
