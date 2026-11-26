@@ -565,7 +565,7 @@ def digest_text(raw, cap):
     t = fix_surrogates(raw)                 # lone surrogates -> U+FFFD
     t = t[:65536]                           # work bound only (not the content cap), in code points before any regex
     t = unicodedata.normalize("NFC", t)
-    t = redact(t)                           # bounded built-in patterns, literal masks, token prefixes
+    t = redact(t)                           # bounded built-in patterns, literal masks, token prefixes; sees up to 65,536 more code points so a match that starts inside the bound is redacted whole, and the result ends at the bound or after the marker of a match that straddles it
     t = cut(t, cap)                         # after NFC and redaction, at a code point, never inside a [REDACTED:<kind>] marker
     t = sanitize(t)                         # see Sanitizing
     t = re.sub(r"(?i)</untrusted", "&lt;/untrusted", t)
@@ -574,16 +574,17 @@ def digest_text(raw, cap):
 
 **Redaction**, on every text part:
 
-1. Secret-shaped strings: well-known token shapes, private-key blocks, URL userinfo (`scheme://user:secret@host`), `Cookie:` and `Set-Cookie:` values, `Authorization`-style headers, `--token X`, `--password X`, `-u user:pass`, JSON or YAML `"password": "x"` style keys, JWTs (three base64url parts starting `eyJ`), and assignments to names containing `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `KEY`, `CREDENTIAL`, `AUTH`.
-2. Literal values of the environment of the `retro run` process: every variable whose name matches the secret-name shapes above and every name in `redaction.mask_env`; a `mask_env` name whose value is shorter than 8 characters is ignored with a stderr warning (not stored), and so is any other value shorter than 8 characters. A scheduled retro sees cron's environment (plus the env-file), so masks are best effort there.
+1. Secret-shaped strings: well-known token shapes, private-key blocks, URL userinfo (`scheme://user:secret@host`), `Cookie:` and `Set-Cookie:` values, `Authorization`-style headers, `--token X`, `--password X`, `-u user:pass`, JSON or YAML `"password": "x"` style keys, JWTs (three base64url parts starting `eyJ`), and assignments to names containing `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `KEY`, `CREDENTIAL`, `AUTH`; also XML elements and attributes with such names, SQL `IDENTIFIED BY`, netrc and connection-string passwords, and the bare forms of `sshpass -p`, `-p=X`, `openssl -pass pass:X` and `curl -b name=value`. A value of any length is redacted to its end.
+2. Literal values of the environment of the `retro run` process: every variable whose name matches the secret-name shapes above and every name in `redaction.mask_env`; a `mask_env` name whose value is shorter than 8 characters is ignored with a stderr warning (not stored), and so is any other value shorter than 8 characters. A scheduled retro sees cron's environment (plus the env-file), so masks are best effort there. Each value is also masked in its JSON string-escaped form.
 3. Strings starting with a prefix in `redaction.extra_token_prefixes`: `<prefix>[A-Za-z0-9_-]{8,}` is redacted (the whole run of those characters after the prefix, so a token longer than 256 characters leaks no tail; the scan consumes the run and stays linear).
 
 The built-in patterns are package data (`redact_patterns.toml`); `docs/design.md` (Redaction patterns) lists them. Built-in patterns are bounded (no unbounded repetition across a line); they are tested against adversarial inputs (linear time at 64 KiB). Private keys and the kinds are (copy):
 
 ```text
 private key: a header matching -----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY( BLOCK)?----- is redacted through the matching
-    -----END ... line, found with str.find, or to the end of the text part when there is none (a part is at most 65,536
-    code points, so the work stays linear)
+    -----END ... line, found with str.find, or to the end of the text window when there is none (at most 131,072 code
+    points, so the work stays linear); an END line without a BEGIN redacts the key body before it, back to the
+    previous blank line or at most 4,096 characters
 kinds in [REDACTED:<kind>]: token, private_key, url_userinfo, cookie, auth_header, cli_secret, json_secret, jwt,
     assignment, env_value, prefix, encoded
 ```
@@ -1099,7 +1100,7 @@ Loading rules. `--config PATH` names the one file and reads no drop-ins; the fil
 | `digest.arg_chars` | 200 | Cut of a tool argument summary |
 | `digest.error_chars` | 300 | Cut of an error, denial, interruption or rejection item |
 | `redaction.mask_env` | `[]` | Variable names whose set values are masked |
-| `redaction.extra_token_prefixes` | `[]` | Strings such as an organization's token prefix; `<prefix>[A-Za-z0-9_-]{8,256}` is redacted |
+| `redaction.extra_token_prefixes` | `[]` | Strings such as an organization's token prefix; `<prefix>` followed by 8 or more of `[A-Za-z0-9_-]` is redacted (the whole run) |
 | `schedule.retro` | absent (off) | Optional weekly retro from cron: `{weekday, hour, scope}` |
 | `hooks` | none | Hook lists (see Hooks) |
 | `me.name` | OS user name, characters outside `[A-Za-z0-9._@/-]` replaced by `_`, every run of dots by one `_`, leading characters that are not a letter or digit dropped, cut to 64 | Actor name; starts with a letter or digit and holds no `..` |

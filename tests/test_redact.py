@@ -10,6 +10,7 @@ import base64
 import copy
 import importlib
 import pickle
+import re
 import time
 import unicodedata
 
@@ -209,8 +210,9 @@ def test_json_lookalikes_stay() -> None:
 def test_assignments() -> None:
     assert red("export GITHUB_TOKEN=abcdef123") == "export GITHUB_TOKEN=[REDACTED:assignment]"
     assert red("PGPASSWORD=hunter22 psql") == "PGPASSWORD=[REDACTED:assignment] psql"
+    # the value runs to whitespace or a quote: a "," ";" "&" or ")" inside it leaks no tail
     assert red("curl 'https://h/x?access_token=abcdef12&y=1'") == (
-        "curl 'https://h/x?access_token=[REDACTED:assignment]&y=1'"
+        "curl 'https://h/x?access_token=[REDACTED:assignment]'"
     )
     assert red('aws_secret_access_key = "wJalr"') == "aws_secret_access_key = [REDACTED:assignment]"
     assert red("API_KEY='abc'") == "API_KEY=[REDACTED:assignment]"
@@ -285,31 +287,198 @@ def test_every_kind_is_documented() -> None:
 # ---- pattern data: structure and packaging -------------------------------------------------------
 
 
-def _walk(parsed, parent_repeat: bool, problems: list[str]) -> None:
-    parser = importlib.import_module("re._parser")
-    for op, arg in parsed:
-        if op in (parser.MAX_REPEAT, parser.MIN_REPEAT, parser.POSSESSIVE_REPEAT):
+MAX_REPEAT_HI = 16384  # the longest repetition any pattern may have (the value length bound)
+_UNIVERSE = frozenset(range(0x250)) | {0x2028, 0x3000, 0x4E00}
+
+
+def _parser_module():
+    try:
+        return importlib.import_module("re._parser")
+    except ImportError:  # pragma: no cover
+        pytest.fail("re._parser is unavailable: update the walker for this Python")
+
+
+def _category_set(parser, cat) -> frozenset[int]:
+    tests = {
+        parser.CATEGORY_DIGIT: lambda c: chr(c).isdigit(),
+        parser.CATEGORY_SPACE: lambda c: chr(c).isspace(),
+        parser.CATEGORY_WORD: lambda c: chr(c).isalnum() or c == 0x5F,
+    }
+    for base, neg in (
+        (parser.CATEGORY_DIGIT, parser.CATEGORY_NOT_DIGIT),
+        (parser.CATEGORY_SPACE, parser.CATEGORY_NOT_SPACE),
+        (parser.CATEGORY_WORD, parser.CATEGORY_NOT_WORD),
+    ):
+        if cat == base:
+            return frozenset(c for c in _UNIVERSE if tests[base](c))
+        if cat == neg:
+            return frozenset(c for c in _UNIVERSE if not tests[base](c))
+    pytest.fail(f"unknown category {cat}: update the walker for this Python")
+
+
+def _fold_case(chars: set[int], flags: int) -> frozenset[int]:
+    if flags & re.IGNORECASE:
+        for c in list(chars):
+            if c < 128:
+                chars.add(ord(chr(c).swapcase()))
+    return frozenset(chars)
+
+
+def _first(parser, seq, flags: int) -> tuple[frozenset[int], bool]:
+    """The characters a match of ``seq`` can start with, and whether it can be empty (a
+    conservative reading: assertions are empty, a back reference can start with anything)."""
+    first: set[int] = set()
+    for op, arg in seq:
+        chars, nullable = _first_node(parser, op, arg, flags)
+        first |= chars
+        if not nullable:
+            return frozenset(first), False
+    return frozenset(first), True
+
+
+def _first_node(parser, op, arg, flags: int) -> tuple[frozenset[int], bool]:
+    if op == parser.LITERAL:
+        return _fold_case({arg}, flags), False
+    if op == parser.NOT_LITERAL:
+        return _UNIVERSE - _fold_case({arg}, flags), False
+    if op == parser.ANY:
+        return _UNIVERSE - {10}, False
+    if op == parser.IN:
+        members: set[int] = set()
+        negate = False
+        for item_op, item in arg:
+            if item_op == parser.NEGATE:
+                negate = True
+            elif item_op == parser.LITERAL:
+                members.add(item)
+            elif item_op == parser.RANGE:
+                members |= {c for c in _UNIVERSE if item[0] <= c <= item[1]}
+            elif item_op == parser.CATEGORY:
+                members |= _category_set(parser, item)
+            else:
+                pytest.fail(f"unknown set item {item_op}: update the walker for this Python")
+        folded = _fold_case(members, flags)
+        return (_UNIVERSE - folded if negate else folded), False
+    if op in (parser.AT, parser.ASSERT, parser.ASSERT_NOT):
+        return frozenset(), True
+    if op == parser.SUBPATTERN:
+        return _first(parser, arg[3], flags)
+    if op == parser.ATOMIC_GROUP:
+        return _first(parser, arg, flags)
+    if op == parser.BRANCH:
+        parts = [_first(parser, alt, flags) for alt in arg[1]]
+        return frozenset().union(*(p[0] for p in parts)), any(p[1] for p in parts)
+    if op in _repeat_ops(parser):
+        lo, _hi, sub = arg
+        chars, nullable = _first(parser, sub, flags)
+        return chars, nullable or lo == 0
+    if op == parser.GROUPREF:
+        return _UNIVERSE, True
+    if op == parser.GROUPREF_EXISTS:
+        yes, no = arg[1], arg[2]
+        parts = [_first(parser, yes, flags)] + ([_first(parser, no, flags)] if no else [])
+        return frozenset().union(*(p[0] for p in parts)), True
+    pytest.fail(f"unknown opcode {op}: update the walker for this Python")
+
+
+def _repeat_ops(parser) -> tuple:
+    return (parser.MAX_REPEAT, parser.MIN_REPEAT, parser.POSSESSIVE_REPEAT)
+
+
+def _walk(parser, seq, flags: int, in_repeat: bool, problems: list[str]) -> None:
+    prev_repeat: tuple[frozenset[int], int] | None = None
+    for op, arg in seq:
+        is_repeat = op in _repeat_ops(parser)
+        if is_repeat:
             lo, hi, sub = arg
             if hi == parser.MAXREPEAT:
                 problems.append("unbounded repetition")
-            if parent_repeat:
+            elif hi > MAX_REPEAT_HI:
+                problems.append(f"repetition bound {hi} over {MAX_REPEAT_HI}")
+            if in_repeat:
                 problems.append("nested repetition")
-            _walk(sub, hi > 1, problems)
-        elif op == parser.SUBPATTERN:
-            _walk(arg[3], parent_repeat, problems)
+            chars = _first(parser, sub, flags)[0]
+            if prev_repeat is not None and prev_repeat[0] & chars and hi > 1 and prev_repeat[1] > 1:
+                problems.append("adjacent repetitions share a starting character")
+            prev_repeat = (chars, hi)
+            _walk(parser, sub, flags, in_repeat or hi > 1, problems)
+            continue
+        prev_repeat = None
+        if op == parser.SUBPATTERN:
+            _walk(parser, arg[3], flags, in_repeat, problems)
         elif op == parser.BRANCH:
+            if in_repeat:
+                firsts = [_first(parser, alt, flags) for alt in arg[1]]
+                for i, (chars, nullable) in enumerate(firsts):
+                    if nullable:
+                        problems.append("empty alternative inside a repetition")
+                    for other, _ in firsts[:i]:
+                        if chars & other:
+                            problems.append("overlapping alternatives inside a repetition")
             for alt in arg[1]:
-                _walk(alt, parent_repeat, problems)
+                _walk(parser, alt, flags, in_repeat, problems)
         elif op in (parser.ASSERT, parser.ASSERT_NOT):
-            _walk(arg[1], parent_repeat, problems)
+            _walk(parser, arg[1], flags, in_repeat, problems)
+        elif op == parser.ATOMIC_GROUP:
+            _walk(parser, arg, flags, in_repeat, problems)
+        elif op == parser.GROUPREF_EXISTS:
+            _walk(parser, arg[1], flags, in_repeat, problems)
+            if arg[2]:
+                _walk(parser, arg[2], flags, in_repeat, problems)
+        elif op in (
+            parser.LITERAL,
+            parser.NOT_LITERAL,
+            parser.IN,
+            parser.ANY,
+            parser.AT,
+            parser.GROUPREF,
+        ):
+            pass
+        else:
+            problems.append(f"unknown opcode {op}: update the walker for this Python")
+
+
+def _check(regex: str, flags: int = 0) -> list[str]:
+    parser = _parser_module()
+    problems: list[str] = []
+    parsed = parser.parse(regex, flags)
+    _walk(parser, parsed, parsed.state.flags | flags, False, problems)
+    return problems
 
 
 @pytest.mark.parametrize("pat", redact.builtin_patterns(), ids=lambda p: p.name)
 def test_pattern_is_bounded_and_not_nested(pat) -> None:
-    parser = importlib.import_module("re._parser")
+    assert _check(pat.regex.pattern, pat.regex.flags) == []
+
+
+@pytest.mark.parametrize(
+    ("regex", "problem"),
+    [
+        ("(?:a|a){1,40}b", "alternative inside a repetition"),
+        ("(?:a|aa){1,40}b", "alternative inside a repetition"),
+        ("a{0,2000}a{0,2000}b", "adjacent repetitions"),
+        ("(?:a{1,3}){1,3}b", "nested repetition"),
+        ("a+b", "unbounded"),
+        ("a{0,20000}b", "over 16384"),
+        ("(?:a|b?){1,5}c", "empty alternative"),
+        ("(?:a|b){1,5}(?:x(?=a{1,3}b))", ""),
+    ],
+)
+def test_the_walker_rejects_what_it_should(regex: str, problem: str) -> None:
+    found = _check(regex)
+    if problem:
+        assert any(problem in p for p in found), found
+    else:
+        assert found == []  # disjoint alternatives and an assertion: fine
+
+
+def test_the_walker_fails_loudly_on_an_unknown_opcode(monkeypatch) -> None:
+    parser = _parser_module()
+    parsed = parser.parse("(a)(?(1)b|c)")
+    monkeypatch.setattr(parser, "GROUPREF_EXISTS", object())  # as if this Python renamed it
     problems: list[str] = []
-    _walk(parser.parse(pat.regex.pattern, pat.regex.flags), False, problems)
-    assert problems == []
+    _walk(parser, parsed, 0, False, problems)
+    assert any("unknown opcode" in p and "update the walker" in p for p in problems)
 
 
 def test_patterns_ship_as_package_data() -> None:
@@ -376,6 +545,39 @@ def adversarial_families() -> dict[str, str]:
         "slack hook": "hooks.slack.com/services/" * 2500,
         "spaces": " " * 65536,
         "begin partial": "-----BEGIN PRIVATE KEY-----\n" + "A" * 65000,
+        "dots": "a." * 32768,
+        "dashes": "-" * 65536,
+        "equals": "=" * 65536,
+        "newlines": "\n" * 65536,
+        "key dots": "KEY." * 16384,
+        "key dashes equals": "key-" * 8000 + "=" * 8000,
+        "name then space": ("password" + " " * 20) * 2300,
+        "password colon": "password:" * 7000,
+        "password words": "password hunter2xyz " * 3000,
+        "flow keys": "{password: " * 5000,
+        "flow commas": ",password" * 7000,
+        "quoted keys": "'password': " * 5000,
+        "xml open": "<password>" * 6500,
+        "xml attrs": '<add key="password" ' * 3200,
+        "xml nested": "<a><token>" * 6000,
+        "sshpass": "sshpass -p " * 6000,
+        "openssl": "-passin pass:" * 5000,
+        "curl cookie": "-b a=" * 13000,
+        "sql": "IDENTIFIED BY " * 4600 + "PASSWORD " * 100,
+        "netrc": "login a password " * 3800,
+        "connection string": ";Password=" * 6500,
+        "typed spaced": "password: string " * 3800,
+        "bare assignment lines": ("password = " + "a" * 30 + "\n") * 1500,
+        "header newline": "Authorization:\n  " * 3600,
+        "orphan end": "-----END PRIVATE KEY-----" * 2600,
+        "orphan end text": ("a" * 100 + "-----END PRIVATE KEY-----") * 500,
+        "userinfo at": "://a:" + "@" * 65000,
+        "user at run": "://a:" + "b@" * 30000,
+        "two part jwt": "eyJaaaa.eyJbbbb" * 4300,
+        "combining": "ghp_" + "A" * 36 + "\u0301" * 30000,
+        "dash flags": "--password -" * 5400,
+        "cli attached": "-ua:" * 16000,
+        "partial prefixes": "ghp_gho_ghu_AKIAxox-sk-ant-github_pat_" * 1700,
     }
 
 
@@ -398,6 +600,23 @@ def test_redaction_is_linear_on_adversarial_input(family: str) -> None:
     # linear is 4x; quadratic would be 16x or more. Generous: 12x, and an absolute ceiling.
     assert t_big < max(12 * t_small, 0.05), (family, t_small, t_big)
     assert t_big < 3.0, (family, t_big)
+
+
+@pytest.mark.parametrize("pat", redact.builtin_patterns(), ids=lambda p: p.name)
+def test_each_pattern_alone_finishes_fast_on_every_adversary(pat) -> None:
+    # An absolute ceiling per regex (the ratio test above sees only the whole redaction): a
+    # shared, loaded host gets 2 s for 64 KiB, three orders of magnitude over what a linear scan
+    # needs and far under what a quadratic one would take.
+    worst = 0.0
+    for family, text in adversarial_families().items():
+        big = (text * 2)[: 64 * KB]
+        t0 = time.perf_counter()
+        for _ in pat.regex.finditer(big):
+            pass
+        took = time.perf_counter() - t0
+        worst = max(worst, took)
+        assert took < 2.0, (pat.name, family, took)
+    assert worst < 2.0
 
 
 def test_masks_are_linear() -> None:
@@ -728,7 +947,8 @@ def test_digest_text_order_and_result() -> None:
 def test_digest_text_work_bound_is_in_code_points_before_nfc() -> None:
     out = digest_text("a" * 70000, 100000)
     assert out == "a" * 65536
-    assert len(digest_text("̈́" * 70000, 10**7)) <= 4 * 65536 * 10
+    # 65,536 U+0344 become 131,072 marks under NFC; the sanitizer writes each as <U+XXXX> (8)
+    assert len(digest_text("̈́" * 70000, 10**7)) == 2 * 65536 * len("<U+0308>")
 
 
 def test_u0344_stays_within_the_cap_after_nfc() -> None:
@@ -738,7 +958,7 @@ def test_u0344_stays_within_the_cap_after_nfc() -> None:
     assert len(redact.cut(expanded, 1500)) == 1500
     # the sanitizer keeps at most three marks after a base, so the result is small and valid
     assert "̈́" not in out
-    assert len(out) <= 1500 * 10
+    assert len(out) == 1500 * len("<U+0308>")  # 1,500 marks of the 3,000, each shown as a marker
 
 
 def test_secret_split_by_the_cut_cannot_leak() -> None:
@@ -807,3 +1027,465 @@ def test_shapes_seen_in_tool_output() -> None:
         assert gh not in out, case
         assert "w" * 40 not in out
         assert "REDACTED" in out
+
+
+# ---- round 1 review: leaks closed, one test per resolution item ----------------------------------
+
+
+def test_encoded_checks_share_the_mask_rules_of_the_redactor() -> None:
+    # item 5: NFC, the length filter after NFC, the size cap and the count cap
+    decomposed = "café-secret-1"
+    blob = base64.b64encode(unicodedata.normalize("NFC", decomposed).encode()).decode()
+    assert find_encoded([decomposed], blob)
+    assert redact_encoded([decomposed], f"a {blob} b") == ("a [REDACTED:encoded] b", 1)
+    short_after_nfc = "é" * 3 + "xy"  # 10 code points before NFC, 5 after
+    assert len(short_after_nfc) >= 8 and len(unicodedata.normalize("NFC", short_after_nfc)) < 8
+    enc = base64.b64encode(unicodedata.normalize("NFC", short_after_nfc).encode()).decode()
+    assert not find_encoded([short_after_nfc], enc)
+    many = [f"value-number-{i:05d}" for i in range(redact.MAX_MASKS + 72)]
+    first = base64.b64encode(many[0].encode()).decode()
+    beyond = base64.b64encode(many[-1].encode()).decode()
+    assert find_encoded(many, first)
+    assert not find_encoded(many, beyond)  # the 129th and later values are not checked
+    assert not redact_encoded(many, beyond)[1]
+    huge = "x" * (redact.WORK_BOUND + 1)
+    assert not find_encoded([huge], base64.b64encode(huge[:600].encode()).decode())
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password = hunter2xyz", "password = [REDACTED:assignment]"),
+        ("aws_secret_access_key = " + "w" * 40, "aws_secret_access_key = [REDACTED:assignment]"),
+        ("password := hunter2xyz", "password := [REDACTED:assignment]"),
+        ("const password: string = 'x'", "const password: string = [REDACTED:assignment]"),
+        ("  export API_TOKEN = abcdef123", "  export API_TOKEN = [REDACTED:assignment]"),
+        ('let secret: String = "x"', "let secret: String = [REDACTED:assignment]"),
+    ],
+)
+def test_spaced_assignments(text: str, expected: str) -> None:
+    assert red(text) == expected
+
+
+def test_spaced_assignment_lookalikes_stay() -> None:
+    for text in (
+        "token = get_token()",
+        "password = getpass.getpass()",
+        "password = os.environ.get_password_value()",
+        "token == other_value_here",
+        "password = $PASSWORD_FROM_VAULT",
+        "key = [1, 2, 3, 4, 5, 6]",
+        "token = <your-token-here>",
+        "KEY = abc",
+        "the password = something_long mid-line",
+        "passwords = 3",
+    ):
+        assert red(text) == text, text
+
+
+@pytest.mark.parametrize("n", [20000, 16384, 16385])
+def test_values_over_the_length_bound_are_redacted_to_their_end(n: int) -> None:
+    # item 7: a value longer than the bound leaves no tail
+    big = "a" * n
+    cases = {
+        "PASSWORD=" + big: "assignment",
+        'PASSWORD="' + big + '"': "assignment",
+        '--password "' + big + '"': "cli_secret",
+        "--password=" + big: "cli_secret",
+        "password: " + big: "json_secret",
+        'password: "' + big + '"': "json_secret",
+        '{"password": "' + big + '"}': "json_secret",
+        "{'secret': '" + big + "'}": "json_secret",
+        "Authorization: Bearer " + big: "auth_header",
+        "<token>" + big + "</token>": "json_secret",
+    }
+    for text, kind in cases.items():
+        out, counts = R.redact_counted(text)
+        assert "a" * 10 not in out, text[:30]
+        assert counts[kind] >= 1
+
+
+def test_long_json_values_with_escapes_are_redacted_to_their_end() -> None:
+    big = "ab\\n" * 7000
+    out = red('{"password": "' + big + '", "next": 1}')
+    assert "ab" not in out
+    assert out.endswith('", "next": 1}')
+
+
+def test_orphan_end_line_redacts_the_body_before_it() -> None:
+    # item 8
+    body = "\n".join("QUJD" * 16 for _ in range(5))
+    end = "-----END RSA PRIVATE KEY-----"
+    assert red(f"log line\n\n{body}\n{end}\nafter") == "log line\n\n[REDACTED:private_key]\nafter"
+    assert red(f"log line\r\n\r\n{body}\n{end}") == "log line\r\n\r\n[REDACTED:private_key]"
+    assert red("A" * 10000 + "\n" + end) == "A" * 5905 + "[REDACTED:private_key]"
+    assert red(end) == "[REDACTED:private_key]"
+    one = "-----BEGIN PRIVATE KEY-----\nA\n-----END PRIVATE KEY-----"
+    assert red(f"{one}\nbody\n-----END PRIVATE KEY-----") == "[REDACTED:private_key]"
+    # a block with its BEGIN is not an orphan (its END is not looked at again)
+    assert red(f"x\n\n{one}\ny") == "x\n\n[REDACTED:private_key]\ny"
+    # a public key END is not a private key
+    assert red("-----END PUBLIC KEY-----") == "-----END PUBLIC KEY-----"
+    assert red("-----END " + "A" * 41 + " PRIVATE KEY-----") == (
+        "-----END " + "A" * 41 + " PRIVATE KEY-----"
+    )
+
+
+def test_secret_straddling_the_work_bound_is_redacted_whole() -> None:
+    # item 9
+    bound = redact.WORK_BOUND
+    token = TOKEN_CASES["github"]
+    for inside in (1, 4, 10, len(token) - 1):
+        pad = "x" * (bound - inside)
+        out = digest_text(pad + token + " tail", 10**7)
+        assert out == pad + "[REDACTED:token]", inside
+    assert digest_text("x" * bound + token, 10**7) == "x" * bound  # starts at the bound: not kept
+    mask = "mask-" + "z" * 30
+    rd = Redactor([mask])
+    pad = "y" * (bound - 12)
+    assert digest_text(pad + mask + "!", 10**7, rd) == pad + "[REDACTED:env_value]"
+    block = "-----BEGIN PRIVATE KEY-----\n" + "QUJD" * 30
+    pad = "p" * (bound - 20)
+    assert digest_text(pad + block, 10**7) == pad + "[REDACTED:private_key]"
+    # the work is bounded by twice the bound, whatever follows
+    t0 = time.perf_counter()
+    digest_text("TOKEN=" + "a" * 10**6, 1500)
+    assert time.perf_counter() - t0 < 5.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("sshpass -p hunter2xyz ssh host", "sshpass -p [REDACTED:cli_secret] ssh host"),
+        ("sshpass -p 'hunter 2' ssh h", "sshpass -p [REDACTED:cli_secret] ssh h"),
+        ("docker login -u bob -p=hunter2xyz", "docker login -u bob -p=[REDACTED:cli_secret]"),
+        ("tool -p=hunter2xyz run", "tool -p=[REDACTED:cli_secret] run"),
+        (
+            "openssl enc -pass pass:hunter2xyz -in f",
+            "openssl enc -pass pass:[REDACTED:cli_secret] -in f",
+        ),
+        ("openssl x -passin pass:abc12345", "openssl x -passin pass:[REDACTED:cli_secret]"),
+        ("openssl x -passout 'pass:abc12345'", "openssl x -passout 'pass:[REDACTED:cli_secret]'"),
+        ("curl -ualice:hunter2xyz https://x", "curl -u[REDACTED:cli_secret] https://x"),
+        ("curl -b 'sid=abc123; t=1' x", "curl -b '[REDACTED:cookie]' x"),
+        ("curl --cookie sid=abc123 x", "curl --cookie [REDACTED:cookie] x"),
+        (
+            "CREATE USER b IDENTIFIED BY 'hunter2xyz';",
+            "CREATE USER b IDENTIFIED BY [REDACTED:assignment];",
+        ),
+        ("alter user b password 'hunter2xyz'", "alter user b password [REDACTED:assignment]"),
+        (
+            "machine h login bob password hunter2xyz",
+            "machine h login bob password [REDACTED:assignment]",
+        ),
+        ("machine h\n  password hunter2xyz\n", "machine h\n  password [REDACTED:assignment]\n"),
+        (
+            "Server=db;User Id=sa;Pwd=hunter2 xyz;Encrypt=true",
+            "Server=db;User Id=sa;Pwd=[REDACTED:assignment];Encrypt=true",
+        ),
+        (
+            '"Server=db;Password=hunter2xyz"',
+            '"Server=db;Password=[REDACTED:assignment]"',
+        ),
+    ],
+)
+def test_bare_value_families(text: str, expected: str) -> None:
+    assert red(text) == expected
+
+
+def test_bare_value_families_leave_benign_text_alone() -> None:
+    # item 10: a bare -p stays (a port or a prefix), as do the forms without a value
+    for text in (
+        "ssh -p 22 host",
+        "ls -p 8080",
+        "mysql -pLongPass1 db",
+        "sshpass -p",
+        "sshpass -f /run/secret ssh h",
+        "openssl x -pass file:keyfile",
+        "openssl x -passin env:SECRETVAR",
+        "curl -b cookies.txt x",
+        "ssh-keygen -b 4096",
+        "tool -p=22",
+        "GRANT x IDENTIFIED BY",
+        "enter your password again please",
+        "password required for login",
+        "machine h login bob password",
+        "Server=db;Pwd=;Encrypt=true",
+        "see the password 'policy' page",
+    ):
+        if text == "see the password 'policy' page":
+            assert "REDACTED" in red(text)  # PASSWORD followed by a quoted literal is SQL syntax
+        else:
+            assert red(text) == text, text
+
+
+def test_xml_secrets() -> None:
+    # item 11
+    assert red("<password>hunter2xyz</password>") == "<password>[REDACTED:json_secret]</password>"
+    assert red("<apiKey>abc12345</apiKey>") == "<apiKey>[REDACTED:json_secret]</apiKey>"
+    assert red("<Token>x</Token>") == "<Token>[REDACTED:json_secret]</Token>"
+    assert red('<db-secret type="s">v al</db-secret>') == (
+        '<db-secret type="s">[REDACTED:json_secret]</db-secret>'
+    )
+    # (key="password" is itself an assignment to a secret-named key: it is redacted too)
+    assert red('<add key="password" value="hunter2xyz"/>').endswith(
+        'value="[REDACTED:json_secret]"/>'
+    )
+    assert red('<add key="DbPassword" value="x" />').endswith('value="[REDACTED:json_secret]" />')
+    assert red('<add name="DbPassword" value="x" />') == (
+        '<add name="DbPassword" value="[REDACTED:json_secret]" />'
+    )
+    assert red('<setting name="api_key"  value="k"/>') == (
+        '<setting name="api_key"  value="[REDACTED:json_secret]"/>'
+    )
+    for text in (
+        "<keyboard>abc</keyboard>",
+        '<add name="timeout" value="30"/>',
+        "<token-count>12</token-count>",
+        "<author>jane</author>",
+        "<key>value</key>",
+        "<password></password>",
+        "<password> </password>",
+        '<add name="monkey" value="x"/>',
+    ):
+        assert red(text) == text, text
+
+
+def test_json_and_yaml_key_forms() -> None:
+    # item 12
+    assert red('{"pass": "hunter2xyz"}') == '{"pass": "[REDACTED:json_secret]"}'
+    assert red('{"pwd":"x"}') == '{"pwd":"[REDACTED:json_secret]"}'
+    assert red('{"password": 12345678}') == '{"password": [REDACTED:json_secret]}'
+    assert red('{"a": 1, "password":12345678, "b": 2}') == (
+        '{"a": 1, "password":[REDACTED:json_secret], "b": 2}'
+    )
+    assert "hunter2xyz" not in red("db: {password: hunter2xyz}")
+    assert "hunter2xyz" not in red("db: {user: u, password: hunter2xyz}")
+    assert red("'password': hunter2xyz") == "'password': [REDACTED:json_secret]"
+    assert red("password:hunter2xyz") == "password:[REDACTED:json_secret]"
+    assert red("password : hunter2xyz") == "password : [REDACTED:json_secret]"
+    assert red("password: abc, def # note") == "password: [REDACTED:json_secret]"
+    assert red("  pwd: hunter2xyz") == "  pwd: [REDACTED:json_secret]"
+    assert red('{"my-api-key": "x"}') == '{"my-api-key": "[REDACTED:json_secret]"}'
+    assert red('{"spring.datasource.password": "x"}') == (
+        '{"spring.datasource.password": "[REDACTED:json_secret]"}'
+    )
+    assert (
+        red('{"p": 1,\n"passphrase" : "x"}') == '{"p": 1,\n"passphrase" : "[REDACTED:json_secret]"}'
+    )
+
+
+def test_json_and_yaml_lookalikes_stay() -> None:
+    for text in (
+        "monkeys: 3",
+        '{"max_tokens": 1000000}',
+        "tokenizer: gpt2-fast-tokenizer",
+        "bypass: enabled-for-all",
+        '{"bypass": "yes"}',
+        '{"tokens": ["a", "b"]}',
+        '{"key": "value", "keys": 123456789}',
+        "compass: northwest-bound",
+        "tokens: 12345678",
+        '{"password": 12}',
+        '{"password": true}',
+        "the pass: is open",
+    ):
+        assert red(text) == text, text
+
+
+def test_unquoted_assignment_values_run_to_whitespace_or_a_quote() -> None:
+    # item 13
+    assert red("PASSWORD=ab,cdefgh;ij&kl)mn tail") == "PASSWORD=[REDACTED:assignment] tail"
+    assert red("API_KEY=abc\\def123456") == "API_KEY=[REDACTED:assignment]"
+    assert red("TOKEN=abcdef,ghi jkl") == "TOKEN=[REDACTED:assignment] jkl"
+    for text in (
+        "TOKEN=$X_VAR_LONG",
+        "TOKEN=(abcdef)",
+        "TOKEN={abcdef}",
+        "TOKEN=<abcdef>",
+        "TOKEN=[abcdef]",
+        "TOKEN=`cat f`",
+    ):
+        assert red(text) == text, text
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "my-secret-token",
+        "api-key",
+        "spring.datasource.password",
+        "client-secret",
+        "a" * 100 + "_token",
+    ],
+)
+def test_assignment_names_may_hold_dashes_dots_and_be_long(name: str) -> None:
+    # item 14
+    # (api-key= is also a header name, so the kind of the merged span can be auth_header)
+    for text in (f"{name}=hunter2xyz", f"x {name}='hunter2xyz'"):
+        out = red(text)
+        assert "hunter2xyz" not in out and out.startswith(text[: text.index("=") + 1])
+        assert re.search(r"=\[REDACTED:(assignment|auth_header)\]$", out), out
+
+
+def test_cli_values_starting_with_a_dash() -> None:
+    # item 15
+    assert red("tool --password -S3cretPass1") == "tool --password [REDACTED:cli_secret]"
+    assert red("tool --password=-S3cretPass1") == "tool --password=[REDACTED:cli_secret]"
+    assert red("tool --token --next-flag") == "tool --token --next-flag"
+
+
+def test_header_forms() -> None:
+    # item 16
+    assert red("x-api-key=abcdef12") == "x-api-key=[REDACTED:auth_header]"
+    assert red("Authorization:\r\n  Bearer abc.def\r\nnext") == (
+        "Authorization:\r\n  [REDACTED:auth_header]\r\nnext"
+    )
+    assert red("Cookie:\n  sid=abc; t=1\nnext") == "Cookie:\n  [REDACTED:cookie]\nnext"
+    assert red("https://bob:hun@ter2xyz@host/p") == "https://[REDACTED:url_userinfo]@host/p"
+    assert red("https://bob:p@w@x@host:8080?q=1") == "https://[REDACTED:url_userinfo]@host:8080?q=1"
+    assert red("Authorization:\nnot indented") == "Authorization:\nnot indented"
+    assert red("Cookie:\nfoo") == "Cookie:\nfoo"
+    assert red("ssh://git@github.com:22/o/r.git") == "ssh://git@github.com:22/o/r.git"
+
+
+def test_two_part_jwt_without_signature() -> None:
+    # item 17
+    assert red("eyJ" + "a" * 20 + "." + "eyJ" + "b" * 20) == "[REDACTED:jwt]"
+    assert red("x eyJ" + "a" * 20 + "." + "eyJ" + "b" * 20 + ". y") == "x [REDACTED:jwt] y"
+    assert red("eyJ" + "a" * 20 + "." + "b" * 20) == "eyJ" + "a" * 20 + "." + "b" * 20
+
+
+def test_combining_marks_do_not_defeat_a_match() -> None:
+    # item 18: NFC composes the last character of a token with the mark after it
+    for value in (
+        "ghp_" + "A" * 35 + "Á",
+        "npm_" + "n" * 35 + "ń",
+        "ghp_" + "1" * 36 + "́́",
+        "AKIA" + "EXAMPLE" + "0" * 8 + "Ë",
+    ):
+        text = unicodedata.normalize("NFC", f"x {value} y")
+        assert red(text) == "x [REDACTED:token] y", value
+    rd = Redactor(["abcdefgh", "pässwörd-12345"])
+    assert rd.redact(unicodedata.normalize("NFC", "abcdefg" + "ḣ")) == "[REDACTED:env_value]"
+    assert rd.redact("pässwörd-12345́") == "[REDACTED:env_value]"
+    rd2 = Redactor(extra_token_prefixes=["acme_"])
+    assert rd2.redact(unicodedata.normalize("NFC", "acme_" + "a" * 7 + "é")) == (
+        "[REDACTED:prefix]"
+    )
+    benign = "café ñandú résumé naïve São Paulo"
+    assert red(benign) == benign
+
+
+GLUED_OK = [
+    "aws",
+    "aws_session",
+    "github",
+    "github_oauth",
+    "github_pat",
+    "gitlab",
+    "slack",
+    "slack_app",
+    "anthropic",
+    "google_oauth",
+    "stripe",
+    "stripe_whsec",
+    "npm",
+    "pypi",
+]
+
+
+@pytest.mark.parametrize("name", GLUED_OK)
+def test_distinctive_prefixes_match_inside_a_word(name: str) -> None:
+    # item 19
+    assert red("qq" + TOKEN_CASES[name]) == "qq[REDACTED:token]"
+
+
+def test_short_or_ambiguous_prefixes_keep_their_word_boundary() -> None:
+    for name in ("openai", "google", "hf", "sendgrid", "telegram"):
+        assert red("qq" + TOKEN_CASES[name]) == "qq" + TOKEN_CASES[name], name
+    assert red("task-" + "h" * 40) == "task-" + "h" * 40
+
+
+def test_json_escaped_mask_forms() -> None:
+    # item 20
+    import json
+
+    value = 'pa"ss\\nwörd-1234'
+    rd = Redactor([value])
+    assert rd.mask_count == 1
+    for ascii_only in (True, False):
+        doc = json.dumps({"v": value}, ensure_ascii=ascii_only)
+        assert value not in doc
+        assert rd.redact(doc) == '{"v": "[REDACTED:env_value]"}'
+    values = [f'val"ue-{i:05d}-xx' for i in range(redact.MAX_MASKS + 2)]
+    many = Redactor(values)
+    assert many.mask_count == redact.MAX_MASKS  # the extra forms are not counted
+    assert many.redact('"val\\"ue-00005-xx"') == '"[REDACTED:env_value]"'
+    assert many.redact('"val\\"ue-00129-xx"') == '"val\\"ue-00129-xx"'  # past the 128
+
+
+def test_whole_masks_win_over_line_masks_under_the_cap() -> None:
+    # item 22
+    def lines(i: int) -> str:
+        return "\n".join(f"line-{i:03d}-{j:02d}-padding" for j in range(32))
+
+    env = {f"S{i}_SECRET": lines(i) for i in range(20)}
+    warnings: list[str] = []
+    masks = build_masks(env, [], warnings.append)
+    assert len(masks) <= redact.MAX_MASKS
+    for i in range(20):
+        assert lines(i) in masks  # every whole value is kept
+        assert sum(m.startswith(f"line-{i:03d}-") and m != lines(i) for m in masks) == 4
+    assert any("560 mask value(s)" in w for w in warnings)  # counted, never shown
+    assert not any("line-" in w for w in warnings)
+    # under the cap every line is kept
+    small = build_masks({"A_SECRET": lines(0), "B_SECRET": lines(1)}, [], warnings.append)
+    assert len(small) == 2 + 64
+
+
+def test_mime_wrapped_base64_is_found() -> None:
+    # item 23
+    value = "wrapped-test-value-" + "k" * 80
+    wrapped = base64.encodebytes(value.encode()).decode()
+    assert wrapped.count("\n") > 1
+    assert find_encoded([value], wrapped)
+    assert redact_encoded([value], f"x {wrapped.rstrip()} y") == ("x [REDACTED:encoded] y", 1)
+    crlf = "\r\n".join(wrapped.split("\n"))
+    assert redact_encoded([value], f"x {crlf.rstrip()} y") == ("x [REDACTED:encoded] y", 1)
+    spaced = " \t".join(
+        base64.b64encode(value.encode()).decode()[i : i + 20] for i in range(0, 140, 20)
+    )
+    assert find_encoded([value], spaced)
+    assert not find_encoded([value], "bm90IHRo\nZSB2YWx1ZQ==\n")
+
+
+def test_a_long_value_is_checked_by_its_head_and_tail_only() -> None:
+    # intentional: the middle of a value over 1 KiB is not searched (head and tail are)
+    import hashlib
+
+    key = "".join(hashlib.sha256(bytes([i % 256, i // 256])).hexdigest() for i in range(80))
+    middle = base64.b64encode(key.encode()[2000:2600]).decode()
+    assert not find_encoded([key], middle)
+    assert find_encoded([key], base64.b64encode(key.encode()[:600]).decode())
+
+
+def test_documents_state_the_same_counts_and_rules() -> None:
+    # item 1: the prose follows the code
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent
+    design = (root / "docs/design.md").read_text()
+    n = len(redact.builtin_patterns())
+    assert f"{n} patterns" in design
+    assert f"{len(adversarial_families())} adversarial families" in design
+    for rel in (
+        "docs/interface.md",
+        "schemas/config.json",
+        "config.example.yaml",
+        "docs/design.md",
+    ):
+        text = (root / rel).read_text()
+        assert "{8,256}" not in text and "8 to 256" not in text, rel
+    assert "8 or more" in (root / "schemas/config.json").read_text()
+    assert "8 or more" in (root / "config.example.yaml").read_text()

@@ -444,7 +444,7 @@
           },
           "maxItems": 64,
           "default": [],
-          "description": "Token prefixes; <prefix>[A-Za-z0-9_-]{8,256} is redacted."
+          "description": "Token prefixes; a prefix followed by 8 or more of [A-Za-z0-9_-] is redacted (the whole run)."
         }
       },
       "required": [],
