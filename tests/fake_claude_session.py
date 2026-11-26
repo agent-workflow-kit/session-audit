@@ -231,7 +231,7 @@ _OUTCOMES: dict[str, tuple[str, int, str | None, str]] = {
 }
 
 
-def _report(outcome: str | None) -> dict[str, Any] | None:
+def _report(outcome: str | None, *, artifact: bool = False) -> dict[str, Any] | None:
     status = _OUTCOMES[outcome][2] if outcome else None
     if status is None:
         return None
@@ -240,7 +240,16 @@ def _report(outcome: str | None) -> dict[str, Any] | None:
         "implicit": False,
         "summary": None,
         "reason": None,
-        "artifact": None,
+        "artifact": (
+            {
+                "name": "audit.json",
+                "path": "/state/private/cs-aaaaaaab/runs/1/artifact/1/audit.json",
+                "sha256": "0" * 64,
+                "size": 2,
+            }
+            if artifact
+            else None
+        ),
         "reported_at": "2025-12-31T23:58:00Z",
     }
 
@@ -325,6 +334,8 @@ def status_doc(
     num_turns: int | None = 3,
     skill: str | None = None,
     repo: str | None = None,
+    sandbox_active: bool | None = False,
+    artifact: bool = False,
 ) -> dict[str, Any]:
     """A valid ``status --json`` document. ``claude_session_ids`` are the Claude Code session
     ids the session recorded (the join keys)."""
@@ -367,7 +378,7 @@ def status_doc(
             "skill": skill,
             "has_prompt": True,
             "sandbox": "off",
-            "sandbox_active": False,
+            "sandbox_active": sandbox_active,
             "permission_profile": None,
             "decision_ids": [],
             "input_files": [],
@@ -387,7 +398,7 @@ def status_doc(
             "child_pid": None,
             "child_alive": False,
             "backstop_used": False,
-            "report": _report(outcome),
+            "report": _report(outcome, artifact=artifact),
             "outcome": outcome,
             "end_reason": (end_reason or _OUTCOMES[outcome][3]) if outcome else None,
             "session_end_reason": None,
@@ -452,24 +463,97 @@ def outcome_doc(
     }
 
 
+_LAUNCH_OUTCOMES = {"not-started": 12, "vetoed": 11, "escalated": 13}
+
+
+def exec_doc(
+    csession_id: str = "cs-aaaaaaab",
+    outcome: str = "done",
+    *,
+    phase: str = "session",
+    end_reason: str | None = None,
+    run: int = 1,
+    cost_usd: float | None = 0.5,
+    num_turns: int | None = 3,
+    artifact: bool = False,
+) -> dict[str, Any]:
+    """A valid ``exec --json`` outcome object. A session-phase ``outcome`` is one of done, blocked,
+    needs-input, failed, exited-unreported, killed, timeout or lost; a launch-phase one is
+    not-started, vetoed or escalated (``end_reason`` required)."""
+    launch = phase == "launch"
+    if launch:
+        if end_reason is None:
+            raise ValueError("a launch-phase outcome needs an end_reason")
+        state, code, reason = "not-started", _LAUNCH_OUTCOMES[outcome], end_reason
+        report = None
+    else:
+        state, code, _status, normal = _OUTCOMES[outcome]
+        reason = end_reason or normal
+        report = _report(outcome, artifact=artifact)
+    return {
+        "csession_id": csession_id,
+        "run": run,
+        "forked_from": None,
+        "claude_session_id": None,
+        "phase": phase,
+        "outcome": outcome,
+        "end_reason": reason,
+        "exit_code": code,
+        "state": state,
+        "report": report,
+        "session_started_at": None if launch else "2025-12-31T23:30:00Z",
+        "cost_usd": None if launch else cost_usd,
+        "num_turns": None if launch else num_turns,
+        "message": None,
+        "warnings": [],
+    }
+
+
+def stop_doc(csession_id: str = "cs-aaaaaaab", *, outcome: str = "killed") -> dict[str, Any]:
+    """A valid ``stop --json`` document of a run that ended with ``outcome``."""
+    state, code, _status, normal = _OUTCOMES[outcome]
+    return {
+        "csession_id": csession_id,
+        "run": 1,
+        "already_final": False,
+        "canceled": False,
+        "dry_run": False,
+        "ended": True,
+        "run_exit_code": code,
+        "signals": [],
+        "state": state,
+        "outcome": outcome,
+        "end_reason": "stopped" if outcome == "killed" else normal,
+        "recorded_by_stop": False,
+    }
+
+
 def step(
     stdout: object = "",
     *,
     exit: int = 0,  # noqa: A002 (the key of the scenario format)
     stderr: str = "",
     sleep: float = 0.0,
+    sleep_after: float = 0.0,
+    outcome_file: str | None = None,
     ignore_term: bool = False,
     read_stdin: bool = False,
     pid_file: Path | None = None,
     schema: str | None = None,
     unvalidated: bool = False,
 ) -> dict[str, Any]:
-    """One scripted call. ``schema`` overrides the schema chosen from the key."""
+    """One scripted call. ``schema`` overrides the schema chosen from the key. ``sleep_after``
+    keeps the call alive after it printed; ``outcome_file`` is written to the path given after
+    ``--outcome-file`` before anything is printed."""
     out: dict[str, Any] = {"stdout": stdout, "exit": exit}
     if stderr:
         out["stderr"] = stderr
     if sleep:
         out["sleep"] = sleep
+    if sleep_after:
+        out["sleep_after"] = sleep_after
+    if outcome_file is not None:
+        out["outcome_file"] = outcome_file
     if ignore_term:
         out["ignore_term"] = True
     if read_stdin:
@@ -617,6 +701,7 @@ __all__ = [
     "PINNED_VERSION",
     "FakeClaudeSession",
     "error_doc",
+    "exec_doc",
     "failing_plan",
     "forget_doc",
     "list_doc",
@@ -627,5 +712,6 @@ __all__ = [
     "start_doc",
     "status_doc",
     "step",
+    "stop_doc",
     "version_step",
 ]
