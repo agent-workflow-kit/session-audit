@@ -125,10 +125,15 @@ def check(ctx: Context, args: argparse.Namespace) -> None:
 
 
 def _print_reused(ctx: Context, retro_object: dict[str, object]) -> None:
+    _print_retro(ctx, retro_object, reused=True)
+
+
+def _print_retro(ctx: Context, retro_object: dict[str, object], *, reused: bool) -> None:
     if ctx.json:
-        ctx.emit_json({**retro_object, "reused": True})
+        ctx.emit_json({**retro_object, "reused": reused})
         return
-    ctx.say(f"retro {retro_object['id']} is done (reused, key {retro_object['key']})")
+    how = "reused, key" if reused else "key"
+    ctx.say(f"retro {retro_object['id']} is done ({how} {retro_object['key']})")
     put(ctx, "summary: " + one_line(retro_object["summary"]))  # model text: one sanitized line
 
 
@@ -222,7 +227,13 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         return 0
     # Steps 13 to 16: the row, the hooks, the files, start, exec, the mapping and the cleanup.
     return retrolaunch.run_launch(
-        ctx, args, prepared, launch, plan, on_reused=lambda found: _print_reused(ctx, found)
+        ctx,
+        args,
+        prepared,
+        launch,
+        plan,
+        on_reused=lambda found: _print_reused(ctx, found),
+        on_done=lambda found: _print_retro(ctx, found, reused=False),
     )
 
 

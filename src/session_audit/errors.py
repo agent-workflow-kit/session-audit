@@ -25,7 +25,6 @@ __all__ = [
     "claude_session_failed",
     "from_grammar",
     "interrupt_exit",
-    "not_implemented_artifact",
     "usage",
 ]
 
@@ -255,11 +254,6 @@ def claude_session_failed(result: CallResult) -> CliError:
         "a claude-session call failed",
         details={"reason": "claude_session_error", "retryable": False},
     )
-
-
-def not_implemented_artifact() -> CliError:
-    """The artifact check of a ``done`` run (#29) is not implemented yet: exit 1, no input named."""
-    return CliError("internal", "the artifact check is not implemented yet")
 
 
 def interrupt_exit(signum: int) -> int:

@@ -185,6 +185,8 @@ Runs one retro. Blocks until the retro is final. `SCOPE` is one or more of `--se
 
 Exit codes: see Exit codes. When a stored `done` retro with the same key exists and `--again` is absent, the command exits 0 and prints that retro with `reused: true` (no hook, no limit, no row; a dry run reports it as `reused_retro` and never prints it). A second run whose key matches a non-final retro with a live lease exits 20 `already_running`. Human output of a reused retro prints the summary as one sanitized line. When stored `done` retros with the key exist but none could be reused (a row that does not fit the stored layout or the schema is never reused), a stderr note says how many (`N stored retro(s) with this key did not fit and were not reused`; a count only, no row text, no warning token) and the run goes on to a model run.
 
+A run that ends `done` prints the stored Retro object with `reused: false` (human output: the line `retro ID is done (key K)` and the summary as one sanitized line).
+
 `--json` output: `schemas/cli/retro-run.json`: the Retro object plus `reused`, or the dry-run plan. A non-zero exit prints the error envelope instead (see Exit codes).
 
 ### `retro list`
@@ -1024,11 +1026,12 @@ before json.loads: a byte scan outside strings rejects nesting deeper than 16; p
 every parse of claude-session output uses the same guard: an exception is claude_session_error (in capture: harness.errors)
 1  run.report.implicit true, or report.artifact null              -> no_artifact
 2  report.artifact.name != "audit.json", report.artifact.size > 262144  -> artifact_invalid
-3  read the frozen file into memory (open O_NOFOLLOW, regular, at most 262145 bytes); size or SHA-256 != report.artifact -> artifact_invalid
+3  read the frozen file into memory (open O_NOFOLLOW, regular, owned by the user, at most 262145 bytes); size or SHA-256 != report.artifact -> artifact_invalid
 4  strict JSON parse: UTF-8, no duplicate keys, no NaN/Infinity, nesting depth <= 16, integers |n| < 2^53;
    closed schema; finding ids unique, candidate ids unique                              -> artifact_invalid
 5  retro_id, run_token, digest_sha256 equal the stored values                          -> identity_mismatch
-6  marker equals the expected marker whenever one exists (bundled skill or retro.skill_marker) -> marker_mismatch
+6  marker equals the expected marker whenever one exists (bundled skill or retro.skill_marker); a marker
+   written when none exists, or a bundled marker file the tool cannot read -> marker_mismatch
 7  references:
      drop every finding with any evidence ref not in the manifest
      remove dropped finding ids from every candidate's findings; drop a candidate citing an id that never existed

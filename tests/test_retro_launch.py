@@ -425,17 +425,16 @@ def test_under_required_a_run_without_an_active_sandbox_is_failed_and_its_artifa
     assert rows(corpus.home, "retro_artifacts") == []
 
 
-def test_a_done_run_with_an_active_sandbox_reaches_the_artifact_check_in_state_validating(
+def test_a_done_run_with_an_active_sandbox_reaches_the_artifact_check(
     corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
 ) -> None:
     prepared_corpus(gw, corpus, capsys)
     session_run(cs, "done", sandbox=True, artifact=True)
-    result = launch(capsys, gw)
-    error_of(result, 1)  # TODO(#29): the artifact check is a seam that raises not-implemented
+    error_of(launch(capsys, gw), 22, "artifact_invalid")  # the fake's frozen file does not exist
     row = the_retro(corpus.home)
-    assert row["state"] == "validating" and row["finished_at"] is None
+    assert (row["state"], row["reason"]) == ("failed", "artifact_invalid")
     assert row["sandbox"] == 1 and row["cost_usd"] == 0.5 and row["turns"] == 3
-    assert row["lease_pid"] is None  # released: recovery (#27) can take the row at once
+    assert row["lease_pid"] is None
     assert rows(corpus.home, "retro_artifacts") == []
 
 

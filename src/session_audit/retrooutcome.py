@@ -19,7 +19,7 @@ import math
 import os
 import re
 import stat as statmod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import errors
@@ -35,6 +35,7 @@ __all__ = [
     "Collected",
     "Mapped",
     "Outcome",
+    "StoredArtifact",
     "Started",
     "launch_failed_id",
     "names_a_malformed_id",
@@ -259,7 +260,7 @@ def parse_outcome(text: str, csid: str, run: int) -> Outcome:
 @dataclass(frozen=True)
 class Collected:
     """What ``status --json`` gives the retro (Retro launch item 7). ``report`` is the run's
-    report object as parsed (the artifact check, #29, reads it); never printed or stored here."""
+    report object as parsed (the artifact check reads it); never printed or stored here."""
 
     cost_usd: float | None
     num_turns: int | None
@@ -333,6 +334,21 @@ def parse_forget(text: str, csid: str) -> bool:
 
 
 @dataclass(frozen=True)
+class StoredArtifact:
+    """What the artifact check hands the final ``done`` write (``retroartifact``): the envelope of
+    ``retro_artifacts`` and the tool-written figures of the ``retros`` row. Model text: never in a
+    repr."""
+
+    envelope: str = field(repr=False)
+    summary: str = field(repr=False)
+    findings: int
+    candidates: int
+    dropped_findings: int
+    dropped_candidates: int
+    redacted: int
+
+
+@dataclass(frozen=True)
 class Mapped:
     """One row of the Outcome mapping: the retro's state and reason and the command's exit.
     ``state`` is ``done`` only for the row that hands the retro to the artifact check
@@ -346,6 +362,7 @@ class Mapped:
     retryable: bool = False
     validate: bool = False
     error_reason: str | None = None  # ``details.reason`` of the exit 12 when it is not ``reason``
+    artifact: StoredArtifact | None = None  # set only by the artifact check, with state ``done``
 
     def error(self, retro_id: str) -> errors.CliError | None:
         """The error the command ends with, or None for exit 0 and for a canceled retro (exit

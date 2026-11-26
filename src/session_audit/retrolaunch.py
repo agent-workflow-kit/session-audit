@@ -13,7 +13,7 @@ The flow (every state write is a compare-and-set on the lease, ``retrostate.Retr
     session_not_started`` (exit 12 ``store_unwritable``) and refunds the start.
 16. ``start --json`` (recorded before anything can write a transcript), the adopting ``exec`` with
     ``--outcome-file`` under the overall deadline, ``collect``, the Outcome mapping
-    (``retrooutcome``), the sandbox rule, the artifact check (the seam of #29), the final state,
+    (``retrooutcome``), the sandbox rule, the artifact check (``retroartifact``), the final state,
     ``cleanup`` of the recorded session (``retrocleanup``: forget, purge check, transcripts and
     local files), ``post-retro`` and, for ``failed``, ``post-attention``.
 
@@ -45,7 +45,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import errors, fencing, hooks, launchplan, retro, retrofiles
+from . import errors, fencing, hooks, launchplan, redact, retro, retroartifact, retrofiles
 from .command import Context
 from .config import home_dir, profile_issues
 from .fencing import FencedDigest
@@ -53,7 +53,7 @@ from .gateway import CallResult, CallStatus, ProcessHandle
 from .harness import Invalid
 from .interrupt import Interrupted, Signals
 from .retro import Prepared
-from .retroartifact import validate_and_store_artifact
+from .retroartifact import ArtifactContext, validate_and_store_artifact
 from .retrocleanup import OUTPUT_LIMIT, cleanup, collect, load_session_row, stop_session
 from .retrofiles import FilesError, RunFiles
 from .retrooutcome import (
@@ -71,6 +71,7 @@ from .retrooutcome import (
     validated_session,
 )
 from .retrostate import Inserted, Retro, Reused, insert_retro, scope_object
+from .retroview import load_retro
 
 __all__ = [
     "CLEANUP_BOUND",
@@ -115,6 +116,7 @@ def run_launch(
     plan: launchplan.LaunchPlan,
     *,
     on_reused: Callable[[dict[str, Any]], None],
+    on_done: Callable[[dict[str, Any]], None] | None = None,
 ) -> int:
     """Steps 13 to 16. Returns the exit code (0, or an exit by signal) and raises ``CliError`` for
     every other exit. ``on_reused`` prints a stored retro that step 13 found."""
@@ -142,10 +144,18 @@ def run_launch(
         with inserted.retro.lease:
             try:
                 launcher = Launcher(ctx, args, prepared, launch, plan, inserted.retro)
-                return launcher.run()
+                code = launcher.run()
             except BaseException:
                 inserted.retro.release()  # compare-and-set; housekeeping may take the row at once
                 raise
+        if code == 0 and on_done is not None and inserted.retro.state == "done":
+            with store.transaction() as conn:
+                finished = load_retro(conn, inserted.retro.id)
+            if finished is None:
+                ctx.note("session-audit: warning: the stored retro could not be read back")
+            else:
+                on_done(finished)
+        return code
 
 
 class Launcher:
@@ -172,6 +182,8 @@ class Launcher:
         self.session: _Session | None = None
         self.files: RunFiles | None = None
         self.hook = hooks.HookOutcome()
+        self.fenced: FencedDigest | None = None
+        self.run_token: str | None = None
 
     # -- steps 14 and 15 ------------------------------------------------------------------
 
@@ -186,6 +198,7 @@ class Launcher:
         if fenced.section_hashes != self.prepared.hashes:
             raise errors.CliError("internal", "the digest sections changed after the key")
         retrofiles.check_digest_hash(fenced)
+        self.fenced, self.run_token = fenced, run_token
         self.hook = self._pre_retro(fenced)
         row.lease.raise_if_lost()
         if self.signals.pending:  # the hook was ended by the signal (or the signal came after it)
@@ -532,7 +545,34 @@ class Launcher:
         self.row.write("validating", columns=columns)
         if self.signals.pending:
             return None
-        return validate_and_store_artifact(collected)
+        return validate_and_store_artifact(collected, self._artifact_context())
+
+    def _artifact_context(self) -> ArtifactContext:
+        fenced, run_token = self.fenced, self.run_token
+        assert fenced is not None and run_token is not None
+        settings = self.ctx.settings
+        prepared, gw = self.prepared, self.gw
+
+        def marker() -> str | None:
+            dirs, bundled = tuple(prepared.plugin_dirs), prepared.bundled_plugin
+            if bundled is not None and dirs == (bundled,):  # the skill is the bundled one
+                return retroartifact.bundled_marker(gw, bundled)
+            return settings.retro.skill_marker  # a custom skill: its configured marker, if any
+
+        def redactor() -> redact.Redactor:
+            masks = redact.build_masks(os.environ, settings.redaction.mask_env, lambda _m: None)
+            return redact.Redactor(masks, settings.redaction.extra_token_prefixes)
+
+        return ArtifactContext(
+            gw,
+            self.row.id,
+            run_token,
+            fenced.digest_sha256,
+            fenced.manifest,
+            prepared.digest,
+            marker,
+            redactor,
+        )
 
     # -- the end --------------------------------------------------------------------------
 
@@ -552,11 +592,19 @@ class Launcher:
         def refunded(conn: Any) -> None:
             conn.execute("DELETE FROM retro_starts WHERE retro_id = ?", (row.id,))
 
+        stored = mapped.artifact
+
+        def store_artifact(conn: Any) -> None:
+            assert stored is not None
+            retroartifact.write_artifact(conn, row.id, stored)
+
         row.write(
             mapped.state,
             mapped.reason,
             columns=columns,
-            also=refunded if refund else None,
+            also=store_artifact if stored is not None else (refunded if refund else None),
+            findings=None if stored is None else stored.findings,
+            candidates=None if stored is None else stored.candidates,
             # A retro that ended at its pre-retro hook logs the hook's ids here (a running one
             # logged them when it started).
             decision_ids=() if running else self.hook.decision_ids,
@@ -598,7 +646,14 @@ class Launcher:
 
     def _post_hooks(self, mapped: Mapped) -> None:
         with self.signals.watch() as cancel:  # a first signal here ends the hooks' groups
-            self.row.post_hooks(mapped.state, mapped.reason, cancel=cancel)
+            stored = mapped.artifact
+            self.row.post_hooks(
+                mapped.state,
+                mapped.reason,
+                findings=0 if stored is None else stored.findings,
+                candidates=0 if stored is None else stored.candidates,
+                cancel=cancel,
+            )
 
     def _canceled(
         self,

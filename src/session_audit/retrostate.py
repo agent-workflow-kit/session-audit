@@ -20,9 +20,9 @@ leaves exactly one of them; the lease columns stay set until ``Retro.release``):
                 ``start`` returned (``retro_sessions`` row ``pending`` in the same transaction);
                 recovery stops the run by that id and cleans up, or just deletes the local files.
 ``validating``  the session ended and was collected; the artifact check (#29) is running.
-final states    ``done`` (#29), ``failed``, ``escalated``, ``canceled``: ``finished_at`` set. The
-                lease stays held (and renewed) until cleanup and the post hooks are done, then
-                ``release`` clears it.
+final states    ``done`` (the artifact check), ``failed``, ``escalated``, ``canceled``:
+                ``finished_at`` set. The lease stays held (and renewed) until cleanup and the post
+                hooks are done, then ``release`` clears it.
 
 Daily limit (#28): ``check_daily_limit`` runs inside the step 13 transaction; the ``retro_starts``
 row is inserted with the ``running`` write (``retrolaunch``) and deleted again only by the refund of
