@@ -295,6 +295,12 @@ class Gateway(Protocol):
         """This process's id."""
         ...
 
+    def ask(self, prompt: str, *, limit: int = 64) -> str:
+        """Write ``prompt`` to standard error and read one line of standard input (at most
+        ``limit`` characters; an end of input is the empty string): the confirmation of a
+        destructive command on a terminal. The answer is never printed or stored."""
+        ...
+
     def process_start(self, pid: int) -> str | None:
         """An opaque token for when process ``pid`` started (at most 64 characters, equal for
         the same process at any time, different for a later process that reuses the pid), or
@@ -894,6 +900,14 @@ class SystemGateway:
 
     def pid(self) -> int:
         return os.getpid()
+
+    def ask(self, prompt: str, *, limit: int = 64) -> str:
+        try:
+            sys.stderr.write(prompt)
+            sys.stderr.flush()
+            return sys.stdin.readline(limit)
+        except (OSError, ValueError, UnicodeError):
+            return ""
 
     def process_start(self, pid: int) -> str | None:
         if pid <= 0:

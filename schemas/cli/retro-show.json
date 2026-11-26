@@ -274,6 +274,10 @@
       },
       "maxItems": 20
     },
+    "superseded": {
+      "type": "boolean",
+      "description": "Optional. True when a later done retro with the same key exists (the retro list row's meaning)."
+    },
     "digest": {
       "anyOf": [
         {

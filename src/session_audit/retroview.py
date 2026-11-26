@@ -44,6 +44,7 @@ __all__ = [
     "encode_artifact",
     "encode_resolved_scope",
     "encode_session_map",
+    "list_row",
     "load_retro",
     "scope_text",
 ]
@@ -77,6 +78,22 @@ _CANDIDATE_ID = re.compile(r"c([1-9]|1[0-9]|20)", re.ASCII)
 _SKIP_REASONS = ("live", "transcript_missing", "transcript_changed", "empty")
 _WARNINGS = ("transcripts_kept", "recovery_skipped", "ingest_busy")
 _CLEANUP = ("pending", "done", "incomplete", "skipped")
+_STATES = ("digesting", "running", "validating", "done", "failed", "escalated", "canceled")
+_REASONS = {
+    "failed": (
+        "runner_lost",
+        "session_not_started",
+        "claude_session_error",
+        "session_failed",
+        "no_artifact",
+        "artifact_invalid",
+        "identity_mismatch",
+        "marker_mismatch",
+        "no_valid_findings",
+    ),
+    "escalated": ("hook_escalated", "session_blocked", "session_needs_input"),
+    "canceled": ("interrupted", "hook_vetoed"),
+}
 _CATEGORIES = ("went_well", "went_badly", "friction", "cost")
 _TARGET_CLASSES = ("skill", "instructions_file", "config", "permission_profile", "workflow")
 _COUNT_KEYS = ("sessions", "skipped", "over_cap", "items", "findings", "candidates")
@@ -366,13 +383,16 @@ def _candidate(value: object) -> dict[str, Any]:
     }
 
 
-def _document(conn: sqlite3.Connection, retro_id: object) -> tuple[dict[str, Any], str]:
-    """The artifact envelope and the summary of a retro, the size checked before the parse."""
+def _document(conn: sqlite3.Connection, retro_id: object) -> tuple[dict[str, Any], str] | None:
+    """The artifact envelope and the summary of a retro (None when it has no artifact row), the
+    size checked before the parse."""
     sized = conn.execute(
         "SELECT length(CAST(artifact AS BLOB)), summary FROM retro_artifacts WHERE retro_id = ?",
         (retro_id,),
     ).fetchone()
-    if sized is None or not isinstance(sized[0], int) or sized[0] > MAX_ARTIFACT_BYTES:
+    if sized is None:
+        return None
+    if not isinstance(sized[0], int) or sized[0] > MAX_ARTIFACT_BYTES:
         raise _Bad
     summary = _text(sized[1], 1, 2000)
     text = conn.execute(
@@ -381,21 +401,56 @@ def _document(conn: sqlite3.Connection, retro_id: object) -> tuple[dict[str, Any
     return _object(_json(text)), summary
 
 
-def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    if row["state"] != "done" or row["reason"] is not None:
+def _state(row: sqlite3.Row) -> tuple[str, str | None]:
+    """The state and reason of a row, coupled as the schema couples them."""
+    state, reason = row["state"], row["reason"]
+    if state not in _STATES:
         raise _Bad
+    allowed = _REASONS.get(state)
+    if allowed is None:
+        if reason is not None:
+            raise _Bad
+    elif reason not in allowed:
+        raise _Bad
+    return state, reason
+
+
+def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    state, reason = _state(row)
     _text(row["scope"], 0, SCOPE_TEXT_MAX)  # descriptive only: its content is never used
     resolved = _object(_json(row["resolved_scope"]))
     flags = _object(resolved.get("flags"))
     mapping = _object(_json(row["session_map"]))
     if set(mapping) != {"sessions"}:
         raise _Bad
-    envelope, summary = _document(conn, row["id"])
-    if set(envelope) != {"artifact", "skipped", "coverage", "metrics"}:
-        raise _Bad
-    document = _object(envelope["artifact"])
-    findings = [_finding(x) for x in _list(document.get("findings"), 50)]
-    candidates = [_candidate(x) for x in _list(document.get("candidates"), 20)]
+    counts = _counts(_json(row["counts"]), _COUNT_KEYS)
+    stored = _document(conn, row["id"])
+    if stored is None:
+        if state == "done":
+            raise _Bad
+        # No artifact row (every retro that did not finish ``done``): the artifact fields are
+        # empty and the coverage says nothing was recorded.
+        summary = None
+        skipped: list[dict[str, str]] = []
+        coverage: dict[str, Any] = {
+            "digest_bytes": 0,
+            "items_total": 0,
+            "items_kept": 0,
+            "sessions": [],
+        }
+        metrics: dict[str, int | float] = {}
+        findings: list[dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
+    else:
+        envelope, summary = stored
+        if set(envelope) != {"artifact", "skipped", "coverage", "metrics"}:
+            raise _Bad
+        document = _object(envelope["artifact"])
+        findings = [_finding(x) for x in _list(document.get("findings"), 50)]
+        candidates = [_candidate(x) for x in _list(document.get("candidates"), 20)]
+        skipped = _skipped(envelope["skipped"])
+        coverage = _coverage(envelope["coverage"])
+        metrics = _metrics(envelope["metrics"])
     warnings = _list(_json(row["warnings"]), 8)
     if any(w not in _WARNINGS for w in warnings) or len(set(warnings)) != len(warnings):
         raise _Bad
@@ -431,16 +486,16 @@ def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     stamps += [s for s in (started, finished) if s is not None]
     return {
         "id": _match(_RETRO_ID, row["id"]),
-        "state": "done",
-        "reason": None,
+        "state": state,
+        "reason": reason,
         "key": _match(_KEY, row["key"]),
         "scope": _scope(flags, resolved),
         "scope_resolved": {
             "since": _maybe_stamp_text(resolved.get("since")),
             "until": _maybe_stamp_text(resolved.get("until")),
         },
-        "coverage": _coverage(envelope["coverage"]),
-        "skipped": _skipped(envelope["skipped"]),
+        "coverage": coverage,
+        "skipped": skipped,
         "sessions": _sessions(mapping["sessions"]),
         "skill": _match(_SKILL, row["skill"]),
         "model": model,
@@ -456,8 +511,8 @@ def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         "warnings": warnings,
         "redacted": _count(row["redacted"]),
         "again_of": _optional(_RETRO_ID, row["again_of"]),
-        "counts": _counts(_json(row["counts"]), _COUNT_KEYS),
-        "metrics": _metrics(envelope["metrics"]),
+        "counts": counts,
+        "metrics": metrics,
         "dropped": dropped,
         "summary": summary,
         "findings": findings,
@@ -465,13 +520,55 @@ def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def list_row(row: Sequence[Any]) -> dict[str, Any] | None:
+    """A ``retro list`` row (``defs.json`` ``retro_row``) from the columns ``id, key, state,
+    reason, created_at, started_at, finished_at, scope, resolved_scope, counts, superseded``, or
+    None when they do not fit the layout. Built from columns only: no model text."""
+    try:
+        retro_id, key, state, reason, created, started, finished, text, resolved, counts, sup = row
+        if state not in _STATES:
+            raise _Bad
+        allowed = _REASONS.get(state)
+        if (allowed is None and reason is not None) or (
+            allowed is not None and reason not in allowed
+        ):
+            raise _Bad
+        _text(text, 0, SCOPE_TEXT_MAX)
+        found = _object(_json(resolved))
+        flags = _object(found.get("flags"))
+        counted = _counts(_json(counts), _COUNT_KEYS)
+        if counted["findings"] > 50 or counted["candidates"] > 20:
+            raise _Bad
+        stamps = [_stamp(created)]
+        shown_finished = _maybe_stamp(finished)
+        shown_started = _maybe_stamp(started)
+        stamps += [s for s in (shown_started, shown_finished) if s is not None]
+        return {
+            "id": _match(_RETRO_ID, retro_id),
+            "state": state,
+            "reason": reason,
+            "created_at": stamps[0],
+            "updated_at": max(stamps),
+            "finished_at": shown_finished,
+            "scope": _scope(flags, found),
+            "findings": counted["findings"],
+            "candidates": counted["candidates"],
+            "key": _match(_KEY, key),
+            "superseded": bool(sup),
+        }
+    except (_Bad, ValueError):
+        return None
+
+
 def _maybe_stamp_text(value: object) -> str | None:
     return None if value is None else _match(_STAMP, value)
 
 
 def load_retro(conn: sqlite3.Connection, retro_id: str) -> dict[str, Any] | None:
-    """The Retro object of a stored ``done`` retro, or None when there is no such retro, it is not
-    ``done`` or its row does not fit the layout above."""
+    """The Retro object of a stored retro in any state, or None when there is no such retro or its
+    row does not fit the layout above. A retro that is not ``done`` has no artifact row: its
+    ``summary`` is null, ``findings``, ``candidates``, ``skipped`` and ``metrics`` are empty and
+    its ``coverage`` is all zeros. A ``done`` retro needs its artifact row."""
     previous = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:

@@ -278,6 +278,10 @@
         },
         "reused": {
           "type": "boolean"
+        },
+        "superseded": {
+          "type": "boolean",
+          "description": "Optional, as in the Retro object."
         }
       },
       "required": [

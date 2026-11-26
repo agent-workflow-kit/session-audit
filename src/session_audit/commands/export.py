@@ -1,19 +1,23 @@
 """``export``: print store rows as JSON lines (interface, Commands, ``export``).
 
 ``export sessions`` and ``export usage`` stream JSON lines (a line is written as soon as it is
-produced, oldest first). TODO(#31): ``export retros``.
+produced, oldest first). ``export retros`` prints the full Retro object (with ``superseded``) of
+every stored retro; ``--include-self-improve`` is accepted and has no meaning there.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import sqlite3
 from collections.abc import Iterator
 
 from .. import aggregate, errors
 from .. import args as a
 from ..command import Command, Context, stderr_line
 from ..grammar import parse_when
+from ..retention import epoch_ms
+from ..retroquery import export_lines
 from ..sessionquery import Filters, derive_day, read_stream
 from ..textsafe import dumps_json
 
@@ -34,8 +38,6 @@ def check(ctx: Context, args: argparse.Namespace) -> None:
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
-    if args.kind == "retros":
-        raise a.not_implemented()  # TODO(#31): export retros
     # Not build_filters: the positional ``kind`` here is the export type, not ``--kind``.
     since = None
     if args.since is not None:
@@ -43,7 +45,11 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             args.since, field="--since", now=ctx.gateway.now(), time_zone=ctx.settings.zone()
         )
     filters = Filters(since=since, include_self_improve=args.include_self_improve)
-    if args.kind == "sessions":
+    unfit = [0]
+    if args.kind == "retros":
+        since_ms = None if since is None else epoch_ms(since)
+        stream = read_stream(ctx, lambda conn: retro_stream(conn, since_ms, unfit))
+    elif args.kind == "sessions":
         stream = read_stream(ctx, lambda conn: aggregate.session_lines(conn, ctx, filters))
     else:
         stream = read_stream(ctx, lambda conn: usage_stream(conn, ctx, filters))
@@ -60,7 +66,17 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         for text in errors.stderr_lines(error):
             stderr_line(text)
         return error.exit_code
+    if unfit[0]:
+        ctx.note(f"session-audit: {unfit[0]} stored retro(s) did not fit and were not exported")
     return 0
+
+
+def retro_stream(
+    conn: sqlite3.Connection | None, since_ms: int | None, unfit: list[int]
+) -> Iterator[dict[str, object]]:
+    if conn is None:
+        return iter(())
+    return export_lines(conn, since_ms, unfit)
 
 
 def usage_stream(conn, ctx: Context, filters: Filters) -> Iterator[dict[str, object]]:  # noqa: ANN001

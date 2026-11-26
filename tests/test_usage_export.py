@@ -586,10 +586,6 @@ def test_export_empty_store_prints_nothing(
     assert not state_dir_of(_private_environment).exists()
 
 
-def test_export_retros_is_still_a_stub(gw: TickGateway, capsys: pytest.CaptureFixture[str]) -> None:
-    assert run(capsys, gw, "export", "retros").code == 1
-
-
 class ClosedPipe:
     """A stdout whose reader went away after ``allowed`` writes."""
 

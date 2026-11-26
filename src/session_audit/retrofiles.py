@@ -41,6 +41,7 @@ __all__ = [
     "RunFiles",
     "delete_local",
     "outcome_path",
+    "read_digest",
     "prompt_text",
     "write_run_files",
 ]
@@ -291,3 +292,38 @@ def remove_digest(gateway: Gateway, state: str, retro_id: str) -> bool:
         return False
     finally:
         handle.close()
+
+
+DIGEST_READ_MAX = 1024 * 1024  # the ``digest`` string of ``retro show --json`` holds at most this
+
+
+def read_digest(gateway: Gateway, state: str, retro_id: str) -> bytes | None:
+    """The bytes of ``digests/<retro_id>/digest.md`` (at most ``DIGEST_READ_MAX``), or None when it
+    is not there (pruned) or cannot be read as a plain file of this user: no symlink is followed
+    on the way, and an id that is not a retro id reads nothing."""
+    if not RETRO_ID.fullmatch(retro_id):
+        return None
+    try:
+        parent = _open_parent(gateway, state, DIGESTS)
+    except OSError:
+        return None
+    if parent is None:
+        return None
+    try:
+        directory = parent.open_dir(retro_id.encode())
+        try:
+            handle = directory.open_file(b"digest.md")
+            try:
+                info = gateway.fstat(handle)
+                if not statmod.S_ISREG(info.st_mode) or info.st_uid != gateway.uid():
+                    return None
+                gateway.set_blocking(handle)
+                return handle.read(DIGEST_READ_MAX)
+            finally:
+                handle.close()
+        finally:
+            directory.close()
+    except OSError:
+        return None
+    finally:
+        parent.close()
