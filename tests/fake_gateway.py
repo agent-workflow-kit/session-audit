@@ -333,6 +333,9 @@ class FakeGateway:
     def mkdir(self, path: str | os.PathLike[str], mode: int) -> None:
         raise NotImplementedError("state directory access is tested against real directories")
 
+    def writable(self, path: str | os.PathLike[str]) -> bool:
+        raise NotImplementedError("state directory access is tested against real directories")
+
     def open_private(
         self,
         path: str | os.PathLike[str],

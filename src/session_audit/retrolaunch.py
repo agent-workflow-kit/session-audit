@@ -52,6 +52,7 @@ from .retrooutcome import (
     Mapped,
     Outcome,
     Started,
+    is_document,
     launch_failed_id,
     map_exec,
     map_start,
@@ -107,9 +108,9 @@ def run_launch(
         on_reused(inserted.retro)
         return 0
     assert isinstance(inserted, Inserted)
-    launcher = Launcher(ctx, args, prepared, launch, plan, inserted.retro)
     with inserted.retro.lease:
         try:
+            launcher = Launcher(ctx, args, prepared, launch, plan, inserted.retro)
             return launcher.run()
         except BaseException:
             if inserted.retro.state not in FINAL_STATES:
@@ -172,7 +173,8 @@ class Launcher:
                     error_reason="store_unwritable",
                 ),
                 refund=True,
-                delete_files=True,
+                # write_run_files removed what it created; a path it refused is not ours to delete
+                delete_files=False,
             )
         row.lease.raise_if_lost()
         return self._launch()
@@ -255,17 +257,21 @@ class Launcher:
                 started = parse_start(result.stdout)
             except Invalid:
                 started = None
-            csid = None if started is None else started.csession_id
+                if is_document(result.stdout):
+                    # A document whose id or directory is malformed names nothing to clean up.
+                    self.ctx.note("session-audit: warning: claude-session printed no usable id")
+                    return None, error
+        elif result.exit_is(12):
+            failed = launch_failed_id(result.stdout)
+        # The document, else the launch_failed envelope, else the one distinct id token of the
+        # output (a start that timed out, failed some other way or printed a document that does not
+        # parse may still have printed its id: it is validated, recorded and forgotten like any).
+        if started is not None:
+            csid = started.csession_id
+        elif failed is not None:
+            csid = failed[0]
         else:
-            # The launch_failed envelope, else the one distinct id token of the output (a start
-            # that timed out or failed some other way may still have printed its id).
-            if result.exit_is(12):
-                failed = launch_failed_id(result.stdout)
-            csid = (
-                failed[0]
-                if failed is not None
-                else single_csession_id(result.stdout, result.stderr)
-            )
+            csid = single_csession_id(result.stdout, result.stderr)
         if csid is None:
             if result.exit_is(0):
                 self.ctx.note("session-audit: warning: claude-session printed no usable id")
@@ -343,6 +349,8 @@ class Launcher:
             kill_grace=TERM_WAIT,
             on_start=self._exec_started,
         )
+        # todo(#28): signal the exec child through a spawn handle that refuses after reap
+        # (on_exit before reap), not a bare pid: exec_pid can hold a reaped pid until this line.
         self.exec_pid = None
         self.row.lease.raise_if_lost()
         timed_out = result.status is CallStatus.TIMEOUT
@@ -354,11 +362,28 @@ class Launcher:
         if timed_out or (outcome is not None and outcome.phase == "session"):
             collected = self._collect(csid)
         columns = self._collected_columns(collected, outcome)
+        if (
+            self.launch.settings.sandbox == "required"
+            and collected is not None
+            and mapped.state in ("done", "escalated")
+            and collected.sandbox_active is not True
+        ):
+            # Retro launch item 7: a collected session-phase run (done, blocked, needs-input)
+            # whose status does not show an active sandbox is failed; exits 14-18 keep their own
+            # rows and the artifact is never read.
+            mapped = Mapped("failed", "claude_session_error", 12)
         if mapped.validate:
             mapped = self._done(collected, columns)
         # A start is refunded only when the run never reached the model: the outcome says the
-        # launch phase ended it. An outcome that did not parse proves nothing, so it is not.
-        refund = outcome is not None and outcome.phase == "launch"
+        # launch phase ended it and agrees with the process exit (11, 12 or 13). An outcome that
+        # did not parse or disagrees proves nothing, so it is not.
+        refund = (
+            outcome is not None
+            and outcome.phase == "launch"
+            and result.exited
+            and result.returncode == outcome.exit_code
+            and outcome.exit_code in (11, 12, 13)
+        )
         return self._end(mapped, columns=columns, refund=refund)
 
     def _exec_started(self, pid: int) -> None:
@@ -417,12 +442,9 @@ class Launcher:
         return {}
 
     def _done(self, collected: Collected | None, columns: dict[str, Any]) -> Mapped:
-        """A run that ended ``done``: ``status`` must have answered, and under ``required`` the
-        sandbox must have been active (otherwise the artifact is never read or stored), then the
-        artifact check (#29) on a retro in state ``validating``."""
+        """A run that ended ``done``: ``status`` must have answered (the sandbox rule already ran
+        in ``_exec``), then the artifact check (#29) on a retro in state ``validating``."""
         if collected is None:
-            return Mapped("failed", "claude_session_error", 12)
-        if self.launch.settings.sandbox == "required" and collected.sandbox_active is not True:
             return Mapped("failed", "claude_session_error", 12)
         self.row.write("validating", columns=columns)
         return validate_and_store_artifact(collected)

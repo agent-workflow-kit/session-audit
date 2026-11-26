@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import stat as statmod
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,7 +26,7 @@ from . import errors
 from .gateway import CallResult
 from .grammar import is_csession_id
 from .harness import Invalid, strict_loads
-from .launchplan import project_dir_name, retryable
+from .launchplan import retryable
 
 __all__ = [
     "CSID_TOKEN",
@@ -35,6 +36,7 @@ __all__ = [
     "Mapped",
     "Outcome",
     "Started",
+    "is_document",
     "launch_failed_id",
     "map_exec",
     "map_start",
@@ -136,6 +138,15 @@ def parse_start(text: str) -> Started:
     return Started(csid, directory, _integer(_need(document, "run"), 1), tuple(argv))
 
 
+def is_document(text: str) -> bool:
+    """True when ``text`` is one strict JSON object (whatever its fields hold)."""
+    try:
+        _object(strict_loads(text))
+    except Invalid:
+        return False
+    return True
+
+
 def launch_failed_id(text: str) -> tuple[str, str, int | None] | None:
     """``(csession_id, end_reason, run)`` of the ``launch_failed`` error envelope of ``start``
     (exit 12), or None for any other document (a different code, a bad shape, a bad id)."""
@@ -168,15 +179,25 @@ def validated_session(
     """``(csid, csession_dir, project_dir)`` when the id, the directory and the transcript project
     directory name of the session are well formed, else None. Nothing is stored, forgotten or
     stopped unless this returns a value: the id has the claude-session grammar, the directory is
-    exactly ``sessions_root/<id>`` (ASCII, no ``..``, so it lies under the root), and the project
-    directory name of ``<dir>/work`` matches ``^[A-Za-z0-9-]{1,200}$``."""
+    exactly ``sessions_root/<id>`` (ASCII, no ``..``, so it lies under the root), when it exists it
+    is a real directory (not a link) of this user, and the project directory name of
+    ``<dir>/work`` (from the path as written, not resolved) matches ``^[A-Za-z0-9-]{1,200}$``."""
     if not is_csession_id(csid) or not isinstance(csession_dir, str):
         return None
     if not csession_dir.isascii() or "\x00" in csession_dir or ".." in csession_dir.split("/"):
         return None
     if not sessions_root.startswith("/") or csession_dir != os.path.join(sessions_root, csid):
         return None
-    project = project_dir_name(csession_dir + "/work")
+    try:
+        info = os.lstat(csession_dir)
+    except FileNotFoundError:
+        pass  # not created (a start that failed early): nothing to check yet
+    except OSError:
+        return None
+    else:
+        if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            return None  # a symlink, a file or somebody else's directory is not a session
+    project = re.sub(r"[^A-Za-z0-9]", "-", csession_dir + "/work")  # as written, not resolved
     if not _PROJECT_DIR.fullmatch(project):
         return None
     return csid, csession_dir, project
@@ -204,7 +225,8 @@ def parse_outcome(text: str, csid: str, run: int) -> Outcome:
     outcome of another session or run, or an exit code the pinned rules never pair with its
     outcome)."""
     document = _object(strict_loads(text))
-    if _need(document, "csession_id") != csid or _need(document, "run") != run:
+    doc_run = _need(document, "run")
+    if _need(document, "csession_id") != csid or type(doc_run) is not int or doc_run != run:
         raise Invalid("not this run")
     phase = _need(document, "phase")
     if phase not in ("launch", "session"):

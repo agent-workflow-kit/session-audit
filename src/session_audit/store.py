@@ -252,20 +252,30 @@ def _check_side_files(gateway: Gateway, db_path: str) -> None:
 def _check_db_file(
     gateway: Gateway, db_path: str, *, create: bool, read_only: bool = False
 ) -> bool:
-    """Check ``state.db`` through an open descriptor (what is checked is what is opened); create it
-    0600 when ``create`` and missing. False when it is missing and not created. A read-only caller
-    (``inspect_store``) opens it read-only, so a file or file system it cannot write is still
-    checked."""
+    """Check ``state.db`` by ``lstat`` (regular, owner, mode, one link; a symlink is not regular);
+    create it 0600 when ``create`` and missing. False when it is missing and not created. A caller
+    that opens it for writing also needs ``access(W_OK)``; a read-only one (``inspect_store``) does
+    not, so a file or file system it cannot write is still checked.
+
+    Never open and close a descriptor on an existing ``state.db``: POSIX advisory locks belong to
+    the process and the inode, so closing any descriptor drops the SQLite locks of every other
+    connection of this process, and another process could then checkpoint and unlink the ``-wal``
+    and ``-shm`` files under a live writer. The only open is the creation of a file that did not
+    exist a moment ago (no connection of this process can hold it)."""
+    uid = gateway.uid()
     try:
-        handle = gateway.open_private(db_path, create=create, read_only=read_only)
+        info = gateway.lstat(db_path)
     except FileNotFoundError:
-        return False
-    except PermissionError:
-        raise unwritable("state.db is not writable") from None
-    try:
-        _check_file(os.fstat(handle.fileno()), gateway.uid(), DB_NAME)
-    finally:
-        handle.close()
+        if not create:
+            return False
+        try:
+            gateway.open_private(db_path, create=True).close()
+        except PermissionError:
+            raise unwritable("state.db is not writable") from None
+        info = gateway.lstat(db_path)
+    if not read_only and statmod.S_ISREG(info.st_mode) and not gateway.writable(db_path):
+        raise unwritable("state.db is not writable")
+    _check_file(info, uid, DB_NAME)
     return True
 
 

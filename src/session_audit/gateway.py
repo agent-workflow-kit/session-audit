@@ -299,6 +299,12 @@ class Gateway(Protocol):
         it exists, even as a symlink). A parent that is missing is an error."""
         ...
 
+    def writable(self, path: str | os.PathLike[str]) -> bool:
+        """``access(W_OK)`` (the effective user): whether the file can be opened for writing,
+        decided without opening a descriptor on it (closing one would drop the SQLite locks of
+        the process; see ``store._check_db_file``)."""
+        ...
+
     def open_private(
         self,
         path: str | os.PathLike[str],
@@ -773,6 +779,9 @@ class SystemGateway:
             os.fchmod(fd, mode)
         finally:
             os.close(fd)
+
+    def writable(self, path: str | os.PathLike[str]) -> bool:
+        return os.access(path, os.W_OK, effective_ids=True)
 
     def open_private(
         self,

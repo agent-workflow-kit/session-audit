@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -347,6 +348,94 @@ def test_a_live_run_still_refuses_with_again(
                 ctx, ctx.store(), args_for(project="/work", again=True), prepared
             )
         assert caught.value.details["reason"] == "already_running"
+    finally:
+        ctx.close()
+
+
+def test_two_racing_inserts_of_one_key_make_one_row_and_one_already_running(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first insert stops inside its transaction (the seam of the daily limit) until the second
+    has started; the second can only be refused by the lookup repeated inside ``BEGIN
+    IMMEDIATE``."""
+    prepared_corpus(gw, corpus, capsys)
+    ctx0 = retro_ctx(gw, corpus)
+    try:
+        prepared = retro.prepare(ctx0, args_for(project="/work"), env={})
+    finally:
+        ctx0.close()
+    inside = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def gated(ctx: Any, conn: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            inside.set()
+            assert release.wait(30)
+
+    monkeypatch.setattr(retrostate, "check_daily_limit", gated)
+    results: dict[str, Any] = {}
+    finish = threading.Event()
+
+    def racer(name: str) -> None:
+        ctx = retro_ctx(gw, corpus)
+        try:
+            results[name] = retrostate.insert_retro(
+                ctx, ctx.store(), args_for(project="/work"), prepared
+            )
+        except errors.CliError as exc:
+            results[name] = exc
+        finally:
+            finish.wait(30)  # the first row's lease is held until both have answered
+            if isinstance(results.get(name), retrostate.Inserted):
+                results[name].retro.release()
+            ctx.close()
+
+    first = threading.Thread(target=racer, args=("a",))
+    first.start()
+    assert inside.wait(30)
+    second = threading.Thread(target=racer, args=("b",))
+    second.start()
+    time.sleep(0.3)  # the second one waits for the write lock
+    release.set()
+    deadline = time.monotonic() + 30
+    while len(results) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    finish.set()
+    first.join(30)
+    second.join(30)
+    assert isinstance(results["a"], retrostate.Inserted)
+    assert isinstance(results["b"], errors.CliError)
+    assert results["b"].details["reason"] == "already_running"
+    assert len(rows(corpus.home)) == 1
+
+
+def test_a_same_key_retro_whose_lease_is_not_live_does_not_block_a_new_insert(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Interface, Retro lifecycle: a lease that is not live (expired) may be taken over, so the
+    key is not running; the old row is left for recovery (#27)."""
+    prepared_corpus(gw, corpus, capsys)
+    ctx = retro_ctx(gw, corpus)
+    try:
+        prepared = retro.prepare(ctx, args_for(project="/work"), env={})
+        holder = identity(gw)
+        add_retro(
+            corpus.home,
+            prepared.key,
+            state="running",
+            summary=None,
+            lease=(holder.pid, holder.start, int(gw.now().timestamp() * 1000) - 60_000),
+        )
+        found = retrostate.insert_retro(ctx, ctx.store(), args_for(project="/work"), prepared)
+        assert isinstance(found, retrostate.Inserted)
+        assert len(rows(corpus.home)) == 2
+        found.retro.release()
     finally:
         ctx.close()
 

@@ -7,14 +7,18 @@ The fake validates every document it prints against claude-session's pinned sche
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from session_audit import retrolaunch
+from session_audit import lease, retrofiles, retrolaunch, retrostate
+from session_audit.errors import CliError
 
 from .fake_claude_session import (
     FakeClaudeSession,
@@ -29,6 +33,7 @@ from .fake_claude_session import (
     version_step,
 )
 from .ingesthelp import S1, S2, Corpus, connect, state_dir_of
+from .procs import wait_until_gone
 from .retrohelp import RetroGateway, ingested, seed
 from .retrohelp import retro as run_retro
 from .schemas import validate
@@ -821,3 +826,204 @@ def test_the_exec_child_pid_is_recorded_for_the_signal_handling_of_28(
     error_of(launch(capsys, gw), 13)
     [pid] = seen
     assert pid == [c["pid"] for c in cs.calls() if c["key"] == "exec"][0]
+
+
+# --- R1: the store never loses a commit to a fresh reader --------------------------------------
+
+READER = (
+    "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute(sys.argv[2]).fetchall())"
+)
+
+
+def fresh_reader(home: Path, sql: str) -> str:
+    """What a separate, short-lived process (``retro show``, a monitor) sees."""
+    done = subprocess.run(
+        [sys.executable, "-c", READER, str(state_dir_of(home) / "state.db"), sql],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    return done.stdout.strip()
+
+
+def test_a_fresh_reader_sees_running_and_the_final_state_while_the_lease_is_renewed(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "blocked")
+    # The post-retro hook is a fresh process that runs while the CLI is still alive: what it
+    # sees is what any other process sees (a clean exit would checkpoint a lost log into the file).
+    from_hook = tmp_path / "from-hook.txt"
+    code = (
+        "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);"
+        "print(c.execute('SELECT state,reason FROM retros').fetchall())"
+    )
+    db = state_dir_of(corpus.home) / "state.db"
+    command = f"python3 -c {json.dumps(code)} {db} > {from_hook}"
+    write_config(
+        corpus.home,
+        f"hooks:\n  post-retro:\n    - cmd: {json.dumps(command)}\n      timeout: 20\n",
+    )
+    cs.script("exec", step(exec_doc(CSID, "blocked"), exit=13, sleep=1.0))
+    monkeypatch.setattr(lease, "RENEW_SECONDS", 1.0)  # the renewal thread reopens the store
+    seen: list[str] = []
+    real_run = gw.run
+
+    def run(argv: Any, **kwargs: Any) -> Any:
+        if list(argv)[1:2] == ["status"]:  # after the exec, the renewal has reopened the store
+            seen.append(fresh_reader(corpus.home, "SELECT state FROM retros"))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(gw, "run", run)
+    gw.tick = 1.0  # the renewal thread's monotonic clock moves: it renews during the exec
+    error_of(launch(capsys, gw), 13)
+    gw.tick = 0.0
+    assert seen == ["[('running',)]"]
+    assert from_hook.read_text().strip() == "[('escalated', 'session_blocked')]"
+
+
+# --- R2 to R6, R10, R12, R14 ---------------------------------------------------------------------
+
+
+def test_a_start_that_exits_0_with_an_unparseable_document_still_cleans_up_its_id(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs)
+    cs.script("start", step(f"started {CSID} (not a document)", unvalidated=True))
+    error_of(launch(capsys, gw), 12, "claude_session_error")
+    row = the_retro(corpus.home)
+    assert (row["state"], row["csession_id"]) == ("failed", CSID)
+    assert keys(cs) == ["start", "forget"]
+    [session] = rows(corpus.home, "retro_sessions")
+    assert session["forgotten_at"] is not None
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "needs-input"])
+@pytest.mark.parametrize("sandbox", [False, None])
+def test_under_required_an_escalated_run_without_an_active_sandbox_is_failed(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    outcome: str,
+    sandbox: bool | None,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, outcome, sandbox=sandbox)
+    error_of(launch(capsys, gw), 12, "claude_session_error")
+    row = the_retro(corpus.home)
+    assert (row["state"], row["reason"]) == ("failed", "claude_session_error")
+
+
+def test_under_required_a_failed_exec_row_keeps_its_own_mapping_without_a_sandbox(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "timeout", sandbox=False)
+    envelope = error_of(launch(capsys, gw), 16)
+    assert envelope["details"]["outcome"] == "timeout"
+
+
+def test_an_escalated_run_with_an_active_sandbox_stays_escalated(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "blocked", sandbox=True)
+    error_of(launch(capsys, gw), 13)
+    assert the_retro(corpus.home)["state"] == "escalated"
+
+
+def test_a_launch_outcome_that_disagrees_with_the_exit_is_an_error_and_keeps_the_start(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs)
+    doc = exec_doc(CSID, "not-started", phase="launch", end_reason="never_adopted")
+    cs.script("exec", step(doc, exit=14, unvalidated=True))  # the outcome says 12 or so
+    error_of(launch(capsys, gw), 12, "claude_session_error")
+    assert len(rows(corpus.home, "retro_starts")) == 1
+
+
+def test_a_launch_outcome_with_an_exit_outside_11_to_13_is_not_refunded(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs)
+    doc = exec_doc(CSID, "not-started", phase="launch", end_reason="never_adopted")
+    doc["exit_code"] = 14
+    cs.script("exec", step(doc, exit=14, unvalidated=True))
+    error_of(launch(capsys, gw), 12, "claude_session_error")
+    assert len(rows(corpus.home, "retro_starts")) == 1
+
+
+def test_files_the_step_refused_are_not_deleted(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs)
+    mine: list[Path] = []
+
+    def refuse(gateway: Any, state: str, retro_id: str, token: str, fenced: Any) -> Any:
+        keep = Path(state) / "prompts" / retro_id / "mine"
+        keep.parent.mkdir(parents=True, mode=0o700)
+        keep.write_text("not the tool's")
+        mine.append(keep)
+        raise retrofiles.FilesError("a directory of the retro already exists")
+
+    monkeypatch.setattr(retrofiles, "write_run_files", refuse)
+    error_of(launch(capsys, gw), 12, "store_unwritable")
+    assert mine and mine[0].read_text() == "not the tool's"
+
+
+def test_a_failing_log_after_the_insert_does_not_strand_the_row(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs)
+
+    def boom(self: Any) -> None:
+        raise CliError("internal", "scripted log failure")
+
+    monkeypatch.setattr(retrostate.Retro, "log", boom)
+    result = launch(capsys, gw)
+    assert result.code != 0
+    row = the_retro(corpus.home)
+    assert row["state"] == "digesting" and row["lease_pid"] is None  # recovery may take it at once
+
+
+def test_a_term_ignoring_exec_child_is_killed_after_the_grace_and_only_it(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done")
+    pid_file = tmp_path / "exec.pid"
+    cs.script("exec", step(exec_doc(CSID, "done"), sleep=60, pid_file=pid_file, ignore_term=True))
+    monkeypatch.setattr(retrolaunch, "EXEC_SLACK", 0.0)
+    monkeypatch.setattr(retrolaunch, "TERM_WAIT", 1.0)
+    started = time.monotonic()
+    error_of(launch(capsys, gw, "--timeout", "1s"), 12, "claude_session_error")
+    assert time.monotonic() - started < 40
+    pid = int(pid_file.read_text())
+    assert wait_until_gone(pid, 10.0)  # SIGKILL after the grace: it ignored SIGTERM
+    assert _alive(os.getpid())  # this process was not signalled

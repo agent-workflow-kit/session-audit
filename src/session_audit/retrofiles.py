@@ -20,13 +20,15 @@ session directory: no transcript text.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat as statmod
 from dataclasses import dataclass
 from typing import BinaryIO
 
+from .errors import CliError
 from .fencing import FencedDigest
-from .gateway import Gateway
+from .gateway import DirHandle, Gateway
 from .removal import remove_tree
 from .store import DIR_MODE, FILE_MODE
 
@@ -197,6 +199,9 @@ def write_run_files(
     """Step 15's files. ``digest_sha256`` of the manifest equals the SHA-256 of the written digest
     bytes (checked here, an internal error otherwise). Raises ``FilesError`` after removing what
     this call created."""
+    sha = hashlib.sha256(fenced.digest_bytes).hexdigest()
+    if sha != fenced.digest_sha256 or fenced.manifest.get("digest_sha256") != sha:
+        raise CliError("internal", "the digest hash does not match its manifest")
     made: list[str] = []
     try:
         for parent in (DIGESTS, PROMPTS, OUTCOMES):
@@ -218,18 +223,35 @@ def write_run_files(
     )
 
 
+def _open_parent(gateway: Gateway, state: str, parent: str) -> DirHandle | None:
+    """``<state>/<parent>`` opened through the state directory with ``O_NOFOLLOW`` (a symlinked
+    parent is never entered). None when it does not exist; ``OSError`` for a symlink or a
+    non-directory."""
+    try:
+        root = gateway.open_root(state)
+    except FileNotFoundError:
+        return None
+    try:
+        return root.open_dir(parent.encode())
+    except FileNotFoundError:
+        return None
+    finally:
+        root.close()
+
+
 def delete_local(gateway: Gateway, state: str, retro_id: str) -> bool:
     """Remove ``prompts/<retro_id>/`` and ``outcomes/<retro_id>.json``; True when both are gone
-    (Collect and cleanup, ``delete_local``). Idempotent; never follows a symlink. The digest
-    directory stays until its retention expires."""
+    (Collect and cleanup, ``delete_local``). Idempotent; never follows a symlink, a symlinked
+    ``prompts`` or ``outcomes`` included (that is "not clean", nothing is deleted through it). The
+    digest directory stays until its retention expires."""
     clean = True
     for parent, name in ((PROMPTS, retro_id), (OUTCOMES, f"{retro_id}.json")):
         try:
-            handle = gateway.open_root(os.path.join(state, parent))
-        except FileNotFoundError:
-            continue
+            handle = _open_parent(gateway, state, parent)
         except OSError:
             clean = False
+            continue
+        if handle is None:
             continue
         try:
             clean &= remove_tree(gateway, handle, name.encode())
@@ -241,13 +263,14 @@ def delete_local(gateway: Gateway, state: str, retro_id: str) -> bool:
 
 
 def remove_digest(gateway: Gateway, state: str, retro_id: str) -> bool:
-    """Remove ``digests/<retro_id>/`` (a retro that never ran has no use for its digest)."""
+    """Remove ``digests/<retro_id>/`` (a retro that never ran has no use for its digest); a
+    symlinked ``digests`` is not entered (False)."""
     try:
-        handle = gateway.open_root(os.path.join(state, DIGESTS))
-    except FileNotFoundError:
-        return True
+        handle = _open_parent(gateway, state, DIGESTS)
     except OSError:
         return False
+    if handle is None:
+        return True
     try:
         return remove_tree(gateway, handle, retro_id.encode())
     except OSError:

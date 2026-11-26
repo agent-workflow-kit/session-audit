@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from session_audit import retrofiles
+from session_audit.errors import CliError
 from session_audit.fencing import FencedDigest
 from session_audit.gateway import SystemGateway
 from session_audit.retrofiles import FilesError, delete_local, write_run_files
@@ -218,3 +219,49 @@ def test_the_module_names_the_directories() -> None:
         "prompts",
         "outcomes",
     )
+
+
+def test_a_digest_that_does_not_match_its_hash_creates_nothing(state: Path) -> None:
+    good = fenced()
+    wrong_bytes = FencedDigest(
+        b"tampered\n", good.digest_sha256, good.manifest, good.manifest_bytes, (), "n", "15", 2
+    )
+    wrong_manifest = FencedDigest(
+        good.digest_bytes,
+        good.digest_sha256,
+        {**good.manifest, "digest_sha256": "0" * 64},
+        good.manifest_bytes,
+        (),
+        "n",
+        "15",
+        2,
+    )
+    for candidate in (wrong_bytes, wrong_manifest):
+        with pytest.raises(CliError) as caught:
+            write_run_files(SystemGateway(), str(state), RETRO, TOKEN, candidate)
+        assert caught.value.code == "internal"
+    assert not (state / "digests").exists() and not (state / "prompts").exists()
+
+
+@pytest.mark.parametrize("parent", ["prompts", "outcomes"])
+def test_delete_local_does_not_enter_a_symlinked_parent(
+    state: Path, tmp_path: Path, parent: str
+) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / RETRO).mkdir()
+    (target / RETRO / "keep").write_text("x")
+    (target / f"{RETRO}.json").write_text("x")
+    (state / parent).symlink_to(target)
+    assert delete_local(SystemGateway(), str(state), RETRO) is False
+    assert (target / RETRO / "keep").read_text() == "x"
+    assert (target / f"{RETRO}.json").exists()
+
+
+def test_remove_digest_does_not_enter_a_symlinked_parent(state: Path, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    (target / RETRO).mkdir(parents=True)
+    (target / RETRO / "keep").write_text("x")
+    (state / "digests").symlink_to(target)
+    assert retrofiles.remove_digest(SystemGateway(), str(state), RETRO) is False
+    assert (target / RETRO / "keep").read_text() == "x"

@@ -4,6 +4,8 @@ row of the table in order, hostile documents, and the id, directory and project 
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -508,6 +510,27 @@ def test_a_malformed_id_or_directory_is_refused(csid: str, directory: Any) -> No
     assert validated_session(csid, directory, ROOT) is None
 
 
+def test_a_symlinked_session_directory_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / CSID).symlink_to(elsewhere)
+    assert validated_session(CSID, f"{root}/{CSID}", str(root)) is None
+
+
+def test_a_real_session_directory_names_its_project_from_the_unresolved_path(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    (real / CSID).mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real)  # the root itself is reached through a link: kept as written
+    got = validated_session(CSID, f"{link}/{CSID}", str(link))
+    assert got is not None
+    assert got[2] == re.sub(r"[^A-Za-z0-9]", "-", f"{link}/{CSID}/work")
+
+
 def test_a_project_directory_name_over_200_characters_is_refused() -> None:
     root = "/" + "a" * 190
     assert validated_session(CSID, f"{root}/{CSID}", root) is None
@@ -567,6 +590,8 @@ def test_an_outcome_document_is_parsed_for_its_run() -> None:
     [
         lambda d: d.update(csession_id="cs-aaaaaaac"),
         lambda d: d.update(run=2),
+        lambda d: d.update(run=True),
+        lambda d: d.update(run=1.0),
         lambda d: d.update(phase="other"),
         lambda d: d.update(outcome="Timeout"),
         lambda d: d.update(end_reason="exit 3"),

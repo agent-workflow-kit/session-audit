@@ -299,7 +299,11 @@ def insert_retro(
         lease.RENEW_SECONDS,
     )
     row = Retro(ctx, store, held, retro_id, prepared.key, again_of)
-    row.log()
+    try:
+        row.log()
+    except BaseException:
+        row.release()  # the row is not stranded behind a lease nobody renews
+        raise
     return Inserted(row)
 
 
