@@ -420,7 +420,8 @@ def _derive_batch(
             "f.last_version, f.cost_state_usd, f.cost_invalid, f.parse_errors, f.unknown_lines, "
             "f.min_ts, f.max_ts, f.rules_version, "
             "(SELECT COUNT(*) FROM agents a WHERE a.session_id = s.session_id) "
-            f"FROM sessions s LEFT JOIN files f ON f.id = s.main_file_id WHERE s.session_id IN ({marks})",
+            "FROM sessions s LEFT JOIN files f ON f.id = s.main_file_id "
+            f"WHERE s.session_id IN ({marks})",
             ids,
         )
     }
@@ -593,7 +594,9 @@ def agent_values(
 ) -> tuple[list[AgentValues], bool]:
     """The agents of a session by tokens descending, then agent id, at most ``limit``, and
     whether more existed. An agent with no counted events has zero counters."""
-    total = conn.execute("SELECT COUNT(*) FROM agents WHERE session_id = ?", (session_id,)).fetchone()[0]
+    total = conn.execute(
+        "SELECT COUNT(*) FROM agents WHERE session_id = ?", (session_id,)
+    ).fetchone()[0]
     head = conn.execute(
         "SELECT a.agent_id, a.parent_tool_call_id, a.agent_type FROM agents a "
         "LEFT JOIN (SELECT agent_id, SUM(input_tokens + output_tokens + cache_read_tokens "
