@@ -39,6 +39,8 @@ class Steps(retro.NoSteps):
         result = retrorecovery.run_housekeeping(ctx)
         if result.recovered:
             ctx.note(f"session-audit: recovered {len(result.recovered)} retro(s)")
+        for warning in result.warnings:
+            ctx.note(f"session-audit: warning: {warning}")
 
     def skill_preflight(self, ctx: Context, skill: str) -> plugins.PluginChoice:
         return plugins.skill_preflight(

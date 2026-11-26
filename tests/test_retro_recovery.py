@@ -45,7 +45,7 @@ from .recoveryhelp import (
     session_rows,
     touch_old,
 )
-from .retrohelp import RETRO, RetroGateway, live_lease, rid
+from .retrohelp import RETRO, RetroGateway, live_lease, retro_ctx, rid
 from .schemas import validate
 
 
@@ -827,6 +827,25 @@ def test_prune_dry_run_only_lists(
     after = retro_rows(corpus.home)
     assert {k: tuple(v) for k, v in after.items()} == {k: tuple(v) for k, v in before.items()}
     assert session_rows(corpus.home)[CSID]["cleanup_state"] == "pending"
+
+
+def test_retro_run_housekeeping_prints_the_deferred_warning_once_on_stderr(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from session_audit.commands import retro_run
+
+    gw.version = None
+    gw.fake = None
+    running_with_session(corpus)
+    orphan(corpus.home, rid(1), state="digesting")
+    ctx = retro_ctx(gw, corpus)
+    ctx.quiet = False
+    try:
+        retro_run.Steps().housekeeping(ctx)
+    finally:
+        ctx.close()
+    err = capsys.readouterr().err
+    assert err.count("session-audit: warning: recovery_deferred") == 1, err
 
 
 def test_prune_without_claude_session_defers_with_a_warning_and_still_runs_retention(

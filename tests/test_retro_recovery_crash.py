@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -386,6 +387,19 @@ def _hard_crash_points() -> dict[str, Any]:
 HARD_CRASHES = _hard_crash_points()
 
 
+def reap_within(pid: int, seconds: float) -> int:
+    """Reap the forked child within a bound; on timeout kill that recorded pid only, then fail."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            return status
+        time.sleep(0.05)
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    pytest.fail(f"the housekeeping child did not exit within {seconds:.0f} seconds")
+
+
 @pytest.mark.parametrize("point", list(HARD_CRASHES))
 def test_a_housekeeping_killed_hard_is_converged_by_the_next_one(
     corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, tmp_path: Path, point: str
@@ -407,7 +421,7 @@ def test_a_housekeeping_killed_hard_is_converged_by_the_next_one(
             housekeep(gw, corpus, hooks=settings)
         finally:
             os._exit(0)
-    _pid, status = os.waitpid(pid, 0)  # reaped: the child exits by itself
+    status = reap_within(pid, 60.0)
     assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 137, status
     expire_lease(corpus.home)
     housekeep(gw, corpus, hooks=settings)
