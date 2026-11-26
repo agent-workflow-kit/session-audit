@@ -191,3 +191,38 @@ def test_without_proc_the_start_time_comes_from_ps(tmp_path: Path) -> None:
     assert token
     assert gw.process_start(os.getpid()) == token
     assert gw.process_start(2**22 + 12345) is None
+
+
+def test_an_interrupt_on_the_term_signal_still_kills_the_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = (
+        "import signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    popen = subprocess.Popen(
+        [sys.executable, "-c", script], stdout=subprocess.PIPE, start_new_session=True
+    )
+    pgid = popen.pid
+    real = gateway._signal_group
+
+    def interrupted(group: int, sig: int) -> None:
+        if sig == gateway.signal.SIGTERM:
+            raise KeyboardInterrupt
+        real(group, sig)
+
+    try:
+        assert popen.stdout is not None
+        assert popen.stdout.readline().strip() == b"ready"  # TERM is ignored from here on
+        monkeypatch.setattr(gateway, "_signal_group", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            SystemGateway(kill_grace=30)._end_group(popen)
+        assert popen.poll() is not None  # SIGKILL ran and the leader was reaped
+        assert not gateway._group_alive(pgid)
+    finally:
+        real(pgid, gateway.signal.SIGKILL)
+        popen.wait()
+        if popen.stdout is not None:
+            popen.stdout.close()

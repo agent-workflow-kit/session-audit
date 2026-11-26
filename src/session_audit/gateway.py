@@ -556,14 +556,15 @@ class SystemGateway:
 
     def _end_group(self, popen: subprocess.Popen[bytes]) -> None:
         """SIGTERM the child's process group, wait ``kill_grace`` for the leader, SIGKILL the
-        group (the SIGKILL runs even when the wait is interrupted). The group id is the leader's
-        pid. Once the leader is reaped the id is no longer held for us: it could be reused only by
-        a new group leader after a pid wrap within milliseconds, an accepted window (the group
-        cannot be told apart from a reused one by any check that does not use the same id)."""
+        group (the SIGKILL runs even when the SIGTERM or the wait is interrupted). The group id
+        is the leader's pid. Once the leader is reaped the id is no longer held for us: it could
+        be reused only by a new group leader after a pid wrap within milliseconds, an accepted
+        window (the group cannot be told apart from a reused one by any check that does not
+        use the same id)."""
         pgid = popen.pid
-        deadline = time.monotonic() + self._kill_grace
-        _signal_group(pgid, signal.SIGTERM)
         try:
+            deadline = time.monotonic() + self._kill_grace
+            _signal_group(pgid, signal.SIGTERM)
             try:
                 popen.wait(timeout=self._kill_grace)
             except subprocess.TimeoutExpired:
