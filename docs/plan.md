@@ -33,7 +33,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `usage` | 2 | aggregation for `usage`, `sessions`, `show`, `export` |
 | `harness` | 3 | claude-session snapshots and the query-time join |
 | `redact` | 4 | redaction patterns (package data), literal masks, encoded-value check, the cut and `digest_text` |
-| `digest` | 4 | numbering, selection, budget, redaction, sanitizing, fencing, manifest |
+| `digest` | 4 | items, numbering, selection, budget, redaction and sanitizing, the stored-offset read (#21); fencing, section hashes, manifest (#22) |
 | `retro` | 5 | order of checks, key, preflight, plan check, launch, outcome mapping, collect and cleanup, recovery |
 | `hooks` | 5 | hook execution, process groups, payloads |
 | `artifact` | 6 | closed-shape validation and evidence checks |

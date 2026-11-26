@@ -574,3 +574,32 @@ def test_a_total_cap_walks_every_session_by_priority_newest_first_then_ref(
     assert kept == ["s2.i001"]  # both errors are priority 0: the newest first
     out = build(capsys, gw, corpus, ingest_first=False, max_bytes=fixed + 2 * one_item)
     assert [i.ref for s in out.sections for i in s.items] == ["s1.i001", "s2.i001"]
+
+
+def test_an_item_that_does_not_fit_stops_the_walk_so_nothing_of_a_lower_priority_is_kept(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(corpus, S1, [result("t", "E" * 250, 1, error=True), prompt("s", 2)])
+    (section,) = build(capsys, gw, corpus).sections
+    small = [i.ref for i in section.items if i.kind == "prompt"]
+    cap = section_bytes(section, small) + 5  # room for the small prompt, not for the error
+    out = build(capsys, gw, corpus, ingest_first=False, session_max_bytes=cap)
+    assert out.sections[0].items == ()
+    assert out.sections[0].dropped_session_cap == 2
+
+
+def test_a_read_error_is_a_changed_transcript(
+    corpus: Corpus,
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write(corpus, S1, [prompt("x", 1)])
+    build(capsys, gw, corpus)
+
+    def failing(*args: object) -> object:
+        raise OSError(5, "input/output error")
+
+    monkeypatch.setattr(digest, "_stored_items", failing)
+    out = build(capsys, gw, corpus, ingest_first=False)
+    assert [(s.session_id, s.reason) for s in out.skipped] == [(S1, "transcript_changed")]

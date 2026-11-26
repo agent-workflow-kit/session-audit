@@ -13,9 +13,10 @@ Two kinds of output, kept in two types so the second can never be stored by acci
 - ``Event``: one counted fact. It holds only numbers, capped names and ids (never text); #13 turns
   it into an ``events`` row (dedupe key, ref, owner) and #14 derives the session values.
 - ``DigestItem``: a fact only the digest uses (prompt, assistant text, a tool call's argument
-  summary, a rejection). It carries conversation text, lives in memory, is produced only when the
-  context asks for it (``ParseContext.digest``) and has no path to the store: the events table
-  has no text column, ``Event`` has no text field, and a test pins both.
+  summary, and the text of a tool error, denial, rejection or interruption; a compaction has
+  none). It carries conversation text, lives in memory, is produced only when the context asks
+  for it (``ParseContext.digest``) and has no path to the store: the events table has no text
+  column, ``Event`` has no text field, and a test pins both.
 
 ``FileFacts`` is the per-file accumulator: line counts and the facts of the ``files`` row. It also
 gives each event its slot (Counting rules 3), which needs the file order.
@@ -477,7 +478,9 @@ class _Line:
             return
         self._digest_user(obj, results)
 
-    def _digest_user(self, obj: dict[str, object], results: list[tuple[int, dict[str, object]]]) -> None:
+    def _digest_user(
+        self, obj: dict[str, object], results: list[tuple[int, dict[str, object]]]
+    ) -> None:
         """The digest items of a user line: one tool_error item per error result, a denial (or,
         for ``user-rejected``, a rejection) item, an interruption item, else a prompt. Their text
         is the result's (or the message's) text; successful tool output is never an item."""

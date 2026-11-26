@@ -544,6 +544,8 @@ turns: items before the first prompt form turn 0; each prompt item starts a turn
 | `Skill` | the skill name |
 | any other (including `mcp__*`, `WebSearch`) | the tool name only |
 
+Item details (conservative readings the implementation fixes): a `tool_error` item exists for every error `tool_result` block and takes that block's text; a `denial` item takes the first `tool_result` block's text, else the line's text; a denial line with `toolDenialKind: user-rejected` gives a `rejection` item instead of a `denial` item; an `interruption` item takes the line's text; a denial, rejection or interruption line is never also a prompt; a `compaction` item has no text. A `tool_call` item reads as the tool name, then its summary (every summary is cut to `digest.arg_chars`). The assistant text blocks of one message id are joined while no item of another message intervenes between them. An agent whose parent call is not in the main file, or that has none, has a `subagent` item with time `-` placed after every other item. A turn is the prompts before an item by line offset; a turn costs the tokens of its counted messages and a turn of cost 0 is never one of the three most expensive. The `tokens` metrics are the main agent's (Counting rules 8), the other counters include agents.
+
 **Budget.** A total cap (`digest.max_bytes`, default 200 KB) and a per-session cap (`digest.session_max_bytes`) apply. Per-session header bytes count toward both caps; a session whose header alone exceeds the per-session cap keeps only its header. Items are kept in this priority order (copy):
 
 ```text
@@ -555,6 +557,8 @@ per session: sort items by (priority, newest first); keep while session bytes + 
 total: sort every kept item of every session by (priority, newest first, ref); keep while total + size <= digest.max_bytes
 render each session's kept items in time order; coverage counts the drops per cap
 ```
+
+"Keep while it fits" stops at the first item that does not fit, so no item of a lower priority is kept past a dropped one. Sizes are bytes of the final rendered UTF-8 text. The total cap counts the title, the rule, the totals line, both fence lines of each kept session (a 32-hex nonce) and every header, whose `dropped:` line is counted at its widest (both numbers as wide as the session's item count), so the final digest is never larger than the sum counted. When the fixed parts and the headers alone exceed the total cap, every item is dropped by the total cap and the digest is larger than the cap (the caller decides what to do with it).
 
 The manifest `coverage` is `{digest_bytes, items_total, items_kept, sessions: [{ref, items_total, items_kept, dropped: {session_cap, total_cap}}]}`: per session how many items existed, how many were kept and how many were dropped by the per-session cap and by the total cap. The stored Retro object repeats it.
 

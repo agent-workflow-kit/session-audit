@@ -45,6 +45,7 @@ from __future__ import annotations
 import bisect
 import dataclasses
 import heapq
+import sqlite3
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -595,15 +596,13 @@ class _Run:
     def __init__(
         self,
         ctx: Context,
-        conn: object,
+        conn: sqlite3.Connection,
         discovery: Discovery,
         redactor: redact.Redactor,
         scope: DigestScope,
     ) -> None:
-        import sqlite3
-
         self.ctx = ctx
-        self.conn = cast(sqlite3.Connection, conn)
+        self.conn = conn
         self.discovery = discovery
         self.redactor = redactor
         self.scope = scope
@@ -646,6 +645,9 @@ class _Run:
             if check.reason is not Reason.CONTINUE:
                 opened.close()
                 return "transcript_changed"
+        except OSError:
+            opened.close()
+            return "transcript_changed"
         except BaseException:
             opened.close()
             raise
@@ -748,7 +750,7 @@ def _scan_session(run: _Run, session_id: str) -> _Scan | str:
                     index = parents.get(raw.tool_use_id[:NAME_CAP])
                     if index is not None and index not in found:
                         found[index] = (raw.ts, raw.offset, raw.block)
-        except _Changed:
+        except (_Changed, OSError):  # a read error is a file that is not what was counted
             return "transcript_changed"
         scan.main_items = len(scan)
         _add_agents(run, scan, agents, found)
@@ -832,7 +834,7 @@ def _render_kept(run: _Run, scan: _Scan, wanted: set[int]) -> dict[int, str] | N
                     if not same:
                         return None
                     texts[seq] = text
-        except _Changed:
+        except (_Changed, OSError):
             return None
         return texts if count == scan.main_items else None
     finally:
@@ -842,12 +844,11 @@ def _render_kept(run: _Run, scan: _Scan, wanted: set[int]) -> dict[int, str] | N
 # --- the candidates ----------------------------------------------------------------------------
 
 
-def _candidates(conn: object, ctx: Context, scope: DigestScope) -> list[tuple[int | None, str]]:
+def _candidates(
+    db: sqlite3.Connection, ctx: Context, scope: DigestScope
+) -> list[tuple[int | None, str]]:
     """``(ended_ms, session_id)`` of every session the scope matches: by ``ended_at`` descending,
     null last, then id (Order of checks 7)."""
-    import sqlite3
-
-    db = cast(sqlite3.Connection, conn)
     found: list[tuple[int | None, str]] = []
     if scope.session_ids:
         filters = dataclasses.replace(scope.filters, include_self_improve=True)
@@ -1049,7 +1050,7 @@ def _attempt(
 
 
 def _build(
-    ctx: Context, conn: object, scope: DigestScope, redactor: redact.Redactor
+    ctx: Context, conn: sqlite3.Connection | None, scope: DigestScope, redactor: redact.Redactor
 ) -> DigestResult:
     empty = DigestResult((), (), 0, 0, Metrics(), (), ctx.settings.digest.max_bytes, False)
     if conn is None:
@@ -1057,9 +1058,7 @@ def _build(
     candidates = _candidates(conn, ctx, scope)
     if not candidates:
         return empty
-    import sqlite3
-
-    view = _View(cast(sqlite3.Connection, conn))
+    view = _View(conn)
     with open_discovery(
         ctx.gateway,
         ctx.settings.transcript_roots,
@@ -1079,10 +1078,8 @@ def _build(
 class _View:
     """The read connection as ``store_excluded`` and ``store_pruned_at`` want a store."""
 
-    def __init__(self, conn: object) -> None:
-        import sqlite3
-
-        self.conn = cast(sqlite3.Connection, conn)
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
 
 
 def build_digest(ctx: Context, scope: DigestScope, *, env: Mapping[str, str]) -> DigestResult:
