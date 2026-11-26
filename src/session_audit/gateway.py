@@ -13,6 +13,14 @@ The API is defined here once; later modules extend it only when they need a new 
   (success) or exit 10 (not found, for claude-session).
 - Untrusted or agent-generated text goes in ``stdin`` or in files, never in argv or env.
 
+- ``run_hook`` runs a configured hook command with ``/bin/sh -c`` (the command text is trusted
+  config text, never built from untrusted input), in its own process group, with the caller's
+  extra variables added to the inherited environment and the payload on stdin. Unlike ``run``, the
+  whole group is ended (SIGTERM, ``kill_grace`` seconds, SIGKILL) when the leader exits normally
+  too, so a grandchild the hook left behind never outlives the call, and stdout beyond the cap is
+  discarded (the hook keeps running) instead of failing the call. A member that left the group
+  with ``setsid`` is out of reach: a documented residual risk.
+
 todo(#28): ``run`` is the only way to start a program, and it returns when the program is gone.
 The hooks and the retro need a spawn/handle API instead: start the program, hand back its exact
 child PID (to signal that process, not the group), wait up to a given time (30 s for the retro),
@@ -46,6 +54,8 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_STDOUT_LIMIT = 8 * 1024 * 1024
 KILL_GRACE_SECONDS = 5.0
+HOOK_STDOUT_LIMIT = 64 * 1024 + 1  # a hook's stdout is read to 64 KiB; one byte more marks excess
+HOOK_SHELL = "/bin/sh"
 CRONTAB_TIMEOUT_SECONDS = 30.0
 
 
@@ -165,6 +175,23 @@ class Gateway(Protocol):
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
     ) -> CallResult: ...
+
+    def run_hook(
+        self,
+        command: str,
+        *,
+        timeout: float,
+        stdin: str,
+        env_extra: Mapping[str, str],
+        stdout_limit: int = HOOK_STDOUT_LIMIT,
+        cancel: threading.Event | None = None,
+    ) -> CallResult:
+        """Run ``command`` with ``/bin/sh -c`` (see the module text). ``stdout`` holds at most
+        ``stdout_limit`` characters, bytes beyond it are dropped, so a result longer than
+        ``stdout_limit - 1`` bytes means the hook printed more than the caller reads. When
+        ``cancel`` is set while the hook runs, its group is ended as for a timeout (the status is
+        ``TIMEOUT``): the caller uses it to end a hook that must not outlive an interrupt."""
+        ...
 
     def now(self) -> datetime:
         """The current time, timezone-aware UTC."""
@@ -316,6 +343,27 @@ class SystemGateway:
             argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, stdout_limit=stdout_limit
         )
 
+    def run_hook(
+        self,
+        command: str,
+        *,
+        timeout: float,
+        stdin: str,
+        env_extra: Mapping[str, str],
+        stdout_limit: int = HOOK_STDOUT_LIMIT,
+        cancel: threading.Event | None = None,
+    ) -> CallResult:
+        return self._run(
+            [HOOK_SHELL, "-c", command],
+            timeout=timeout,
+            stdin=stdin,
+            env={**os.environ, **env_extra},
+            stdout_limit=stdout_limit,
+            reap_group=True,
+            discard_excess=True,
+            cancel=cancel,
+        )
+
     def _run(
         self,
         argv: Sequence[str],
@@ -326,6 +374,9 @@ class SystemGateway:
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
         escape: bool = False,
+        reap_group: bool = False,
+        discard_excess: bool = False,
+        cancel: threading.Event | None = None,
     ) -> CallResult:
         """``run``; with ``escape`` the bytes that are not UTF-8 survive a round trip: output is
         decoded and stdin encoded with ``surrogateescape`` (the crontab, which holds the user's
@@ -368,7 +419,9 @@ class SystemGateway:
             )
         except OSError as exc:
             return CallResult(CallStatus.SPAWN_FAILED, detail=f"{type(exc).__name__}: {exc}")
-        return self._supervise(popen, data, timeout, stdout_limit, escape)
+        return self._supervise(
+            popen, data, timeout, stdout_limit, escape, reap_group, discard_excess, cancel
+        )
 
     def _supervise(
         self,
@@ -377,8 +430,12 @@ class SystemGateway:
         timeout: float,
         stdout_limit: int,
         escape: bool = False,
+        reap_group: bool = False,
+        discard_excess: bool = False,
+        cancel: threading.Event | None = None,
     ) -> CallResult:
         deadline = time.monotonic() + timeout
+        ended = False
         out = bytearray()
         err = bytearray()
         pending = stdin if stdin is not None else b""
@@ -397,7 +454,7 @@ class SystemGateway:
                     popen.stdin.close()
             failure: CallStatus | None = None
             while True:
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline or (cancel is not None and cancel.is_set()):
                     failure = CallStatus.TIMEOUT
                     break
                 for key, _ in selector.select(_POLL_SECONDS):
@@ -406,12 +463,9 @@ class SystemGateway:
                     else:
                         stream, buffer = key.data
                         self._drain(stream, selector, buffer, stdout_limit)
-                if len(out) > stdout_limit:
+                if len(out) > stdout_limit and not discard_excess:
                     failure = CallStatus.OUTPUT_LIMIT
                     break
-                # todo(#25): when the leader exits normally the rest of its group is left running
-                # (only a failed call ends the group). The hooks (``sh -c``) must kill the
-                # remaining group members after a normal leader exit; add that with #25.
                 if popen.poll() is not None:
                     # The leader is gone: take what is already buffered, then stop reading, so a
                     # grandchild holding a pipe open cannot keep this call waiting.
@@ -421,6 +475,7 @@ class SystemGateway:
                         )
                     break
             if failure is not None:
+                ended = True
                 self._end_group(popen)
                 return CallResult(
                     failure,
@@ -428,9 +483,13 @@ class SystemGateway:
                     stderr=_text(err[:stdout_limit]),
                     detail=_detail(failure, timeout, stdout_limit),
                 )
+            if reap_group:
+                # The leader exited on its own: whatever it left in its group is ended now.
+                ended = True
+                self._end_group(popen)
             code = popen.returncode
             text = _text(out[:stdout_limit], escape), _text(err[:stdout_limit])
-            if len(out) > stdout_limit:
+            if len(out) > stdout_limit and not discard_excess:
                 return CallResult(
                     CallStatus.OUTPUT_LIMIT,
                     stdout=text[0],
@@ -445,7 +504,9 @@ class SystemGateway:
             for stream in (popen.stdin, popen.stdout, popen.stderr):
                 if stream is not None:
                     stream.close()
-            if popen.poll() is None:  # never leave a child behind on an unexpected error
+            if not ended and (reap_group or popen.poll() is None):
+                # Never leave a child (or, for a hook, a group the leader left) behind on an
+                # unexpected error or an interrupt.
                 self._end_group(popen)
 
     @staticmethod
@@ -495,21 +556,27 @@ class SystemGateway:
 
     def _end_group(self, popen: subprocess.Popen[bytes]) -> None:
         """SIGTERM the child's process group, wait ``kill_grace`` for the leader, SIGKILL the
-        group. The group id is the leader's pid, which is ours until the leader is reaped."""
+        group (the SIGKILL runs even when the SIGTERM or the wait is interrupted). The group id
+        is the leader's pid. Once the leader is reaped the id is no longer held for us: it could
+        be reused only by a new group leader after a pid wrap within milliseconds, an accepted
+        window (the group cannot be told apart from a reused one by any check that does not
+        use the same id)."""
         pgid = popen.pid
-        deadline = time.monotonic() + self._kill_grace
-        _signal_group(pgid, signal.SIGTERM)
         try:
-            popen.wait(timeout=self._kill_grace)
-        except subprocess.TimeoutExpired:
-            pass
-        # The leader may exit on TERM at once while other members still clean up: they get what
-        # is left of the grace too. No member left (the common case) means no sleep at all. A
-        # group id cannot be reused while a member lives, so polling it is safe.
-        while _group_alive(pgid) and time.monotonic() < deadline:
-            time.sleep(_GROUP_POLL_SECONDS)
-        _signal_group(pgid, signal.SIGKILL)
-        popen.wait()
+            deadline = time.monotonic() + self._kill_grace
+            _signal_group(pgid, signal.SIGTERM)
+            try:
+                popen.wait(timeout=self._kill_grace)
+            except subprocess.TimeoutExpired:
+                pass
+            # The leader may exit on TERM at once while other members still clean up: they get
+            # what is left of the grace too. No member left (the common case) means no sleep at
+            # all. A group id cannot be reused while a member lives, so polling it is safe.
+            while _group_alive(pgid) and time.monotonic() < deadline:
+                time.sleep(_GROUP_POLL_SECONDS)
+        finally:
+            _signal_group(pgid, signal.SIGKILL)
+            popen.wait()
 
     def now(self) -> datetime:
         return datetime.now(UTC)

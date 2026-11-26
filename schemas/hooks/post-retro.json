@@ -27,18 +27,15 @@
       "pattern": "^ev-[a-z2-7]{26}(?![\\s\\S])"
     },
     "labels": {
-      "type": "object",
-      "propertyNames": {
-        "$ref": "../defs.json#/$defs/label_key"
-      },
-      "additionalProperties": {
+      "type": "array",
+      "items": {
         "type": "string",
-        "minLength": 0,
-        "maxLength": 256,
-        "pattern": "^[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
+        "minLength": 3,
+        "maxLength": 321,
+        "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])"
       },
-      "maxProperties": 0,
-      "description": "Always {}: retros have no labels."
+      "maxItems": 0,
+      "description": "key=value strings; always [] today: retros have no labels."
     },
     "retro_id": {
       "$ref": "../defs.json#/$defs/retro_id"

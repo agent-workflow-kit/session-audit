@@ -37,7 +37,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `retro` | 5 | order of checks, key, launch, outcome mapping, collect and cleanup, recovery (#23: steps 1 to 10; #26 onward: the rest) |
 | `plugins` | 5 | the skill preflight (#24): skill name, bundled plugin as a package resource, credential locations, the descriptor walk of configured plugin directories |
 | `launchplan` | 5 | the `start` flags, the launch plan check against the pinned plan schema's fields, `project_dir_name` (#24) |
-| `hooks` | 5 | hook execution, process groups, payloads |
+| `hooks` | 5 | hook execution, process groups, payloads (#25: `hooks.py`, `Gateway.run_hook`; the `retro run` call sites are #26) |
 | `artifact` | 6 | closed-shape validation and evidence checks |
 | `cron` | 7 | managed block read, write, dry run |
 | `plugin/` | 6 | skill, marker reference, retro profile, manifest |
