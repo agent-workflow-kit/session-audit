@@ -61,15 +61,21 @@ def fire(sig: signal.Signals) -> None:
     os.kill(os.getpid(), sig)  # this process: its handler runs in the main thread
 
 
-def firing(real: Callable[..., Any], sig: signal.Signals) -> Any:
-    """``real`` preceded by the signal, the first time it is called only (a second signal would
-    be the double signal of the tests below)."""
+def fire_pair(sig: signal.Signals, second: bool) -> None:
+    """The signal, and with ``second`` a SIGTERM right behind it (the exit at once)."""
+    fire(sig)
+    if second:
+        fire(signal.SIGTERM)
+
+
+def firing(real: Callable[..., Any], sig: signal.Signals, second: bool = False) -> Any:
+    """``real`` preceded by the signal, the first time it is called only."""
     used: list[bool] = []
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if not used:
             used.append(True)
-            fire(sig)
+            fire_pair(sig, second)
         return real(*args, **kwargs)
 
     return wrapper
@@ -128,59 +134,78 @@ EXPECT: dict[str, tuple[str, str | None, bool, int]] = {
 }
 
 
-def arm(monkeypatch: pytest.MonkeyPatch, gw: RetroGateway, point: str, sig: signal.Signals) -> None:
+def arm(
+    monkeypatch: pytest.MonkeyPatch,
+    gw: RetroGateway,
+    point: str,
+    sig: signal.Signals,
+    second: bool = False,
+) -> None:
     launcher = retrolaunch.Launcher
     if point == "plan_check":
-        monkeypatch.setattr(launchplan, "plan_check", firing(launchplan.plan_check, sig))
+        monkeypatch.setattr(launchplan, "plan_check", firing(launchplan.plan_check, sig, second))
     elif point == "insert":
-        monkeypatch.setattr(retrolaunch, "insert_retro", firing(retrolaunch.insert_retro, sig))
+        monkeypatch.setattr(
+            retrolaunch, "insert_retro", firing(retrolaunch.insert_retro, sig, second)
+        )
     elif point == "pre_retro_hook":
         monkeypatch.setattr(
-            retrolaunch.hooks, "run_hooks", firing(retrolaunch.hooks.run_hooks, sig)
+            retrolaunch.hooks, "run_hooks", firing(retrolaunch.hooks.run_hooks, sig, second)
         )
     elif point == "mark_running":
-        monkeypatch.setattr(launcher, "_mark_running", firing(launcher._mark_running, sig))
+        monkeypatch.setattr(launcher, "_mark_running", firing(launcher._mark_running, sig, second))
     elif point == "write_files":
         monkeypatch.setattr(
             retrolaunch.retrofiles,
             "write_run_files",
-            firing(retrolaunch.retrofiles.write_run_files, sig),
+            firing(retrolaunch.retrofiles.write_run_files, sig, second),
         )
     elif point == "start":
         real_run = gw.run
 
         def run(argv: Any, **kwargs: Any) -> Any:
             if list(argv)[1:2] == ["start"] and "--dry-run" not in argv:  # not the plan check
-                fire(sig)
+                fire_pair(sig, second)
             return real_run(argv, **kwargs)
 
         monkeypatch.setattr(gw, "run", run)
     elif point == "record_session":
-        monkeypatch.setattr(launcher, "_record", firing(launcher._record, sig))
+        monkeypatch.setattr(launcher, "_record", firing(launcher._record, sig, second))
     elif point == "exec":
         real_spawn = gw.spawn
 
         def spawn(argv: Any, **kwargs: Any) -> Any:
             handle = real_spawn(argv, **kwargs)
-            fire(sig)  # the child runs: the first look of the wait loop forwards the signal
+            real_wait = handle.wait
+            fired: list[bool] = []
+
+            def wait(timeout: float) -> bool:
+                if not fired:  # the child runs: the wait loop's first look forwards the signal
+                    fired.append(True)
+                    fire_pair(sig, second)
+                return bool(real_wait(timeout))
+
+            handle.wait = wait  # type: ignore[method-assign]
             return handle
 
         monkeypatch.setattr(gw, "spawn", spawn)
     elif point == "collect":
-        monkeypatch.setattr(launcher, "_collect", firing(launcher._collect, sig))
+        monkeypatch.setattr(launcher, "_collect", firing(launcher._collect, sig, second))
     elif point == "artifact_check":
         monkeypatch.setattr(
             retrolaunch,
             "validate_and_store_artifact",
-            firing(retrolaunch.validate_and_store_artifact, sig),
+            firing(retrolaunch.validate_and_store_artifact, sig, second),
         )
     elif point == "final_write":
-        monkeypatch.setattr(launcher, "_end", firing(launcher._end, sig))
+        monkeypatch.setattr(launcher, "_end", firing(launcher._end, sig, second))
     elif point == "cleanup":
-        monkeypatch.setattr(retrolaunch, "cleanup", firing(retrolaunch.cleanup, sig))
+        monkeypatch.setattr(retrolaunch, "cleanup", firing(retrolaunch.cleanup, sig, second))
     elif point == "post_hooks":
         monkeypatch.setattr(
-            retrostate_module.Retro, "post_hooks", firing(retrostate_module.Retro.post_hooks, sig)
+            retrostate_module.Retro,
+            "post_hooks",
+            firing(retrostate_module.Retro.post_hooks, sig, second),
         )
     else:  # pragma: no cover
         raise AssertionError(point)

@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "vetoed",
+    "details": {
+      "reason": "hook_vetoed",
+      "retro_id": "ra-aaaaaaaa"
+    },
+    "message": "a pre-retro hook vetoed the run"
+  }
+}

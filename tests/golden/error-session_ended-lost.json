@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "session_ended",
+    "details": {
+      "outcome": "lost",
+      "retro_id": "ra-aaaaaaaa"
+    },
+    "message": "the retro session ended without a finished retro"
+  }
+}

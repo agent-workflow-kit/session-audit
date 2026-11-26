@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "artifact_invalid",
+    "details": {
+      "reason": "no_artifact",
+      "retro_id": "ra-aaaaaaaa"
+    },
+    "message": "the retro session finished but its artifact is missing or invalid"
+  }
+}
