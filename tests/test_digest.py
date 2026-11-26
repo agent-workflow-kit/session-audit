@@ -8,8 +8,6 @@ from pathlib import Path
 import pytest
 
 from session_audit import digest
-from session_audit.digest import DigestScope
-from session_audit.sessionquery import Filters
 
 from .digesthelp import (
     NONCE,
@@ -28,10 +26,8 @@ from .digesthelp import (
     turn_line,
     write,
 )
-from .eventhelp import raw, ts
-from .fake_gateway import FakeClock
+from .eventhelp import raw
 from .ingesthelp import S1, S2, S3, Corpus, TickGateway
-from .storehelp import ClockedGateway
 
 FENCE_OPEN = f'<untrusted source="transcript" id="{NONCE}">'
 FENCE_CLOSE = f'</untrusted id="{NONCE}">'
@@ -58,7 +54,7 @@ def item_lines(section: digest.SessionSection) -> list[str]:
     return [i.line for i in section.items]
 
 
-# --- the layout -----------------------------------------------------------------------------------
+# --- the layout ----------------------------------------------------------------------------------
 
 
 def test_the_layout_of_one_session_is_exact(
@@ -116,7 +112,7 @@ def test_the_digest_is_exactly_the_bytes_it_counts(
     assert cov["digest_bytes"] == len(data)
 
 
-# --- items ------------------------------------------------------------------------------------------
+# --- items ---------------------------------------------------------------------------------------
 
 
 def test_every_item_kind_in_time_order_and_numbered_before_any_drop(
@@ -277,7 +273,7 @@ def test_text_is_cut_after_redaction_never_inside_a_marker(
     assert item.text == "x" * 25  # the marker would end past the cut: it moves back, whole
 
 
-# --- times -----------------------------------------------------------------------------------------
+# --- times ---------------------------------------------------------------------------------------
 
 
 def test_time_order_ties_by_line_offset_and_null_times_follow_the_last_timestamp(
@@ -322,7 +318,7 @@ def test_times_are_utc_second_precision_with_z(
     assert any(line.startswith("time: ") for line in section.header)
 
 
-# --- subagents ----------------------------------------------------------------------------------------
+# --- subagents -----------------------------------------------------------------------------------
 
 
 def test_one_subagent_item_per_agent_at_its_parent_calls_time(
@@ -383,7 +379,7 @@ def test_one_subagent_item_per_agent_at_its_parent_calls_time(
     assert section.metrics.agents == 3 and "agents=3" in section.header[-1]
 
 
-# --- numbering ----------------------------------------------------------------------------------------
+# --- numbering -----------------------------------------------------------------------------------
 
 
 def test_sessions_are_numbered_by_started_at_null_last_then_id(
@@ -426,7 +422,7 @@ def test_an_id_never_changes_with_the_budget(
             assert [s.ref for s in small.sections] == [s.ref for s in full.sections]
 
 
-# --- the budget ---------------------------------------------------------------------------------------
+# --- the budget ----------------------------------------------------------------------------------
 
 
 FENCE = lambda s: (FENCE_OPEN, FENCE_CLOSE)  # noqa: E731
@@ -470,7 +466,7 @@ def test_priority_errors_then_three_most_expensive_turns_then_the_rest_newest_fi
     assert everything.items_total == len(everything.items) == 13
     order = [
         "s1.i013",  # priority 0
-        "s1.i010", "s1.i009", "s1.i008", "s1.i007", "s1.i004", "s1.i003",  # priority 1, newest first
+        "s1.i010", "s1.i009", "s1.i008", "s1.i007", "s1.i004", "s1.i003",  # priority 1
         "s1.i012", "s1.i011", "s1.i006", "s1.i005", "s1.i002", "s1.i001",  # priority 2
     ]  # fmt: skip
 
