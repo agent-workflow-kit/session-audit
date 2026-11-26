@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import ROUND_HALF_UP, Decimal, localcontext
@@ -37,6 +38,8 @@ BATCH = 200  # session ids per SQL statement; bounds memory and parameters
 USD_STEP = Decimal("0.000001")  # dollars are shown in whole micro-dollars
 UNKNOWN_MODEL = "unknown"  # a message with no model name
 TOKENS_PER_PRICE = Decimal(1_000_000)  # prices are USD per million tokens
+EXACT_PRECISION = 80  # digits: a sum of capped counts times prices never rounds at this width
+MAX_AGENTS = 1000  # agent_values cap; keeps its bound parameters below SQLite's limit
 
 # The closed set of quality flags, in output order (schemas/defs.json ``flag``).
 FLAGS = (
@@ -73,6 +76,37 @@ COUNTED_EVENTS_SQL = (
     "e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_5m_tokens, "
     f"e.cache_write_1h_tokens, e.seconds, {SECONDS_MS_SQL.replace('seconds', 'e.seconds')} "
     "AS seconds_ms FROM events e WHERE e.counted = 1)"
+)
+
+# The statements of ``_derive_batch``; ``{marks}`` is the placeholder list of the session ids.
+# Kept as constants so a test can run ``EXPLAIN QUERY PLAN`` on the real text.
+COUNTS_SQL = (
+    "SELECT session_id, SUM(kind = 'tool_call'), SUM(kind = 'tool_error'), "
+    "SUM(kind = 'denial'), SUM(kind = 'interruption'), SUM(kind = 'compaction'), "
+    f"SUM(kind = 'turn'), SUM(CASE WHEN kind = 'turn' THEN {SECONDS_MS_SQL} END), "
+    "MIN(ts), MAX(ts), SUM(ts IS NULL), SUM(kind = 'message') "
+    "FROM events WHERE counted = 1 AND session_id IN ({marks}) GROUP BY session_id"
+)
+# One row per (session, model name): all-agent sums, then the main agent's sums. A message
+# with no model is the model ``unknown`` (so it merges with one named that).
+TOKENS_SQL = (
+    "SELECT session_id, COALESCE(model, 'unknown'), "
+    "SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens), "
+    "SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens), "
+    "SUM(CASE WHEN agent_id IS NULL THEN input_tokens ELSE 0 END), "
+    "SUM(CASE WHEN agent_id IS NULL THEN output_tokens ELSE 0 END), "
+    "SUM(CASE WHEN agent_id IS NULL THEN cache_read_tokens ELSE 0 END), "
+    "SUM(CASE WHEN agent_id IS NULL THEN cache_write_5m_tokens ELSE 0 END), "
+    "SUM(CASE WHEN agent_id IS NULL THEN cache_write_1h_tokens ELSE 0 END) "
+    "FROM events WHERE counted = 1 AND kind = 'message' AND session_id IN ({marks}) "
+    "GROUP BY session_id, COALESCE(model, 'unknown')"
+)
+# Sessions whose main file holds a copy (counted 0) owned by another session.
+COPIED_SQL = (
+    "SELECT DISTINCT s.session_id FROM sessions s "
+    "JOIN events c ON c.file_id = s.main_file_id AND c.counted = 0 "
+    "WHERE s.session_id IN ({marks}) AND EXISTS (SELECT 1 FROM events o "
+    "WHERE o.key = c.key AND o.counted = 1 AND o.session_id IS NOT s.session_id)"
 )
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -185,14 +219,22 @@ class TokenSums:
         }
 
 
+@contextmanager
+def exact() -> Iterator[None]:
+    """A ``Decimal`` context wide enough that no dollar sum, rounding or compare loses a digit
+    (the default 28 digits can round a large sum the wrong way)."""
+    with localcontext() as ctx:
+        ctx.prec = EXACT_PRECISION
+        yield
+
+
 def _dec(price: float) -> Decimal:
     return Decimal(repr(float(price)))
 
 
 def tokens_cost(price: ModelPrice, sums: TokenSums) -> Decimal:
     """The exact (unrounded) USD of ``sums`` at ``price`` (USD per million tokens)."""
-    with localcontext() as ctx:
-        ctx.prec = 80
+    with exact():
         total = (
             sums.input * _dec(price.input)
             + sums.output * _dec(price.output)
@@ -205,7 +247,8 @@ def tokens_cost(price: ModelPrice, sums: TokenSums) -> Decimal:
 
 def usd(value: Decimal) -> Decimal:
     """Round to whole micro-dollars, half up."""
-    return value.quantize(USD_STEP, rounding=ROUND_HALF_UP)
+    with exact():
+        return value.quantize(USD_STEP, rounding=ROUND_HALF_UP)
 
 
 def usd_json(value: Decimal) -> float:
@@ -228,13 +271,17 @@ class CostAccumulator:
 
     def add(self, model: str | None, sums: TokenSums) -> None:
         name = UNKNOWN_MODEL if model is None else model
-        if name not in self._lookups:
-            self._lookups[name] = self._prices.lookup(name)
-        price = self._lookups[name]
+        if name in self._lookups:
+            price = self._lookups[name]
+        else:
+            price = self._prices.lookup(name)
+            if len(self._lookups) < 1024:  # a session with many names must not grow without bound
+                self._lookups[name] = price
         if price is None:
             self.unknown_tokens += sums.total
         else:
-            self.estimated += tokens_cost(price, sums)
+            with exact():
+                self.estimated += tokens_cost(price, sums)
 
 
 def reported_from_file(value: float | None) -> Decimal | None:
@@ -253,11 +300,14 @@ def reported_from_file(value: float | None) -> Decimal | None:
 
 def is_mismatch(reported: Decimal | None, estimated: Decimal, margin: float) -> bool:
     """``cost_mismatch``: a reported figure that differs from the estimate by more than
-    ``margin`` times the estimate (both bases stay unchanged). With an estimate of 0 any
-    positive reported figure is a mismatch. Compared exactly in ``Decimal``."""
+    ``margin`` times the estimate, both as printed (the estimate rounded to micro-dollars; both
+    figures stay unchanged). With a printed estimate of 0 any positive reported figure is a
+    mismatch. Compared exactly in ``Decimal``; ``unknown_tokens`` plays no part."""
     if reported is None:
         return False
-    return abs(reported - estimated) > Decimal(repr(float(margin))) * estimated
+    with exact():
+        printed = usd(estimated)
+        return abs(reported - printed) > Decimal(repr(float(margin))) * printed
 
 
 def reported_sum(
@@ -274,7 +324,8 @@ def reported_sum(
     for value in reported:
         if value is None:
             return None
-        total += value
+        with exact():
+            total += value
         seen = True
     return total if seen else None
 
@@ -434,46 +485,24 @@ def _derive_batch(
             ids,
         )
     }
-    counts = {
-        row[0]: row
-        for row in conn.execute(
-            "SELECT session_id, SUM(kind = 'tool_call'), SUM(kind = 'tool_error'), "
-            "SUM(kind = 'denial'), SUM(kind = 'interruption'), SUM(kind = 'compaction'), "
-            f"SUM(kind = 'turn'), SUM(CASE WHEN kind = 'turn' THEN {SECONDS_MS_SQL} END), "
-            "MIN(ts), MAX(ts), SUM(ts IS NULL), SUM(kind = 'message') "
-            f"FROM events WHERE counted = 1 AND session_id IN ({marks}) GROUP BY session_id",
-            ids,
-        )
-    }
-    per_model: dict[str, dict[str, TokenSums]] = {}
+    counts = {row[0]: row for row in conn.execute(COUNTS_SQL.format(marks=marks), ids)}
+    # One pass over (session, model) rows: cost is added per row and only the top MAX_MODELS
+    # names are kept, so memory is bounded however many distinct model names a session has.
+    accumulators: dict[str, CostAccumulator] = {}
+    shown: dict[str, list[tuple[int, str]]] = {}  # (-tokens, name) candidates
     subagent_total: dict[str, int] = {}
     main_total: dict[str, TokenSums] = {}
-    for row in conn.execute(
-        "SELECT session_id, agent_id IS NULL, model, SUM(input_tokens), SUM(output_tokens), "
-        "SUM(cache_read_tokens), SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens) "
-        f"FROM events WHERE counted = 1 AND kind = 'message' AND session_id IN ({marks}) "
-        "GROUP BY session_id, agent_id IS NULL, model",
-        ids,
-    ):
-        sid, is_main, model, *sums = row
-        token_sums = TokenSums(*sums)
-        name = UNKNOWN_MODEL if model is None else model
-        models = per_model.setdefault(sid, {})
-        models[name] = models.get(name, TokenSums()) + token_sums
-        if is_main:
-            main_total[sid] = main_total.get(sid, TokenSums()) + token_sums
-        else:
-            subagent_total[sid] = subagent_total.get(sid, 0) + token_sums.total
-    copied = {
-        row[0]
-        for row in conn.execute(
-            "SELECT DISTINCT s.session_id FROM sessions s "
-            "JOIN events c ON c.file_id = s.main_file_id AND c.counted = 0 "
-            "WHERE s.session_id IN (" + marks + ") AND EXISTS (SELECT 1 FROM events o "
-            "WHERE o.key = c.key AND o.counted = 1 AND o.session_id IS NOT s.session_id)",
-            ids,
-        )
-    }
+    for sid, name, *sums in conn.execute(TOKENS_SQL.format(marks=marks), ids):
+        everyone, main = TokenSums(*sums[:5]), TokenSums(*sums[5:])
+        accumulators.setdefault(sid, CostAccumulator(settings.prices)).add(name, everyone)
+        main_total[sid] = main_total.get(sid, TokenSums()) + main
+        subagent_total[sid] = subagent_total.get(sid, 0) + everyone.total - main.total
+        top = shown.setdefault(sid, [])
+        top.append((-everyone.total, name))
+        if len(top) >= 2 * MAX_MODELS:
+            top.sort()
+            del top[MAX_MODELS:]
+    copied = {row[0] for row in conn.execute(COPIED_SQL.format(marks=marks), ids)}
 
     for sid in ids:
         row = identity.get(sid)
@@ -507,11 +536,8 @@ def _derive_batch(
             started = min(file_mins) if file_mins else None
             ended = max(file_maxs) if file_maxs else None
 
-        accumulator = CostAccumulator(settings.prices)
-        models = per_model.get(sid, {})
-        for model, sums in models.items():
-            accumulator.add(model, sums)
-        ordered = sorted(models, key=lambda m: (-models[m].total, m))[:MAX_MODELS]
+        accumulator = accumulators.get(sid) or CostAccumulator(settings.prices)
+        ordered = [name for _, name in sorted(shown.get(sid, []))[:MAX_MODELS]]
 
         reported = None
         if main_file_id is not None and sid not in copied:
@@ -590,10 +616,12 @@ class AgentValues:
 
 
 def agent_values(
-    conn: sqlite3.Connection, session_id: str, *, limit: int = 1000
+    conn: sqlite3.Connection, session_id: str, *, limit: int = MAX_AGENTS
 ) -> tuple[list[AgentValues], bool]:
     """The agents of a session by tokens descending, then agent id, at most ``limit``, and
-    whether more existed. An agent with no counted events has zero counters."""
+    whether more existed. An agent with no counted events has zero counters. ``limit`` is
+    clamped to 0..``MAX_AGENTS`` (the documented cap)."""
+    limit = max(0, min(limit, MAX_AGENTS))
     total = conn.execute(
         "SELECT COUNT(*) FROM agents WHERE session_id = ?", (session_id,)
     ).fetchone()[0]
@@ -654,13 +682,16 @@ def agent_values(
 
 
 __all__ = [
+    "COPIED_SQL",
     "COUNTED_EVENTS_SQL",
+    "COUNTS_SQL",
     "FLAGS",
     "MAX_MODELS",
     "RESOLVED_MODEL_SQL",
     "RESOLVED_TOOL_SQL",
     "SECONDS_MS_SQL",
     "SLOT_SECONDS",
+    "TOKENS_SQL",
     "UNKNOWN_MODEL",
     "AgentValues",
     "Bucketer",

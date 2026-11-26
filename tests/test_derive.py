@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import sqlite3
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -189,21 +190,46 @@ def test_iso_week_crosses_the_year_boundary() -> None:
     assert bucket_key(slot_at("2027-01-04T00:00:00Z"), "week", z) == "2027-W01"
 
 
+def day_counts(zone: str, first: str, count: int, step: int) -> dict[str | None, int]:
+    out: dict[str | None, int] = defaultdict(int)
+    bucketer = Bucketer(ZoneInfo(zone))
+    start = slot_at(first)
+    for i in range(0, count, step):
+        out[bucketer.key(start + i, "day")] += 1
+    return dict(out)
+
+
 def test_a_changed_time_zone_rebuckets_the_same_slots_exactly() -> None:
-    slots = [slot_at("2026-03-08T00:00:00Z") + i for i in range(0, 96 * 3, 5)]
+    # every 5th slot of 3 days from 2026-03-08T00:00Z; expected counts worked out by hand:
+    # UTC days hold slots 0-95, 96-191, 192-287; Kathmandu (+05:45 = 23 slots) days start at
+    # slots -23, 73, 169, 265
+    args = ("2026-03-08T00:00:00Z", 96 * 3, 5)
+    assert day_counts("UTC", *args) == {"2026-03-08": 20, "2026-03-09": 19, "2026-03-10": 19}
+    assert day_counts("Asia/Kathmandu", *args) == {
+        "2026-03-08": 15,
+        "2026-03-09": 19,
+        "2026-03-10": 19,
+        "2026-03-11": 5,
+    }
 
-    def totals(zone: str) -> dict[str | None, int]:
-        out: dict[str | None, int] = defaultdict(int)
-        bucketer = Bucketer(ZoneInfo(zone))
-        for s in slots:
-            out[bucketer.key(s, "day")] += 1
-        return dict(out)
 
-    assert sum(totals("Asia/Kathmandu").values()) == len(slots)
-    assert totals("UTC") != totals("Asia/Kathmandu")
-    assert totals("Asia/Kathmandu") == totals("Asia/Kathmandu")  # stable, no state
-    # switching back gives the first answer again: nothing was denormalized
-    assert totals("UTC") == totals("UTC")
+def test_dst_fall_back_rebuckets_exactly_by_zone() -> None:
+    # every slot of 4 days from 2026-10-31T00:00Z; New York leaves DST at 06:00Z on 11-01, so
+    # local 11-01 (04:00Z to 05:00Z the next day) holds 25 hours = 100 slots
+    args = ("2026-10-31T00:00:00Z", 96 * 4, 1)
+    assert day_counts("UTC", *args) == {
+        "2026-10-31": 96,
+        "2026-11-01": 96,
+        "2026-11-02": 96,
+        "2026-11-03": 96,
+    }
+    assert day_counts("America/New_York", *args) == {
+        "2026-10-30": 16,
+        "2026-10-31": 96,
+        "2026-11-01": 100,
+        "2026-11-02": 96,
+        "2026-11-03": 76,
+    }
 
 
 def test_out_of_range_slot_is_no_key() -> None:
@@ -277,6 +303,16 @@ def test_dollars_are_exact_and_rounded_once() -> None:
     assert derive.usd_json(Decimal("123456.1234565")) == 123456.123457
 
 
+def test_estimate_sums_without_28_digit_rounding() -> None:
+    # 2**32 tokens at 1e6 per million is 4294967296 dollars; adding half a micro-dollar minus a
+    # hair must not round up in the default 28-digit context
+    acc = CostAccumulator(prices(m=price(1e6, 0.4999999999999999, 0, 0)))
+    acc.add("m", TokenSums(input=2**32, output=1))
+    assert derive.usd(acc.estimated) == Decimal("4294967296.000000")
+    assert derive.usd_json(acc.estimated) == 4294967296.0
+    assert not is_mismatch(Decimal("4294967296.000000"), acc.estimated, 0.0)
+
+
 def test_reported_from_file_is_finite_nonnegative_micro_dollars() -> None:
     assert derive.reported_from_file(0.1 + 0.2) == Decimal("0.300000")
     assert derive.reported_from_file(None) is None
@@ -293,6 +329,17 @@ def test_mismatch_margin_is_relative_to_the_estimate() -> None:
     assert not is_mismatch(None, est, 0.10)
     assert is_mismatch(Decimal("0.01"), Decimal(0), 0.10)
     assert not is_mismatch(Decimal(0), Decimal(0), 0.10)
+
+
+def test_mismatch_compares_the_printed_estimate() -> None:
+    # an estimate of 4e-7 prints as 0.000000: a reported 0 matches
+    assert not is_mismatch(Decimal(0), Decimal("0.0000004"), 0.10)
+    # printed 1.000000 against reported 1.1 at margin 0.1: exactly on the margin
+    assert not is_mismatch(Decimal("1.1"), Decimal("0.9999996"), 0.10)
+    assert is_mismatch(Decimal("1.100001"), Decimal("0.9999996"), 0.10)
+    # margin 0: an estimate that prints as 0.5 equals reported 0.5
+    assert not is_mismatch(Decimal("0.5"), Decimal("0.5000004"), 0.0)
+    assert is_mismatch(Decimal("0.500001"), Decimal("0.5000004"), 0.0)
 
 
 def test_reported_sum_is_all_or_null() -> None:
@@ -473,7 +520,7 @@ def test_flags_no_usage_no_timestamps_cost_invalid_and_order(env: Env) -> None:
         "a",
         [
             raw({"type": "system", "subtype": "compact_boundary", "uuid": "c"}),
-            cost_line(float("1e999") if False else "x"),
+            cost_line("x"),
         ],
     )
     env.ingest("a")
@@ -588,6 +635,23 @@ def test_matching_cost_lines_set_no_flag_and_the_last_line_counts(env: Env) -> N
     assert "cost_mismatch" not in v.flags
 
 
+def test_unknown_tokens_do_not_suppress_the_mismatch_comparison(env: Env) -> None:
+    # a deliberate choice (interface.md, Cost): a partial estimate is compared as it stands
+    env.write(
+        "a",
+        [
+            assistant("2026-03-01T10:00:00.000Z", "m1", model="claude-sonnet-4-5", inp=1_000_000),
+            assistant("2026-03-01T10:01:00.000Z", "m2", model="no-such-model", inp=1_000_000),
+            cost_line(5.0),
+        ],
+    )
+    env.ingest("a")
+    v = one(env)
+    assert v.cost.unknown_tokens == 1_000_000
+    assert v.cost.estimated == Decimal(3)
+    assert "cost_mismatch" in v.flags
+
+
 def test_agents_are_in_the_estimate(env: Env) -> None:
     env.write(
         "a", [assistant("2026-03-01T10:00:00.000Z", "m1", model="claude-sonnet-4-5", inp=1_000_000)]
@@ -634,7 +698,8 @@ def test_a_copy_owned_by_an_agent_of_the_same_session_keeps_the_reported_figure(
     assert v.cost.reported == Decimal(3)
 
 
-def test_copies_dropped_never_feeds_reported(env: Env) -> None:
+def test_copies_dropped_is_invisible_to_the_copied_history_test(env: Env) -> None:
+    # residual risk (interface.md, Counting rules 2): a dropped copy leaves reported_usd as read
     env.write("a", [assistant("2026-03-01T10:00:00.000Z", "m1", out=1), cost_line(1.0)])
     env.ingest("a")
     env.conn.execute("UPDATE files SET copies_dropped = 99")
@@ -719,6 +784,12 @@ def recount(env: Env, settings: Settings, sid: str) -> dict:
                 main = [main[0] + i, main[1] + o, main[2] + r, main[3] + w5 + w1]
             else:
                 sub += i + o + r + w5 + w1
+    file_range = env.conn.execute(
+        "SELECT MIN(f.min_ts), MAX(f.max_ts) FROM files f WHERE f.id IN "
+        "(SELECT main_file_id FROM sessions WHERE session_id = ? "
+        "UNION SELECT file_id FROM agents WHERE session_id = ?)",
+        (sid, sid),
+    ).fetchone()
     exact = Fraction(0)
     unknown = 0
     for name, (i, o, r, w5, w1) in per_model.items():
@@ -740,8 +811,8 @@ def recount(env: Env, settings: Settings, sid: str) -> dict:
         "sub": sub,
         "counts": counts,
         "active": None if ms_total is None else ms_total / 1000,
-        "start": min(tss) if tss else None,
-        "end": max(tss) if tss else None,
+        "start": min(tss) if tss else file_range[0],
+        "end": max(tss) if tss else file_range[1],
         "exact": exact,
         "unknown": unknown,
         "models": set(per_model),
@@ -861,9 +932,7 @@ def test_session_values_equal_an_independent_recount(tmp_path: Path, seed: int) 
                 c["compaction"],
             )
             assert v.active_seconds == want["active"]
-            assert (v.started_ms, v.ended_ms) == (want["start"], want["end"]) or want[
-                "start"
-            ] is None
+            assert (v.started_ms, v.ended_ms) == (want["start"], want["end"])
             assert Fraction(v.cost.estimated) == want["exact"]
             assert v.cost.unknown_tokens == want["unknown"]
             assert set(v.models) == want["models"]
@@ -942,22 +1011,113 @@ def test_untouched_agent_row_has_zero_counters(env: Env) -> None:
     assert agents[0].tokens.total == 0 and agents[0].models == ()
 
 
+def plan_of(env: Env, sql: str, params: tuple) -> str:
+    return " ".join(r[3] for r in env.conn.execute("EXPLAIN QUERY PLAN " + sql, params))
+
+
 def test_queries_use_the_indexes(env: Env) -> None:
     env.write("a", [assistant("2026-03-01T10:00:00.000Z", "m1", out=1)])
     env.ingest("a")
-    plan = " ".join(
-        r[3]
-        for r in env.conn.execute(
-            "EXPLAIN QUERY PLAN SELECT session_id, SUM(kind = 'tool_call') FROM events "
-            "WHERE counted = 1 AND session_id IN (?) GROUP BY session_id",
-            (SESSION_A,),
+    ids = (SESSION_A,)
+    assert "events_session_counted" in plan_of(env, derive.COUNTS_SQL.format(marks="?"), ids)
+    assert "events_session_counted" in plan_of(env, derive.TOKENS_SQL.format(marks="?"), ids)
+    assert "events_file" in plan_of(env, derive.COPIED_SQL.format(marks="?"), ids)
+
+
+def test_agent_values_clamps_limit_to_the_documented_cap(env: Env) -> None:
+    env.write("a", [assistant("2026-03-01T10:00:00.000Z", "m1", out=1)])
+    env.ingest("a")
+    file_id = env.conn.execute("SELECT main_file_id FROM sessions").fetchone()[0]
+    columns = [r[1] for r in env.conn.execute("PRAGMA table_info(agents)")]
+    row = {"session_id": SESSION_A, "file_id": file_id}
+    for k in range(1001):
+        values = {**row, "agent_id": f"agent{k:04d}"}
+        names = [c for c in columns if c in values]
+        env.conn.execute(
+            f"INSERT INTO agents ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
+            [values[c] for c in names],
         )
+    env.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 1002)
+    agents, truncated = agent_values(env.conn, SESSION_A, limit=10**6)
+    assert len(agents) == 1000 and truncated
+    assert agent_values(env.conn, SESSION_A, limit=-1)[0] == []
+
+
+def test_session_without_a_main_file_has_no_reported_cost_and_a_directory_project(
+    env: Env,
+) -> None:
+    env.write("g", [assistant("2026-03-01T10:00:00.000Z", "g1", out=1)])
+    env.ingest("g", agent="g1")
+    assert env.conn.execute("SELECT main_file_id FROM sessions").fetchone()[0] is None
+    v = one(env)
+    assert v.cost.reported is None
+    assert v.project == "proj" and "project_from_dir" in v.flags
+
+
+def test_old_rules_is_raised_by_an_agent_file_alone(env: Env) -> None:
+    env.write("a", [assistant("2026-03-01T10:00:00.000Z", "m1", out=1)])
+    env.write("g", [assistant("2026-03-01T10:00:00.000Z", "g1", out=1)])
+    env.ingest("a")
+    env.ingest("g", agent="g1")
+    env.conn.execute("UPDATE meta SET value = 2 WHERE key = 'rules_version'")
+    env.conn.execute("UPDATE files SET rules_version = 2 WHERE id = ?", (main_file(env),))
+    assert "old_rules" in one(env).flags
+    env.conn.execute("UPDATE files SET rules_version = 2")
+    assert "old_rules" not in one(env).flags
+
+
+def main_file(env: Env) -> int:
+    return env.conn.execute("SELECT main_file_id FROM sessions").fetchone()[0]
+
+
+def test_models_with_equal_tokens_order_by_name(env: Env) -> None:
+    env.write(
+        "a",
+        [
+            assistant("2026-03-01T10:00:00.000Z", "m1", model="model-b", out=5),
+            assistant("2026-03-01T10:00:01.000Z", "m2", model="model-a", out=5),
+            assistant("2026-03-01T10:00:02.000Z", "m3", model="model-c", out=9),
+        ],
     )
-    assert "events_session_counted" in plan
-    plan = " ".join(
-        r[3]
-        for r in env.conn.execute(
-            "EXPLAIN QUERY PLAN SELECT 1 FROM events c WHERE c.file_id = ? AND c.counted = 0", (1,)
-        )
+    env.ingest("a")
+    assert one(env).models == ("model-c", "model-a", "model-b")
+
+
+def test_agent_models_order_by_tokens_then_name(env: Env) -> None:
+    env.write("a", [assistant("2026-03-01T10:00:00.000Z", "m1", out=1)])
+    env.write(
+        "g",
+        [
+            assistant("2026-03-01T10:00:00.000Z", "g1", model="model-b", out=5),
+            assistant("2026-03-01T10:00:01.000Z", "g2", model="model-a", out=5),
+            assistant("2026-03-01T10:00:02.000Z", "g3", model="model-c", out=9),
+        ],
     )
-    assert "events_file" in plan
+    env.ingest("a")
+    env.ingest("g", agent="g1")
+    agents, _ = agent_values(env.conn, SESSION_A)
+    assert agents[0].models == ("model-c", "model-a", "model-b")
+
+
+def test_reported_sum_is_null_when_filtered_or_split_even_for_real_sessions(env: Env) -> None:
+    env.write("a", [assistant("2026-03-01T10:00:00.000Z", "m1", out=1), cost_line(1.0)])
+    env.ingest("a")
+    reported = (v.cost.reported for v in iter_session_values(env.conn, SETTINGS))
+    assert reported_sum(reported) == Decimal(1)
+    reported = (v.cost.reported for v in iter_session_values(env.conn, SETTINGS))
+    assert reported_sum(reported, time_filtered=True) is None
+    reported = (v.cost.reported for v in iter_session_values(env.conn, SETTINGS))
+    assert reported_sum(reported, splits_session=True) is None
+
+
+def test_times_fall_back_to_an_agent_files_range_alone(env: Env) -> None:
+    env.write("a", [raw({"type": "system", "subtype": "compact_boundary", "uuid": "c"})])
+    env.write(
+        "g",
+        [cost_line(1.0, "2026-03-01T08:00:00.000Z"), cost_line(2.0, "2026-03-01T09:00:00.000Z")],
+    )
+    env.ingest("a")
+    env.ingest("g", agent="g1")
+    v = one(env)
+    assert derive.format_ms(v.started_ms) == "2026-03-01T08:00:00Z"
+    assert derive.format_ms(v.ended_ms) == "2026-03-01T09:00:00Z"
