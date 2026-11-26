@@ -120,12 +120,17 @@ def freshness(conn: sqlite3.Connection | None) -> dict[str, str | None]:
     }
 
 
+_MAX_MS_DIGITS = 20
+
+
 def whole_ms(value: Any) -> int | None:
     """An untyped ``meta`` value as epoch milliseconds: a non-negative integer or ASCII digit
     text (None for anything else; ``validate`` and ``store`` share this rule)."""
     if isinstance(value, bool):
         return None
     if isinstance(value, str) and value.isascii() and value.isdigit():
+        if len(value) > _MAX_MS_DIGITS:  # not a plausible epoch; int() also caps at 4300 digits
+            return None
         value = int(value)
     if not isinstance(value, int) or value < 0:
         return None

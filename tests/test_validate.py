@@ -608,6 +608,16 @@ def test_a_last_complete_ingest_that_is_not_a_whole_number_counts_as_never(
     assert validate(capsys, gw).doc["warnings"] == ["ingest_stale"]
 
 
+def test_a_last_complete_ingest_of_max_length_digit_text_counts_as_never_ingested(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path
+) -> None:
+    gw.crontab = managed_block()
+    set_meta(home, "last_complete_ingest_at", "9" * 4096)
+    run = validate(capsys, gw)
+    assert run.code == 0
+    assert run.doc["warnings"] == ["ingest_stale"]  # same as never ingested
+
+
 def test_an_unfinished_retro_without_a_live_lease_warns(
     capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path
 ) -> None:
