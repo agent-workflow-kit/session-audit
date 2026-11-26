@@ -141,12 +141,19 @@ def check_env_file(gateway: Gateway, path: str) -> str:
         raise errors.usage("the env file is not owned by the user", field=field)
     if info.st_mode & 0o022:
         raise errors.usage("the env file is group or other writable", field=field)
+    directory = os.path.dirname(path) or "/"
     try:
-        parent = gateway.lstat(os.path.dirname(path) or "/")
+        parent = gateway.stat(directory)  # follows a symlinked directory: its target's mode counts
     except OSError:
-        raise errors.usage("the env file's directory cannot be read", field=field) from None
+        raise errors.usage(
+            "the env file's directory cannot be read", field=field, hint=directory
+        ) from None
     if parent.st_mode & 0o022 and not parent.st_mode & stat.S_ISVTX:
-        raise errors.usage("the env file's directory is group or other writable", field=field)
+        raise errors.usage(
+            "the env file's directory is group or other writable",
+            field=field,
+            hint=f"Run chmod go-w {directory}, or use a directory only you can write.",
+        )
     return path
 
 

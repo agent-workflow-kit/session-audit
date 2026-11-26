@@ -479,15 +479,19 @@ def test_crontab_runs_with_the_c_locale_so_its_messages_can_be_recognised(
     log = tmp_path / "log"
     fake = bindir / "crontab"
     fake.write_text(
-        f'#!/bin/sh\necho "$LC_ALL:$LANG" >> "{log}"\ncat > /dev/null\n', encoding="utf-8"
+        f'#!/bin/sh\necho "$LC_ALL:$LANGUAGE:$LANG:$HOME" >> "{log}"\ncat > /dev/null\n',
+        encoding="utf-8",
     )
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
     monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    monkeypatch.setenv("LANGUAGE", "de")
+    monkeypatch.setenv("HOME", str(tmp_path))
     gw = SystemGateway()
     assert gw.crontab_read().ok and gw.crontab_write("x\n").ok
-    assert log.read_text(encoding="utf-8").splitlines() == ["C:", "C:"]
+    line = f"C:C:de_DE.UTF-8:{tmp_path}"
+    assert log.read_text(encoding="utf-8").splitlines() == [line, line]
 
 
 def test_crontab_bytes_that_are_not_utf8_survive_a_round_trip(

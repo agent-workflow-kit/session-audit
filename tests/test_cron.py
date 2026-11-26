@@ -457,6 +457,30 @@ def test_an_env_file_in_a_world_writable_directory_is_refused_unless_sticky(
     assert cron(capsys, gw, "install", "--env-file", str(env), "--json")[0] == 0
 
 
+def test_an_env_file_in_a_symlinked_directory_uses_the_targets_mode(
+    tmp_path: Path, gw: CronGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    env = env_file(real)
+    real.chmod(0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert cron(capsys, gw, "install", "--env-file", str(link / env.name), "--json")[0] == 0
+
+
+def test_an_unsafe_env_directory_is_named_in_the_refusal(
+    tmp_path: Path, gw: CronGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    env = env_file(shared)
+    shared.chmod(0o777)
+    code, out, err = cron(capsys, gw, "install", "--env-file", str(env), "--json")
+    assert code == 2
+    assert str(shared) in out + err
+
+
 # --- values: more characters, leading dashes --------------------------------------------------
 
 

@@ -49,9 +49,9 @@ CRONTAB_TIMEOUT_SECONDS = 30.0
 
 
 def _crontab_env() -> dict[str, str]:
-    """The C locale (a localized "no crontab" message must still be recognised) and the
-    inherited ``PATH``."""
-    return {"LC_ALL": "C", "PATH": os.environ.get("PATH", os.defpath)}
+    """The inherited environment (``HOME``, ``USER``, ``TZ``... crontab needs them) with the C
+    locale forced, so a localized "no crontab" message is still recognised."""
+    return {**os.environ, "LC_ALL": "C", "LANGUAGE": "C"}
 
 
 _POLL_SECONDS = 0.05
