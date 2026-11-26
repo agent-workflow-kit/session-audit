@@ -615,6 +615,78 @@ def test_a_wal_switch_that_stays_busy_gives_up_at_the_budget(tmp_path: Path) -> 
     assert time.monotonic() - started < 10
 
 
+class _BudgetGateway(ClockedGateway):
+    """A gateway whose clock only moves when told to."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.now_s = 0.0
+
+    def monotonic(self) -> float:
+        return self.now_s
+
+    def sleep(self, seconds: float) -> None:
+        self.now_s += seconds
+
+
+def test_open_store_gives_each_attempt_only_the_remaining_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = state_path(tmp_path)
+    gateway = _BudgetGateway()
+    seen: list[int] = []
+    real = store_module._open_connection
+
+    def busy(gw, conn, db_path, migrations, left):  # type: ignore[no-untyped-def]
+        seen.append(left)
+        gateway.now_s += 0.1  # the attempt itself waited 100 ms
+        if len(seen) < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return real(gw, conn, db_path, migrations, left)
+
+    monkeypatch.setattr(store_module, "_open_connection", busy)
+    open_store(gateway, directory, busy_timeout_ms=1000).close()
+    assert seen[0] == 1000 and len(seen) == 3
+    assert seen[1] <= 1000 - 100 and seen[2] <= seen[1] - 100
+
+
+def test_inspect_retries_plain_read_only_when_a_wal_appears_after_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    for name in os.listdir(directory):
+        if name != "state.db":
+            os.unlink(f"{directory}/{name}")
+    wal = f"{directory}/state.db-wal"
+    targets: list[str] = []
+    real_connect = sqlite3.connect
+
+    def connect(target, *args, **kwargs):  # type: ignore[no-untyped-def]
+        targets.append(str(target))
+        if "immutable=1" in str(target):
+            raise sqlite3.OperationalError("unable to open database file")
+        return real_connect(target, *args, **kwargs)
+
+    class Racing(ClockedGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wal_looks = 0
+
+        def lstat(self, path):  # type: ignore[no-untyped-def]
+            if str(path) == wal:
+                self.wal_looks += 1
+                if not targets:
+                    raise FileNotFoundError(path)  # absent at the check, present afterwards
+                return os.lstat(f"{directory}/state.db")
+            return super().lstat(path)
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", connect)
+    assert inspect_store(Racing(), directory).state == "ok"
+    assert "immutable=1" in targets[0]
+    assert "immutable" not in targets[1]
+
+
 def test_checkpoint_with_a_reader_open_is_a_retryable_error(tmp_path: Path) -> None:
     directory = state_path(tmp_path)
     secret = "SECRET-MARKER-" + "x" * 200

@@ -164,14 +164,17 @@ def _is_busy(exc: sqlite3.Error) -> bool:
     return "locked" in text or "busy" in text
 
 
-def _retry_busy[T](gateway: Gateway, budget_ms: int, action: Callable[[], T]) -> T:
+def _retry_busy[T](gateway: Gateway, budget_ms: int, action: Callable[[int], T]) -> T:
     """Run ``action``, repeating it while SQLite reports busy or locked, until ``budget_ms`` has
-    passed. Some statements (the switch to WAL mode among them) fail at once instead of waiting
-    for ``busy_timeout``. ``action`` must be safe to repeat."""
+    passed. ``action`` gets the milliseconds of budget left, which it uses as the busy timeout of
+    that attempt, so the total never exceeds the budget. Some statements (the switch to WAL mode
+    among them) fail at once instead of waiting for ``busy_timeout``. ``action`` must be safe to
+    repeat."""
     deadline = gateway.monotonic() + budget_ms / 1000
     while True:
+        remaining_ms = max(1, int((deadline - gateway.monotonic()) * 1000))
         try:
-            return action()
+            return action(remaining_ms)
         except sqlite3.Error as exc:
             if not _is_busy(exc) or gateway.monotonic() >= deadline:
                 raise
@@ -433,8 +436,9 @@ def open_store(
                 version = _retry_busy(
                     gateway,
                     busy_timeout_ms,
-                    lambda: _open_connection(gateway, conn, db_path, migrations),
+                    lambda left: _open_connection(gateway, conn, db_path, migrations, left),
                 )
+                conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")  # full budget again
             except BaseException:
                 conn.close()
                 raise
@@ -444,8 +448,13 @@ def open_store(
 
 
 def _open_connection(
-    gateway: Gateway, conn: sqlite3.Connection, db_path: str, migrations: Sequence[Migration]
+    gateway: Gateway,
+    conn: sqlite3.Connection,
+    db_path: str,
+    migrations: Sequence[Migration],
+    busy_ms: int,
 ) -> int:
+    conn.execute(f"PRAGMA busy_timeout={int(busy_ms)}")
     # A database that is already WAL is left alone (setting the mode is a write, and a newer
     # store must not be touched before it is refused).
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -464,6 +473,31 @@ def _open_connection(
     return max(done, default=0)
 
 
+def _read_ledger_read_only(gateway: Gateway, db_path: str) -> set[int] | None:
+    """Read the ledger read-only. With no ``-wal`` file the open is ``immutable`` too; the check
+    races with a writer that creates the log, so a storage error from that open is retried once
+    after looking again, with a plain read-only open when the log now exists."""
+    for attempt in (1, 2):
+        try:
+            gateway.lstat(db_path + "-wal")
+            options = "mode=ro"
+        except FileNotFoundError:
+            options = "mode=ro&immutable=1"
+        conn = None
+        try:
+            conn = sqlite3.connect(
+                f"file:{quote(db_path)}?{options}", uri=True, timeout=1.0, isolation_level=None
+            )
+            return _read_ledger(conn)
+        except sqlite3.Error as exc:
+            if attempt == 2 or "immutable" not in options or not is_storage_failure(exc):
+                raise
+        finally:
+            if conn is not None:
+                conn.close()
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def inspect_store(
     gateway: Gateway, directory: str, *, migrations: Sequence[Migration] = MIGRATIONS
 ) -> StoreStatus:
@@ -480,18 +514,7 @@ def inspect_store(
         if not _check_db_file(gateway, db_path, create=False, read_only=True):
             return StoreStatus("missing")
         _check_side_files(gateway, db_path)
-        try:
-            gateway.lstat(db_path + "-wal")
-            options = "mode=ro"
-        except FileNotFoundError:
-            options = "mode=ro&immutable=1"
-        conn = sqlite3.connect(
-            f"file:{quote(db_path)}?{options}", uri=True, timeout=1.0, isolation_level=None
-        )
-        try:
-            applied = _read_ledger(conn)
-        finally:
-            conn.close()
+        applied = _read_ledger_read_only(gateway, db_path)
     except (OSError, sqlite3.Error) as exc:
         raise storage_error(exc) from None
     done, pending, newer = _classify(applied, migrations)

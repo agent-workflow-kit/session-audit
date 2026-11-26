@@ -348,3 +348,19 @@ def test_paths_and_names_take_4096_characters(conn: sqlite3.Connection) -> None:
         "VALUES ('s', ?, 0, 0)",
         ("p" * 4096,),
     )
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("harness_runs", "claude_session_ids"),
+        ("retros", "counts"),
+        ("retros", "dropped"),
+        ("retros", "warnings"),
+    ],
+)
+def test_json_lists_take_65536_characters(
+    conn: sqlite3.Connection, table: str, column: str
+) -> None:
+    value = '"' + "x" * (65_536 - 2) + '"'  # valid JSON of exactly 65536 characters
+    _insert(conn, table, {**BASE_ROWS[table], column: value})

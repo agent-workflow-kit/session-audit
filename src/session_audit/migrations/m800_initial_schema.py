@@ -18,9 +18,8 @@ from .base import Migration
 
 NAME = 128  # ids, names, kinds, hashes (a hash is 64 hex characters; 128 leaves room)
 PATH = 4096  # a path or a project directory name
-LIST_SMALL = 4096  # a short JSON list or map (counts, dropped, the 64 Claude session ids)
 LIST_MEDIUM = 16_384  # labels
-LIST_LARGE = 65_536  # up to 500 sessions (retro.max_sessions) with their ids
+LIST_LARGE = 65_536  # JSON lists and maps the design does not cap (counts, warnings), 500 sessions
 
 
 def _at_most(column: str, size: int) -> str:
@@ -119,7 +118,7 @@ MIGRATION = Migration(
         f"""CREATE TABLE harness_runs (
             csession_id TEXT PRIMARY KEY {_short("csession_id")},
             updated_at TEXT NOT NULL {_at_most("updated_at", 64)},
-            claude_session_ids TEXT NOT NULL DEFAULT '[]' {_json("claude_session_ids", LIST_SMALL)},
+            claude_session_ids TEXT NOT NULL DEFAULT '[]' {_json("claude_session_ids", LIST_LARGE)},
             kind TEXT {_short("kind")},
             labels TEXT NOT NULL DEFAULT '[]' {_json("labels", LIST_MEDIUM)},
             run INTEGER,
@@ -154,10 +153,10 @@ MIGRATION = Migration(
             lease_pid INTEGER,
             lease_start TEXT {_short("lease_start")},
             lease_expires_at INTEGER,
-            counts TEXT NOT NULL DEFAULT '{{}}' {_json("counts", LIST_SMALL)},
-            dropped TEXT NOT NULL DEFAULT '{{}}' {_json("dropped", LIST_SMALL)},
+            counts TEXT NOT NULL DEFAULT '{{}}' {_json("counts", LIST_LARGE)},
+            dropped TEXT NOT NULL DEFAULT '{{}}' {_json("dropped", LIST_LARGE)},
             redacted INTEGER NOT NULL DEFAULT 0,
-            warnings TEXT NOT NULL DEFAULT '[]' {_json("warnings", LIST_SMALL)},
+            warnings TEXT NOT NULL DEFAULT '[]' {_json("warnings", LIST_LARGE)},
             run_token TEXT {_short("run_token")},
             digest_sha256 TEXT CHECK (length(digest_sha256) = 64)
         )""",
