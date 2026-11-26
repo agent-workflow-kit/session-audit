@@ -758,13 +758,14 @@ def test_on_start_receives_the_exact_child_pid_before_the_call_returns(tmp_path:
     assert seen == [read_pid(pids)]
 
 
-def test_a_failing_on_start_ends_the_child_and_propagates(tmp_path: Path) -> None:
-    pids = tmp_path / "child.pid"
-    script = f"echo $$ > '{pids}'; sleep 60"
+def test_a_failing_on_start_ends_the_child_and_propagates() -> None:
+    seen: list[int] = []
 
     def boom(pid: int) -> None:
+        seen.append(pid)
         raise RuntimeError("stop")
 
     with pytest.raises(RuntimeError):
-        SystemGateway(kill_grace=1).run(["sh", "-c", script], timeout=30, on_start=boom)
-    assert wait_until_gone(read_pid(pids))
+        SystemGateway(kill_grace=1).run(["sh", "-c", "sleep 60"], timeout=30, on_start=boom)
+    assert len(seen) == 1
+    assert wait_until_gone(seen[0])
