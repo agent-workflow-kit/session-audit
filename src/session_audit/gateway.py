@@ -100,6 +100,43 @@ class FileContent:
     truncated: bool = False
 
 
+class DirHandle(Protocol):
+    """An open directory descriptor. Every name is a single path component in raw bytes and is
+    looked up relative to the descriptor, never through a path, so a component swapped for a
+    symlink after it was listed is never followed (``openat`` semantics)."""
+
+    @property
+    def path(self) -> bytes:
+        """The path this handle was opened by (for display and for ``--path`` matching only)."""
+        ...
+
+    def entries(self, limit: int) -> tuple[list[bytes], bool]:
+        """At most ``limit`` entry names (``.`` and ``..`` never included) and whether more
+        existed. Reads no more than ``limit`` + 1 entries, so a huge directory costs ``limit``."""
+        ...
+
+    def lstat(self, name: bytes) -> os.stat_result:
+        """``fstatat`` without following a symlink."""
+        ...
+
+    def open_dir(self, name: bytes) -> DirHandle:
+        """``openat(O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)``: ``OSError`` (ELOOP or ENOTDIR)
+        for a symlink or a non-directory, ENOENT when it is gone."""
+        ...
+
+    def open_file(self, name: bytes) -> BinaryIO:
+        """``openat(O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC|O_NOCTTY)``: a FIFO opens at once
+        and never blocks. Nothing is checked: the caller runs ``Gateway.fstat`` on the result
+        and then ``Gateway.set_blocking``."""
+        ...
+
+    def stat(self) -> os.stat_result:
+        """``fstat`` of the directory itself."""
+        ...
+
+    def close(self) -> None: ...
+
+
 class Gateway(Protocol):
     def run(
         self,
@@ -153,6 +190,23 @@ class Gateway(Protocol):
     def read_file(self, path: str | bytes | os.PathLike[str], limit: int) -> FileContent:
         """Read at most ``limit`` bytes of a regular file without following a final symlink
         (``OSError``/ELOOP) or blocking on a FIFO. Other failures are the open's ``OSError``."""
+        ...
+
+    # --- directory descriptors (transcript discovery and safe open) ----------------------------
+
+    def open_root(self, path: str | bytes) -> DirHandle:
+        """Open a transcript root: ``realpath`` of ``path`` (the root itself may be a symlink),
+        then ``O_RDONLY|O_DIRECTORY|O_CLOEXEC``. ``OSError`` when it cannot be opened. The caller
+        checks the owner and mode with ``DirHandle.stat``."""
+        ...
+
+    def fstat(self, handle: BinaryIO) -> os.stat_result:
+        """``fstat`` of an open file: the authority on what was opened."""
+        ...
+
+    def set_blocking(self, handle: BinaryIO) -> None:
+        """Clear ``O_NONBLOCK`` on a file ``DirHandle.open_file`` opened, after its type was
+        checked."""
         ...
 
     def uid(self) -> int:
@@ -468,6 +522,17 @@ class SystemGateway:
         finally:
             os.close(fd)
 
+    def open_root(self, path: str | bytes) -> DirHandle:
+        real = os.path.realpath(path)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        return _SystemDir(os.open(real, flags), os.fsencode(real))
+
+    def fstat(self, handle: BinaryIO) -> os.stat_result:
+        return os.fstat(handle.fileno())
+
+    def set_blocking(self, handle: BinaryIO) -> None:
+        os.set_blocking(handle.fileno(), True)
+
     def uid(self) -> int:
         return os.geteuid()
 
@@ -572,6 +637,51 @@ class SystemGateway:
                 if time.monotonic() >= deadline:
                     return False
                 time.sleep(_LOCK_POLL_SECONDS)
+
+
+class _SystemDir:
+    """A directory descriptor of the real file system (see ``DirHandle``)."""
+
+    def __init__(self, fd: int, path: bytes) -> None:
+        self._fd = fd
+        self._path = path
+
+    @property
+    def path(self) -> bytes:
+        return self._path
+
+    def entries(self, limit: int) -> tuple[list[bytes], bool]:
+        names: list[bytes] = []
+        with os.scandir(self._fd) as found:  # a dup of the descriptor, rewound
+            for entry in found:
+                if len(names) >= limit:
+                    return names, True
+                names.append(os.fsencode(entry.name))
+        return names, False
+
+    def lstat(self, name: bytes) -> os.stat_result:
+        return os.stat(name, dir_fd=self._fd, follow_symlinks=False)
+
+    def open_dir(self, name: bytes) -> DirHandle:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        return _SystemDir(os.open(name, flags, dir_fd=self._fd), self._path + b"/" + name)
+
+    def open_file(self, name: bytes) -> BinaryIO:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+        fd = os.open(name, flags, dir_fd=self._fd)
+        try:
+            return os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def stat(self) -> os.stat_result:
+        return os.fstat(self._fd)
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            fd, self._fd = self._fd, -1
+            os.close(fd)
 
 
 _UMASK_LOCK = threading.RLock()

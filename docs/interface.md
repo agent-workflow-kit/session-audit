@@ -220,6 +220,8 @@ never read: tool-results/, memory/, journal.jsonl, any other name or depth
 scan: project directories in descending mtime order, at most 100,000 entries per root per run (warning scan_capped); files are read in descending mtime order
 ```
 
+The entry cap counts every directory entry listed under a root (the root's own, each project directory, each `subagents` and `workflows` directory); `<uuid>/subagents` and `workflows` are looked up by name, so the other names inside a session directory are never listed. A symlink where a project directory, a session directory, `subagents` or `workflows` is expected counts once in `files.unsafe` and is never entered. A pruned session's unchanged file is skipped without a count of its own.
+
 `<uuid>` must be a lowercase UUID, `<id>` in `agent-<id>` and `<wf>` must match `[A-Za-z0-9_.-]{1,128}`; other names are not transcripts. Paths are stored as raw bytes (`os.fsencode`) and shown through `fix_surrogates` and the sanitizer, so a non-UTF-8 name can be reopened and two names never collide.
 
 **3. Opening and reading.** The mechanics are (copy):
@@ -230,12 +232,13 @@ below the root: every directory opened with openat(O_RDONLY|O_DIRECTORY|O_NOFOLL
     openat(O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC); fstat on the descriptor: S_ISREG, st_nlink == 1, st_uid == me;
     then clear O_NONBLOCK; a FIFO or special file is files.unsafe and never blocks
 --path: resolved by components below a configured root after opening (never a string prefix check); outside -> exit 2
+    (a relative path, any `..` component, a symlinked component below the root, or a path beside or above every root; a component that does not exist matches nothing)
 line read: readline(8 MiB + 1); a longer record is skipped to the next LF in 1 MiB steps, checking the budgets at each step, and counted in lines.oversized
 partial tail: left for the next run; a tail longer than 8 MiB sets the file's skip_to_lf column and the offset moves to EOF
 budgets: ingest.file_budget (default 60 s) per file and --budget per run; checked between lines
 ```
 
-A root writable by another user makes that root unusable (reported, other roots continue). Any other violation skips the file and counts it as `files.unsafe`.
+A root is unusable (reported with `root_unusable`, other roots continue; none usable is exit 12 `no_readable_roots`) when it is missing, not a directory, not owned by the user, or writable by group or others (mode `& 0o022`). A group-writable root is refused on purpose: with a umask of 002 Claude Code can create `~/.claude/projects` as 0770, and the fix is `chmod g-w <root>` (the exit-12 hint says so). Any other violation skips the file and counts it as `files.unsafe`. A failure to open a path component or the file that is not `ENOENT` (`ENOENT` is `files.vanished`) is counted the same way, conservatively: `EACCES`, `EMFILE`, a component swapped for a symlink or a non-directory all count as `files.unsafe`, because no count or warning listed in this interface names an unreadable file at open. The only such signal is the discovery warning `dirs_unreadable` (a free-string ingest warning for a directory that cannot be listed); #15 settles the final reporting. A broken `agent-<id>.meta.json` (unsafe) counts the same; a missing one counts nothing.
 
 **4. Lines.** Only lines ending in a line feed are parsed. A line that is not a JSON object is counted in `lines.errors` and skipped. NUL bytes inside a line make it an error line. Unknown line types count in `lines.unknown`.
 
@@ -1166,6 +1169,7 @@ Linux and WSL (Ubuntu) are tested. macOS is expected to work: the roots, `flock`
 - Lease liveness is the holder's PID with its start time and nothing stronger: a process in another PID namespace or host that shares the state directory looks dead and its lease is taken over (not supported), and a machine suspend can pass `expires_at` while the holder lives, so the next run recovers a healthy retro and the holder's compare-and-set write stops it.
 - The project directory is matched by its exact encoded name; a same-user process that creates another directory encoding to the same name (it needs the random csession id) could have it removed.
 - The cron env-file is sourced by the shell; a file its owner makes writable after install is run as shell code until `validate` reports it.
+- `st_nlink == 1` on the opened descriptor cannot exclude a same-user hard-link-then-unlink race in the window between `openat` and `fstat` (the file then looks like it has one link). The owner check and the kernel's `protected_hardlinks` limit what such a process can point the tool at; the tool only reads the file.
 - Transcript format changes in future Claude Code versions can make counts wrong without failing; the Session object's `unknown_line_types`, `lines.unknown` and the `no_usage` flag are the signals.
 
 ## Deviations from the design guide
