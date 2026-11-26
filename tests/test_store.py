@@ -423,6 +423,26 @@ def test_a_hard_linked_database_is_refused(tmp_path: Path) -> None:
     refused(directory, "failed", "store_unwritable")
 
 
+def test_a_side_file_unlinked_during_the_check_counts_as_missing(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    wal = f"{directory}/state.db-wal"
+
+    class Unlinking(ClockedGateway):
+        def lstat(self, path):  # type: ignore[no-untyped-def]
+            info = super().lstat(path)
+            if str(path) == wal:
+                # another connection's close unlinked the log: lstat reports no links left
+                fields = list(info)
+                fields[stat.ST_NLINK] = 0
+                return os.stat_result(fields)
+            return info
+
+    Path(wal).write_bytes(b"")
+    Path(wal).chmod(0o600)
+    open_store(Unlinking(), directory).close()
+
+
 @NOT_ROOT
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
 def test_a_side_file_with_a_wrong_mode_is_refused(tmp_path: Path, suffix: str) -> None:

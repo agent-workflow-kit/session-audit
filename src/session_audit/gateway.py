@@ -27,18 +27,20 @@ import enum
 import fcntl
 import math
 import os
+import re
 import selectors
 import signal
 import stat as statmod
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, BinaryIO, Protocol
+from typing import IO, Any, BinaryIO, Protocol
 from zoneinfo import ZoneInfo
 
 DEFAULT_STDOUT_LIMIT = 8 * 1024 * 1024
@@ -49,6 +51,7 @@ _READ_CHUNK = 65536
 _DRAIN_CHUNKS = 16
 _GROUP_POLL_SECONDS = 0.02
 _LOCK_POLL_SECONDS = 0.01
+_PS_TIMEOUT_SECONDS = 5.0
 
 
 class CallStatus(enum.Enum):
@@ -117,6 +120,18 @@ class Gateway(Protocol):
 
     def sleep(self, seconds: float) -> None:
         """Wait ``seconds`` (a bounded poll between retries)."""
+        ...
+
+    def pid(self) -> int:
+        """This process's id."""
+        ...
+
+    def process_start(self, pid: int) -> str | None:
+        """An opaque token for when process ``pid`` started (at most 64 characters, equal for
+        the same process at any time, different for a later process that reuses the pid), or
+        None when no such process is running (a zombie is not running). Linux reads
+        ``/proc/<pid>/stat``; without ``/proc`` (macOS) ``ps`` answers. ``OSError`` when neither
+        can."""
         ...
 
     def open_read(self, path: str | bytes | os.PathLike[str]) -> BinaryIO:
@@ -196,8 +211,9 @@ class Gateway(Protocol):
 class SystemGateway:
     """The real thing."""
 
-    def __init__(self, *, kill_grace: float = KILL_GRACE_SECONDS) -> None:
+    def __init__(self, *, kill_grace: float = KILL_GRACE_SECONDS, proc: str = "/proc") -> None:
         self._kill_grace = kill_grace
+        self._proc = proc  # tests point it at a missing directory to exercise the ps fallback
 
     def run(
         self,
@@ -394,6 +410,29 @@ class SystemGateway:
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
 
+    def pid(self) -> int:
+        return os.getpid()
+
+    def process_start(self, pid: int) -> str | None:
+        if pid <= 0:
+            return None
+        found = _proc_start(self._proc, pid)
+        if found is not _NO_PROC:
+            return found
+        return self._ps_start(pid)
+
+    def _ps_start(self, pid: int) -> str | None:
+        result = self.run(
+            ["ps", "-o", "stat=", "-o", "lstart=", "-p", str(pid)],
+            timeout=_PS_TIMEOUT_SECONDS,
+            env={"LC_ALL": "C", "PATH": os.environ.get("PATH", os.defpath)},
+        )
+        if result.exit_is(1) and not result.stdout.strip() and not result.stderr.strip():
+            return None  # ps: no such process (exit 1 and nothing said)
+        if not result.ok:
+            raise OSError(f"cannot read the start time of process {pid} ({result.status.value})")
+        return _parse_ps_start(result.stdout)
+
     def open_read(self, path: str | bytes | os.PathLike[str]) -> BinaryIO:
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         return os.fdopen(os.open(path, flags), "rb")
@@ -463,20 +502,24 @@ class SystemGateway:
 
     @contextlib.contextmanager
     def umask(self, mask: int) -> Iterator[None]:
-        previous = os.umask(mask)
-        try:
-            yield
-        finally:
-            os.umask(previous)
+        # The umask is process-wide: one thread at a time may change and restore it, or a second
+        # thread would save the first one's temporary value and restore that.
+        with _UMASK_LOCK:
+            previous = os.umask(mask)
+            try:
+                yield
+            finally:
+                os.umask(previous)
 
     def mkdir(self, path: str | os.PathLike[str], mode: int) -> None:
         # umask 0 for the call: a umask such as 0777 would create the directory with no permission
         # bits, and it could then not be opened to be fixed. The mode is then set exactly below.
-        previous = os.umask(0)
-        try:
-            os.mkdir(path, mode)
-        finally:
-            os.umask(previous)
+        with _UMASK_LOCK:
+            previous = os.umask(0)
+            try:
+                os.mkdir(path, mode)
+            finally:
+                os.umask(previous)
         # The mode asked for, not the mode the umask left: set through a descriptor that does not
         # follow a symlink, so a path swapped after the mkdir is never changed.
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -531,6 +574,11 @@ class SystemGateway:
                 time.sleep(_LOCK_POLL_SECONDS)
 
 
+_UMASK_LOCK = threading.RLock()
+_SIGNED_INT = re.compile(r"-?[0-9]{1,19}")
+_ASCII_TICKS = re.compile(r"[0-9]{1,19}")
+
+
 def _is_zone(name: str) -> bool:
     try:
         ZoneInfo(name)
@@ -563,7 +611,7 @@ def _parse_proc_stat(text: str) -> tuple[str, int] | None:
     The command name is in parentheses and may itself hold spaces and parentheses, so the
     fields are counted from the last ``)``."""
     rest = text[text.rfind(")") + 1 :].split()
-    if len(rest) < 3 or not rest[2].lstrip("-").isdigit():
+    if len(rest) < 3 or not _SIGNED_INT.fullmatch(rest[2]):
         return None
     return rest[0], int(rest[2])
 
@@ -587,6 +635,58 @@ def _group_member_states(pgid: int, proc: str = "/proc") -> list[str] | None:
         if parsed[1] == pgid:
             states.append(parsed[0])
     return states
+
+
+_NO_PROC: Any = object()  # sentinel: /proc cannot answer, ask ps
+
+
+def _parse_proc_start(text: str) -> tuple[str, str] | None:
+    """``(state, starttime)`` from the text of ``/proc/<pid>/stat`` (field 22, clock ticks since
+    boot), or None when it does not parse. Fields are counted from the last ``)``."""
+    rest = text[text.rfind(")") + 1 :].split()
+    if len(rest) < 20 or not _ASCII_TICKS.fullmatch(rest[19]):
+        return None
+    return rest[0], rest[19]
+
+
+def _proc_start(proc: str, pid: int) -> str | None:
+    """The start-time token of a running process read from ``proc``, None when it is not running
+    (missing or a zombie), ``_NO_PROC`` when ``proc`` cannot answer. The token carries the boot id
+    when readable, so a pid and tick count repeated after a reboot do not match."""
+    try:
+        with open(f"{proc}/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            parsed = _parse_proc_start(handle.read())
+    except (FileNotFoundError, ProcessLookupError):
+        # A missing entry means no such process only when /proc itself is there.
+        return None if os.path.isdir(proc) and os.path.exists(f"{proc}/self") else _NO_PROC
+    except OSError:
+        return _NO_PROC
+    if parsed is None:
+        return _NO_PROC
+    state, ticks = parsed
+    if state in ("Z", "X"):
+        return None
+    try:
+        with open(f"{proc}/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            boot = handle.read().strip().replace("-", "")[:8]
+    except (OSError, ValueError) as exc:
+        # Never a token of another shape: a holder that recorded "<boot>-<ticks>" would look dead.
+        raise OSError(f"cannot read the boot id to identify process {pid}") from exc
+    if not boot:
+        raise OSError(f"the boot id is empty, cannot identify process {pid}")
+    return f"{boot}-{ticks}"
+
+
+def _parse_ps_start(text: str) -> str | None:
+    """The start time from ``ps -o stat= -o lstart=`` output (``Ss   Tue Nov 25 10:00:00 2026``);
+    None for a zombie. Output that holds no state and start time raises ``OSError``: ps failing
+    with output is an error, not proof that the process is dead."""
+    parts = text.strip().split(None, 1)
+    if len(parts) != 2:
+        raise OSError(f"cannot parse the ps output {text.strip()[:80]!r}")
+    if parts[0][:1] in ("Z", "X"):
+        return None
+    return " ".join(parts[1].split())
 
 
 def _signal_group(pgid: int, sig: int) -> None:

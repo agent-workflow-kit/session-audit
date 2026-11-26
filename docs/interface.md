@@ -577,7 +577,7 @@ def retro_key(kept_sessions, skill, model):
 
 A changed transcript, changed digest settings or a changed redaction list change the key; the scope does not enter it. A custom skill that changes does not change the key: use `--again`. A stored `done` retro with the same key is returned without a model call unless `--again`. The dry-run key and the `pre-retro` payload `key` equal the key a real run computes over the same transcript bytes.
 
-**Leases.** A retro lease is `(holder_pid, holder_start_time, expires_at)` on the retro row; the ingest lease uses the same rule on `meta` (design guide §4.3). The holder renews it every 30 s in its own short transaction while it works, including while it waits for `claude-session` and for hooks (a renewal thread), and a process that took a lease over for recovery renews it the same way until the recovery ends; it expires 120 s after the last renewal (copy):
+**Leases.** A retro lease is `(holder_pid, holder_start_time, expires_at)` on the retro row; the ingest lease uses the same rule on `meta` (the row `ingest_lease`; design guide §4.3). The holder renews it every 30 s in its own short transaction while it works, including while it waits for `claude-session` and for hooks (a renewal thread), and a process that took a lease over for recovery renews it the same way until the recovery ends; it expires 120 s after the last renewal (copy):
 
 ```text
 live(lease) = the holder PID runs with the recorded start time AND now < expires_at       # nothing stronger (see Residual risks)
