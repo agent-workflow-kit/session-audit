@@ -91,6 +91,194 @@ def list_doc(sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {"sessions": sessions or []}
 
 
+# outcome -> (state, exit code, report status or None, a valid end reason): the pinned outcome rules
+_OUTCOMES: dict[str, tuple[str, int, str | None, str]] = {
+    "done": ("exited", 0, "done", "normal"),
+    "blocked": ("exited", 13, "blocked", "normal"),
+    "needs-input": ("exited", 13, "needs-input", "normal"),
+    "failed": ("exited", 18, "failed", "normal"),
+    "exited-unreported": ("exited-unreported", 14, None, "no_report"),
+    "killed": ("killed", 15, None, "stopped"),
+    "timeout": ("timeout", 16, None, "timeout"),
+    "lost": ("lost", 17, None, "lost"),
+}
+
+
+def _report(outcome: str | None) -> dict[str, Any] | None:
+    status = _OUTCOMES[outcome][2] if outcome else None
+    if status is None:
+        return None
+    return {
+        "status": status,
+        "implicit": False,
+        "summary": None,
+        "reason": None,
+        "artifact": None,
+        "reported_at": "2025-12-31T23:58:00Z",
+    }
+
+
+def _list_fields(
+    csession_id: str,
+    *,
+    updated_at: str,
+    launch_kind: str,
+    labels: list[str],
+    outcome: str | None,
+    end_reason: str | None,
+    repo: str | None,
+) -> dict[str, Any]:
+    """The fields ``list`` items and ``status`` share (all required by the pinned schemas)."""
+    state = _OUTCOMES[outcome][0] if outcome else "working"
+    final = outcome is not None
+    return {
+        "csession_id": csession_id,
+        "created_at": "2025-12-31T23:00:00Z",
+        "launch_kind": launch_kind,
+        "run_kind": launch_kind,
+        "state": state,
+        "activity": None if final else "working",
+        "needs_input_reason": None,
+        "live": not final,
+        "tainted": False,
+        "tainted_at": None,
+        "tainted_by_run": None,
+        "forked_from": None,
+        "labels": labels,
+        "repo": repo,
+        "mode": "headless",
+        "current_run": 1,
+        "pending": False,
+        "expires_at": None,
+        "updated_at": updated_at,
+    }
+
+
+def list_item(
+    csession_id: str = "cs-aaaaaaab",
+    *,
+    updated_at: str = "2026-01-01T00:00:00Z",
+    launch_kind: str = "work",
+    labels: list[str] | None = None,
+    outcome: str | None = "done",
+    end_reason: str | None = None,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """One valid item of ``list --json`` (a headless run that ended with ``outcome``, or a live
+    one when ``outcome`` is None)."""
+    item = _list_fields(
+        csession_id,
+        updated_at=updated_at,
+        launch_kind=launch_kind,
+        labels=labels or [],
+        outcome=outcome,
+        end_reason=end_reason,
+        repo=repo,
+    )
+    item.update(
+        phase="session",
+        last_outcome=outcome,
+        last_end_reason=(end_reason or _OUTCOMES[outcome][3]) if outcome else None,
+        exit_code=_OUTCOMES[outcome][1] if outcome else None,
+        report_status=_OUTCOMES[outcome][2] if outcome else None,
+    )
+    return item
+
+
+def status_doc(
+    csession_id: str = "cs-aaaaaaab",
+    *,
+    updated_at: str = "2026-01-01T00:00:00Z",
+    launch_kind: str = "work",
+    labels: list[str] | None = None,
+    claude_session_ids: list[str] | None = None,
+    outcome: str | None = "done",
+    end_reason: str | None = None,
+    cost_usd: float | None = 0.5,
+    num_turns: int | None = 3,
+    skill: str | None = None,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """A valid ``status --json`` document. ``claude_session_ids`` are the Claude Code session
+    ids the session recorded (the join keys)."""
+    ids = claude_session_ids or []
+    doc = _list_fields(
+        csession_id,
+        updated_at=updated_at,
+        launch_kind=launch_kind,
+        labels=labels or [],
+        outcome=outcome,
+        end_reason=end_reason,
+        repo=repo,
+    )
+    final = outcome is not None
+    doc.update(
+        csession_dir=f"/state/sessions/{csession_id}",
+        claude_session_id=ids[-1] if ids else None,
+        claude_session_ids=[
+            {
+                "claude_session_id": cid,
+                "run": 1,
+                "source": "startup",
+                "transcript_path": None,
+                "seen_at": "2025-12-31T23:30:00Z",
+            }
+            for cid in ids
+        ],
+        runs=1,
+        recent_events=[],
+        warnings=[],
+        run={
+            "run": 1,
+            "run_kind": launch_kind,
+            "reads_third_party": False,
+            "implicit_done": True,
+            "mode": "headless",
+            "cwd": None,
+            "repo": repo,
+            "model": None,
+            "skill": skill,
+            "has_prompt": True,
+            "sandbox": "off",
+            "sandbox_active": False,
+            "permission_profile": None,
+            "decision_ids": [],
+            "input_files": [],
+            "pending": False,
+            "expires_at": None,
+            "started_at": "2025-12-31T23:00:00Z",
+            "session_started_at": "2025-12-31T23:30:00Z",
+            "ended_at": "2025-12-31T23:59:00Z" if final else None,
+            "state": _OUTCOMES[outcome][0] if outcome else "working",
+            "phase": "session",
+            "message": None,
+            "stop_requested_at": None,
+            "warnings": [],
+            "state_since": "2025-12-31T23:30:00Z",
+            "wrapper_pid": None,
+            "wrapper_alive": False,
+            "child_pid": None,
+            "child_alive": False,
+            "backstop_used": False,
+            "report": _report(outcome),
+            "outcome": outcome,
+            "end_reason": (end_reason or _OUTCOMES[outcome][3]) if outcome else None,
+            "session_end_reason": None,
+            "exit_code": _OUTCOMES[outcome][1] if outcome else None,
+            "result_path": None,
+            "cost_usd": cost_usd,
+            "num_turns": num_turns,
+            "is_error": None,
+        },
+    )
+    return doc
+
+
+def version_step(version: str = "0.45.3", *, exit: int = 0) -> dict[str, Any]:  # noqa: A002
+    """A ``--version`` call printing what argparse prints for claude-session."""
+    return step(f"claude-session {version}\n", exit=exit)
+
+
 def forget_doc(*csession_ids: str, purged: bool = True) -> dict[str, Any]:
     """A valid ``forget --purge --json`` document."""
     return {
@@ -168,6 +356,11 @@ def step(
     return out
 
 
+def _base_key(key: str) -> str:
+    """``status cs-aaaaaaab`` (a step for one id) is a ``status`` step."""
+    return "status" if key.startswith("status cs-") else key
+
+
 class FakeClaudeSession:
     def __init__(self, directory: Path) -> None:
         self.program = FAKE_PROGRAM
@@ -185,7 +378,8 @@ class FakeClaudeSession:
         }
 
     def script(self, key: str, *steps: dict[str, Any]) -> None:
-        """Script the calls with ``key`` (see the fake's docstring), validating every step."""
+        """Script the calls with ``key`` (see the fake's docstring), validating every step.
+        ``status <csession id>`` scripts the calls of one id; plain ``status`` the others."""
         for one in steps:
             self._check(key, one)
         self._steps[key] = list(steps)
@@ -249,7 +443,7 @@ class FakeClaudeSession:
             return override
         if isinstance(document, dict) and "error" in document and exit_code != 0:
             return ERROR_SCHEMA
-        return SCHEMA_FOR_KEY[key]
+        return SCHEMA_FOR_KEY[_base_key(key)]
 
     def _check(self, key: str, one: dict[str, Any]) -> None:
         if one.get("unvalidated") or key == "--version":
@@ -266,7 +460,7 @@ class FakeClaudeSession:
     def _check_exit(key: str, stdout: object, exit_code: int) -> None:
         """Refuse a step the real program could not produce: an exit it never ends that command
         with, an error code with the wrong exit, an outcome whose ``exit_code`` is not the exit."""
-        allowed = EXITS_FOR_KEY.get(key)
+        allowed = EXITS_FOR_KEY.get(_base_key(key))
         if allowed is not None and exit_code not in allowed:
             raise AssertionError(
                 f"step for {key!r}: exit {exit_code} is not one of {sorted(allowed)}"
@@ -281,7 +475,7 @@ class FakeClaudeSession:
                     f"step for {key!r}: error code {code!r} goes with exit "
                     f"{EXIT_FOR_CODE.get(code)}, not {exit_code}"
                 )
-            if code == "launch_failed" and key != "start":
+            if code == "launch_failed" and _base_key(key) != "start":
                 raise AssertionError(f"step for {key!r}: launch_failed is only for start")
         elif key == "exec" and "exit_code" in stdout and stdout["exit_code"] != exit_code:
             raise AssertionError(
@@ -298,7 +492,10 @@ __all__ = [
     "error_doc",
     "forget_doc",
     "list_doc",
+    "list_item",
     "outcome_doc",
     "start_doc",
+    "status_doc",
     "step",
+    "version_step",
 ]

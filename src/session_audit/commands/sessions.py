@@ -5,7 +5,7 @@ Flow: a read-only view of the store (none yet: an empty list), the filters as on
 ``limit + 1`` best by the sort key (so memory never grows with the corpus), the Session objects
 with their harness snapshot, and the store freshness.
 
-TODO(#19): snapshots are read from ``harness_runs``; ``ingest`` fills it once #19 lands.
+Snapshots are read from ``harness_runs`` (written by ``ingest``, see ``harness``).
 """
 
 from __future__ import annotations

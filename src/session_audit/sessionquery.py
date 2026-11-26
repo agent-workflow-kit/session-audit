@@ -5,9 +5,8 @@
   comparison, so no filter text ever reaches SQL and a ``%``, ``_`` or backslash in ``--project``
   is an ordinary character).
 - ``Snapshot`` and the query-time join of a session to its harness snapshot (Harness
-  enrichment). The snapshot rows are written by ``ingest`` (TODO(#19)); this module only reads
-  ``harness_runs``, so a store with no row there (everything until #19 lands) has no snapshot
-  for any session.
+  enrichment). The snapshot rows are written by ``ingest`` (``harness``); this module only reads
+  ``harness_runs``, so a store with no row there has no snapshot for any session.
 - The default exclusion of self-improve sessions: a snapshot whose labels contain
   ``owner=self-improve`` is left out unless ``--include-self-improve`` is given. Labels are
   unauthenticated hints, so this is a convenience and not a boundary.
@@ -260,7 +259,7 @@ def snapshot_for(conn: sqlite3.Connection, session_id: str) -> Snapshot | None:
 
 
 def is_self_improve(snapshot: Snapshot | None) -> bool:
-    """TODO(#19): the labels come from the snapshots ``ingest`` captures. A label is a hint."""
+    """The labels come from the snapshots ``ingest`` captures. A label is a hint."""
     return snapshot is not None and SELF_IMPROVE_LABEL in snapshot.labels
 
 

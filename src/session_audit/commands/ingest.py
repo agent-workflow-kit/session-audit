@@ -16,10 +16,13 @@ The flow of a run (``docs/design.md``, Ingest run):
 ``--dry-run`` takes the same steps over a read-only view of the store and writes nothing: no lease,
 no log line, no ``meta`` change, no store when there is none yet.
 
-TODO(#19): the claude-session snapshot capture (``harness`` counts, ``--session``, ``--no-harness``
-as a real switch, and ``harness.enabled: on`` with claude-session missing as exit 12
-``claude_session_missing``). Until then ``harness`` is reported as not attempted, ``--session`` is
-an unimplemented flag and ``harness.enabled: on`` is not honored.
+4. Unless ``--dry-run``, ``--no-harness`` or ``harness.enabled: off``, the claude-session version
+   is checked before anything is read (``harness.enabled: on`` and no usable claude-session is exit
+   12) and, after the file reads of the same run and still under the lease, ``harness.capture``
+   writes the snapshots (short transactions that never need the lease). ``--session CSESSION_ID``
+   writes one snapshot first, without the lease, then reads that snapshot's transcripts when the
+   lease is free (``files_deferred`` otherwise).
+
 TODO(#25): fire the ``post-attention`` hook with ``ingest_failing_due``'s result.
 """
 
@@ -34,8 +37,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .. import args as a
-from .. import errors
+from .. import errors, harness
 from ..command import Command, Context
+from ..csversion import Presence, check_version
 from ..eventstore import FileResult, read_file
 from ..grammar import (
     INGEST_BUDGET_MAX,
@@ -127,6 +131,12 @@ def check(ctx: Context, args: argparse.Namespace) -> None:
             field="--dry-run",
             hint="Drop --dry-run or --session.",
         )
+    if args.no_harness and args.session is not None:
+        raise errors.usage(
+            "--no-harness cannot be combined with --session",
+            field="--no-harness",
+            hint="Drop --no-harness or --session.",
+        )
     if args.rebuild and not args.dry_run:
         a.require_confirmation(ctx)
 
@@ -182,20 +192,31 @@ class Tally:
         return {"new": self.sessions_new, "updated": self.sessions_updated}
 
 
-def build_report(tally: Tally, *, dry_run: bool, already_running: bool = False) -> dict[str, Any]:
+def build_report(
+    tally: Tally,
+    *,
+    dry_run: bool,
+    already_running: bool = False,
+    harness_counts: harness.Counts | None = None,
+    files_deferred: bool = False,
+) -> dict[str, Any]:
     """The ``--json`` document (``schemas/cli/ingest.json``). Warnings are sanitized and bounded
-    here, whatever put them in."""
-    warnings = [sanitize(w, WARNING_CAP) for w in tally.warnings if w][:WARNINGS_MAX]
+    here, whatever put them in. ``harness_counts`` is None when claude-session was not used."""
+    extra = harness_counts.warnings if harness_counts is not None else []
+    warnings = [sanitize(w, WARNING_CAP) for w in [*tally.warnings, *extra] if w][:WARNINGS_MAX]
     return {
-        "complete": tally.complete and not already_running,
+        "complete": tally.complete and not already_running and not files_deferred,
         "already_running": already_running,
-        "files_deferred": False,
+        "files_deferred": files_deferred,
         "dry_run": dry_run,
         "files": tally.files(),
         "lines": tally.lines(),
         "sessions": tally.sessions(),
-        # TODO(#19): the harness capture; until then it is never attempted.
-        "harness": {"enabled": False, "matched": 0, "captured": 0, "errors": 0},
+        "harness": (
+            harness_counts.to_json()
+            if harness_counts is not None
+            else {"enabled": False, "matched": 0, "captured": 0, "errors": 0}
+        ),
         "warnings": warnings,
     }
 
@@ -326,15 +347,19 @@ def plan(
     conn: sqlite3.Connection | None,
     rules: int,
     since_ns: int | None,
+    only: frozenset[str] | None = None,
 ) -> tuple[list[Candidate], int]:
     """The candidates to visit, in order, and how many listed files ``--since`` left out. A
-    session is kept when any file of it (main or agent) was modified at or after the time."""
+    session is kept when any file of it (main or agent) was modified at or after the time.
+    ``only`` (``--session``) keeps just the files of those Claude Code session ids; the files it
+    leaves out are not "left out" in the count (they were never asked for)."""
     listed = list(discovery.candidates())
+    wanted = listed if only is None else [c for c in listed if c.session_id in only]
     if since_ns is not None:
-        recent = {c.session_id for c in listed if c.mtime_ns >= since_ns}
-        kept = [c for c in listed if c.session_id in recent]
+        recent = {c.session_id for c in wanted if c.mtime_ns >= since_ns}
+        kept = [c for c in wanted if c.session_id in recent]
     else:
-        kept = listed
+        kept = wanted
     stale = stale_rules_paths(conn, rules) if conn is not None else set()
     return stale_first(kept, stale), len(listed) - len(kept)
 
@@ -559,16 +584,15 @@ def _exit_code(exc: Exception) -> int:
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
-    if args.session is not None:
-        # TODO(#19): `--session CSESSION_ID` (claude-session status and the snapshot) lands with
-        # the harness issue.
-        raise a.not_implemented()
     if ctx.dry_run:
         report = run_dry(ctx, args)
     else:
         store = ctx.store()
         try:
-            report = run_live(ctx, args, store)
+            if args.session is not None:
+                report = run_session(ctx, args, store)
+            else:
+                report = run_live(ctx, args, store)
         except Exception as exc:
             if is_full(args) and _exit_code(exc) in (1, 12):
                 record_failure(store, _now_ms(ctx))
@@ -673,9 +697,99 @@ def mark_for_rebuild(store: Store, lease: Lease, ordered: list[Candidate]) -> No
             )
 
 
+@dataclass
+class HarnessUse:
+    """Whether this run uses claude-session (``command`` is None when it does not) and the
+    warnings the decision produced."""
+
+    command: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
+def decide_harness(ctx: Context, args: argparse.Namespace) -> HarnessUse:
+    """Whether a real ingest captures harness snapshots. ``--no-harness`` and ``harness.enabled:
+    off`` skip claude-session entirely (no call). Otherwise ``claude-session --version`` decides:
+    with ``on`` anything but a usable claude-session is exit 12; with ``auto`` a missing one is
+    silent (``harness.enabled: false`` in the report) and an unusable one adds a warning."""
+    mode = ctx.settings.harness.enabled
+    if args.no_harness or mode == "off":
+        return HarnessUse()
+    command = ctx.settings.harness.claude_session_cmd
+    check = check_version(ctx.gateway, command)
+    if check.ok:
+        return HarnessUse(command)
+    if mode == "on":
+        raise harness.unavailable(check)
+    if check.presence is Presence.MISSING:
+        return HarnessUse()
+    return HarnessUse(warnings=[f"claude_session_unusable: {check.presence.value}"])
+
+
+def run_session(ctx: Context, args: argparse.Namespace, store: Store) -> dict[str, Any]:
+    """``--session CSESSION_ID``: the snapshot of one claude-session run, written without the
+    ingest lease, then (lease free) the transcripts of its Claude session ids."""
+    if ctx.settings.harness.enabled == "off":
+        raise errors.usage(
+            "harness.enabled is off",
+            field="harness.enabled",
+            hint="Set harness.enabled to auto or on to capture a claude-session run.",
+        )
+    command = ctx.settings.harness.claude_session_cmd
+    check = check_version(ctx.gateway, command)
+    if not check.ok:
+        raise harness.unavailable(check)
+    deadline = run_deadline(ctx.gateway, _budget(ctx, args))
+    remaining = deadline - ctx.gateway.monotonic()
+    if remaining < harness.MIN_CALL_SECONDS:
+        raise harness.status_failed()  # the budget is spent: no call, as a failed status maps
+    fetched = harness.fetch_status(
+        ctx.gateway,
+        command,
+        args.session,
+        timeout=min(harness.STATUS_TIMEOUT, remaining),
+    )
+    if fetched.kind is harness.Fetch.FORGOTTEN:
+        raise errors.CliError(
+            "not_found",
+            "claude-session does not know this session",
+            details={"id": args.session},
+            hint="It may have been forgotten.",
+        )
+    if fetched.row is None:
+        raise harness.status_failed()
+    try:
+        written = harness.store_row(store, fetched.row)
+    except harness.Invalid:
+        raise harness.status_failed() from None
+    counts = harness.Counts(matched=1, captured=1 if written else 0)
+    ids = frozenset(fetched.row.claude_session_ids)
+    if not ids:
+        return build_report(Tally(), dry_run=False, harness_counts=counts)
+    lease = acquire(store, IngestTarget())
+    if lease is None:
+        return build_report(Tally(), dry_run=False, harness_counts=counts, files_deferred=True)
+    try:
+        with discover(ctx, args.path or ()) as discovery, lease:
+            return _locked(
+                ctx,
+                args,
+                store,
+                lease,
+                discovery,
+                deadline,
+                _since_ns(ctx, args),
+                only=ids,
+                harness_counts=counts,
+            )
+    finally:
+        with contextlib.suppress(errors.CliError):
+            lease.release()
+
+
 def run_live(ctx: Context, args: argparse.Namespace, store: Store) -> dict[str, Any]:
     deadline = run_deadline(ctx.gateway, _budget(ctx, args))
     since = _since_ns(ctx, args)
+    use = decide_harness(ctx, args)
     with discover(ctx, args.path or ()) as discovery:
         lease = acquire(store, IngestTarget())
         if lease is None:
@@ -687,7 +801,7 @@ def run_live(ctx: Context, args: argparse.Namespace, store: Store) -> dict[str, 
             return build_report(tally, dry_run=False, already_running=True)
         try:
             with lease:
-                return _locked(ctx, args, store, lease, discovery, deadline, since)
+                return _locked(ctx, args, store, lease, discovery, deadline, since, use=use)
         finally:
             with contextlib.suppress(errors.CliError):
                 lease.release()
@@ -701,10 +815,14 @@ def _locked(
     discovery: Discovery,
     deadline: float,
     since: int | None,
+    *,
+    use: HarnessUse | None = None,
+    only: frozenset[str] | None = None,
+    harness_counts: harness.Counts | None = None,
 ) -> dict[str, Any]:
     conn = store.conn
     rules = current_rules_version(conn)
-    ordered, left_out = plan(discovery, conn, rules, since)
+    ordered, left_out = plan(discovery, conn, rules, since, only)
     if args.rebuild:
         mark_for_rebuild(store, lease, ordered)
         ordered, left_out = stale_first(ordered, stale_rules_paths(conn, rules)), left_out
@@ -724,7 +842,17 @@ def _locked(
         left_out=left_out,
     )
     lease.raise_if_lost()
-    report = build_report(tally, dry_run=False)
+    if use is not None:
+        tally.warnings.extend(use.warnings)
+        if use.command is not None:
+            harness_counts = harness.capture(
+                ctx.gateway,
+                store,
+                command=use.command,
+                days=harness.window_days(ctx.settings.retention.sessions),
+                deadline=deadline,
+            )
+    report = build_report(tally, dry_run=False, harness_counts=harness_counts)
     assert ctx.actor is not None
     now = _now_ms(ctx)
     with store.transaction() as tx:
@@ -741,7 +869,7 @@ def _locked(
         record_success(
             tx,
             now,
-            complete_scope=not (args.path or args.since),
+            complete_scope=not (args.path or args.since or args.session),
             complete=tally.complete,
             full=is_full(args),
         )

@@ -35,6 +35,8 @@ __all__ = [
     "PrefixNotFoundError",
     "format_timestamp",
     "format_timestamp_ms",
+    "is_csession_id",
+    "is_session_id",
     "parse_actor",
     "parse_ago",
     "parse_csession_id",
@@ -203,6 +205,16 @@ def parse_session_id(value: object, *, field: str) -> str:
     return _match(
         _SESSION_ID, value, field, "session id", "A Claude Code session id is a lowercase UUID."
     )
+
+
+def is_session_id(value: object) -> bool:
+    """Whether ``value`` is a lowercase UUID (a Claude Code session id), as a plain test."""
+    return isinstance(value, str) and len(value) == 36 and bool(_SESSION_ID.fullmatch(value))
+
+
+def is_csession_id(value: object) -> bool:
+    """Whether ``value`` is a claude-session id (``cs-`` and 8 base32 characters)."""
+    return isinstance(value, str) and len(value) == 11 and bool(_CSESSION_ID.fullmatch(value))
 
 
 def parse_csession_id(value: object, *, field: str) -> str:
