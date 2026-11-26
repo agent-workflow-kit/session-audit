@@ -12,6 +12,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,7 +34,7 @@ from .signalhelp import (
     write_config,
 )
 from .test_retro_launch import keys, launch, prepared_corpus, rows, session_run
-from .test_retro_signals import arm, write_lock_is_free
+from .test_retro_signals import arm, fire, write_lock_is_free
 
 
 @pytest.fixture
@@ -55,9 +56,14 @@ def cs(gw: RetroGateway, tmp_path: Path) -> FakeClaudeSession:
 
 # point -> (state before recovery, whether the retro has a recorded session, whether it is final)
 DOUBLE = {
+    "pre_retro_hook": ("digesting", False, False),
     "mark_running": ("digesting", False, False),
+    "write_files": ("running", False, False),
     "start": ("running", False, False),
     "exec": ("running", True, False),
+    "collect": ("running", True, False),
+    "artifact_check": ("validating", True, False),
+    "final_write": ("running", True, False),
     "cleanup": ("escalated", True, True),
     "post_hooks": ("escalated", True, True),
 }
@@ -74,7 +80,7 @@ def test_a_second_signal_exits_at_once_with_the_first_ones_code_and_recovery_fin
     point: str,
 ) -> None:
     prepared_corpus(gw, corpus, capsys)
-    session_run(cs, "blocked")
+    session_run(cs, "done" if point == "artifact_check" else "blocked")
     pid_file = tmp_path / "exec.pid"
     if point == "exec":
         cs.script("exec", step(exec_doc(CSID, "blocked"), exit=13, sleep=60, pid_file=pid_file))
@@ -308,3 +314,40 @@ def test_housekeeping_after_a_signal_matrix_leaves_nothing_behind(
     assert not any((state / "prompts").iterdir()) if (state / "prompts").exists() else True
     assert json.loads(json.dumps(row["state"])) == "canceled"
     assert tripwire_dir  # the tripwire fixture module is in use
+
+
+def test_a_signal_during_housekeeping_releases_the_lease_of_the_retro_being_recovered(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 5 of ``retro run`` recovers a retro a dead process left; a signal there is an exit by
+    signal (nothing of this run is stored) and the lease taken for the recovery is given back, so
+    the next housekeeping takes the retro at once."""
+    from .recoveryhelp import RETRO, orphan, plant_session
+
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "blocked")
+    plant_session(corpus.home)
+    orphan(corpus.home, RETRO, state="running", csid=CSID)
+    script_status(cs, RETRO, CSID, live=True)
+    script_cleanup(cs)
+    real_run = gw.run
+
+    def run(argv: Any, **kwargs: Any) -> Any:
+        if list(argv)[1:2] == ["status"]:
+            fire(signal.SIGINT)  # during the recovery's status call
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(gw, "run", run)
+    result = launch(capsys, gw)
+    assert (result.code, result.out) == (130, "")
+    row = retro_rows(corpus.home)[RETRO]
+    assert row["lease_pid"] is None and row["state"] == "running"  # given back, not finished
+    assert [r["id"] for r in rows(corpus.home)] == [RETRO]  # this run stored nothing
+    monkeypatch.undo()
+    monkeypatch.setattr(gw, "machine_time_zone", lambda env: "UTC")
+    assert housekeep(gw, corpus).recovered == [RETRO]
+    assert retro_rows(corpus.home)[RETRO]["reason"] == "runner_lost"
