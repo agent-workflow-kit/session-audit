@@ -84,12 +84,14 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 | `--label`, `--project`, `--kind`, `--outcome` | yes | yes | yes | no |
 | `--since`, `--until` | sessions | events | sessions | `--since` only, per type |
 | `--model`, `--entrypoint` | yes | yes | no | no |
+| `--include-self-improve` | yes | yes | yes | yes |
 
 - All flags AND together. Repeated `--session` ids are a union among themselves; repeated `--label` pairs AND (a pair matches when the harness snapshot's labels contain exactly that pair).
 - `--since S` and `--until U` select sessions with `ended_at >= S` and `started_at < U` (a session with null times never matches); in `usage` they select events with `S <= ts < U` (an event with null `ts` never matches a time filter). A date `YYYY-MM-DD` is the start of that day in `time_zone`, so `--until 2026-11-20` excludes that day.
 - `--project P` matches the stored project (the first non-empty `cwd`, see Session object) by path boundary with bound parameters: `project = P or substr(project, 1, len(P) + 1) = P || '/'`, after stripping one trailing `/` from `P`. There is no wildcard and no symlink resolution.
 - `--kind` and `--outcome` match only sessions with a harness snapshot. `--model` is an exact model name among the session's models (1 to 128 characters, no control characters, DEL or surrogates; exit 2 otherwise). `--entrypoint` filters on `interactive` or `headless`.
 - Labels are unauthenticated hints: a label scope is not a confidentiality boundary (see Safety).
+- `--include-self-improve` (taken by `sessions` now; `usage`, `export` and `retro run`'s scope adopt it in their own issues; not `ingest`): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
 
 ## Time arguments
 
@@ -140,7 +142,7 @@ sessions.new      sessions whose first file was read in this run; sessions.updat
 
 ### `sessions`
 
-`session-audit sessions [--since WHEN] [--until WHEN] [--project PATH] [--label K=V]... [--kind K] [--outcome O] [--entrypoint interactive|headless] [--model M] [--sort start|tokens|cost|active] [--limit N] [--json]`
+`session-audit sessions [--since WHEN] [--until WHEN] [--project PATH] [--label K=V]... [--kind K] [--outcome O] [--entrypoint interactive|headless] [--model M] [--include-self-improve] [--sort start|tokens|cost|active] [--limit N] [--json]`
 
 Lists stored sessions, newest first by default, filtered as in Session filters. Reads the store only. `--sort start` (default) orders by `started_at` descending; `tokens` by input + output + cache_read + cache_write of the main agent plus `tokens.subagents`, descending; `cost` by `estimated_usd` descending; `active` by `active_seconds` descending; nulls last; ties by `session_id` ascending. `--limit` default 100, 1 to 1000 (else exit 2). Output: `{"sessions": [...], "truncated": bool, "store": {...}}` (`schemas/cli/sessions.json`). Each row has the fields of the Session object. `store` is `{last_ingest_at, last_complete_ingest_at}` (timestamps or null), so a reader knows how fresh the numbers are.
 
@@ -162,7 +164,7 @@ Deterministic analytics over counted events (see Counting rules). Dimensions: `d
 
 `session-audit show SESSION_ID [--json]`
 
-One stored session: the Session object, its agents and its usage rows. An agent is `{agent_id, parent_tool_call_id, agent_type, models, tokens, tool_calls, tool_errors, denials, interruptions}`, counted over the agent's own events. A usage row is counted events aggregated per (day in `time_zone`, session, agent, model): `{day, session_id, agent_id (null for the main agent), model, tokens, tool_calls, tool_errors, denials, interruptions, active_seconds}`, and is also the line shape of `export usage`; events with no model are in the row whose `model` is null and events with no slot in the row whose `day` is null. At most 1000 agents (by tokens descending, then agent id) and 10000 usage rows (by day, then agent, then model) are printed and `truncated` is true when either list was cut. Exit 10 when unknown, 21 when the prefix is ambiguous. `--json`: `schemas/cli/show.json`, `{session, agents, usage, truncated, store}`; the harness snapshot is inside `session`.
+One stored session: the Session object, its agents and its usage rows. An agent is `{agent_id, parent_tool_call_id, agent_type, models, tokens, tool_calls, tool_errors, denials, interruptions}`, counted over the agent's own events. A usage row is counted events aggregated per (day in `time_zone`, session, agent, model): `{day, session_id, agent_id (null for the main agent), model, tokens, tool_calls, tool_errors, denials, interruptions, active_seconds}`, and is also the line shape of `export usage`; events with no model are in the row whose `model` is null and events with no slot in the row whose `day` is null. At most 1000 agents (by tokens descending, then agent id) and 10000 usage rows (by day, then agent, then model; a null day sorts last, the main agent first, a null model last) are printed and `truncated` is true when either list was cut. Exit 10 when unknown, 21 when the prefix is ambiguous. `--json`: `schemas/cli/show.json`, `{session, agents, usage, truncated, store}`; the harness snapshot is inside `session`.
 
 ### `retro run`
 

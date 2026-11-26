@@ -1,0 +1,77 @@
+{
+  "sessions": [
+    {
+      "active_seconds": null,
+      "agents": 0,
+      "compactions": 0,
+      "cost": {
+        "estimated_usd": 0.0,
+        "reported_usd": null,
+        "unknown_tokens": 24
+      },
+      "denials": 0,
+      "ended_at": "2021-05-06T07:03:20Z",
+      "entrypoint": "unknown",
+      "flags": [],
+      "harness": null,
+      "interruptions": 0,
+      "models": [
+        "model-b"
+      ],
+      "parse_errors": 0,
+      "project": "/a/b/c",
+      "session_id": "33333333-3333-4333-8333-333333333333",
+      "started_at": "2021-05-06T07:03:20Z",
+      "tokens": {
+        "cache_read": 3,
+        "cache_write": 0,
+        "input": 1,
+        "output": 20,
+        "subagents": 0
+      },
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "unknown_line_types": 0,
+      "version": null
+    },
+    {
+      "active_seconds": null,
+      "agents": 0,
+      "compactions": 0,
+      "cost": {
+        "estimated_usd": 0.0,
+        "reported_usd": null,
+        "unknown_tokens": 162
+      },
+      "denials": 0,
+      "ended_at": "2021-05-06T07:01:42Z",
+      "entrypoint": "headless",
+      "flags": [],
+      "harness": null,
+      "interruptions": 0,
+      "models": [
+        "model-a"
+      ],
+      "parse_errors": 0,
+      "project": "/a/bc",
+      "session_id": "22222222-2222-4222-8222-222222222222",
+      "started_at": "2021-05-06T07:01:40Z",
+      "tokens": {
+        "cache_read": 9,
+        "cache_write": 0,
+        "input": 3,
+        "output": 150,
+        "subagents": 0
+      },
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "unknown_line_types": 0,
+      "version": null
+    }
+  ],
+  "store": {
+    "last_complete_ingest_at": "2026-01-01T00:00:00Z",
+    "last_ingest_at": "2026-01-01T00:00:00Z"
+  },
+  "truncated": true
+}
