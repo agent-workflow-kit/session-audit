@@ -163,7 +163,12 @@ def violations(source: str, filename: str) -> list[str]:
                         add(node, f"{'.'.join(dotted)}() with a name that is not a literal")
                     elif _forbidden(target.value.split(".")):
                         add(node, f"{'.'.join(dotted)}({target.value!r})")
-            if isinstance(node.func, ast.Attribute) and node.func.attr in FORBIDDEN_METHODS:
+            sanctioned = chain == ["discovery", "open"]  # reader.Discovery.open, the safe open
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in FORBIDDEN_METHODS
+                and not sanctioned
+            ):
                 add(node, f".{node.func.attr}() call")
     return found
 
@@ -313,3 +318,10 @@ def test_each_way_around_the_gateway_is_caught(source: str) -> None:
 )
 def test_ordinary_code_is_not_flagged(source: str) -> None:
     assert violations(source, "m.py") == []
+
+
+def test_discovery_open_is_the_one_sanctioned_open_method(tmp_path: Path) -> None:
+    (tmp_path / "gateway.py").write_text("", encoding="utf-8")
+    (tmp_path / "ok.py").write_text("discovery.open(candidate)\n", encoding="utf-8")
+    (tmp_path / "bad.py").write_text("other.open(candidate)\n", encoding="utf-8")
+    assert scan(tmp_path) == ["bad.py:1: .open() call"]
