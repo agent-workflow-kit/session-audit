@@ -22,6 +22,7 @@ again, at most ``NONCE_TRIES`` times). The function writes no file: the retro la
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 from collections.abc import Mapping
@@ -47,6 +48,9 @@ NONCE_TRIES = 8  # a nonce found in the content is drawn again; a real digest ne
 _NONCE = re.compile(rf"[0-9a-f]{{{NONCE_HEX_LEN}}}", re.ASCII)
 _RUN_TOKEN = re.compile(r"[A-Za-z0-9_-]{16,128}", re.ASCII)
 _FENCE_TAG = re.compile(r"(?i)</?untrusted")
+# schemas/defs.json ref, schemas/slot/manifest.json item id
+_REF = re.compile(r"s([1-9][0-9]{0,1}|[1-4][0-9]{2}|500)", re.ASCII)
+_ITEM_REF = re.compile(r"s([1-9][0-9]{0,1}|[1-4][0-9]{2}|500)\.i[0-9]{3,6}", re.ASCII)
 
 # The limits the retro session is given (Slot contract, Inputs; Retro artifact).
 LIMITS: dict[str, Any] = {
@@ -105,10 +109,22 @@ def _check_section(section: SessionSection) -> None:
     this is the second wall, not the first)."""
     lines = section.lines
     for line in lines:
-        if "\n" in line or "\r" in line:
+        # the sentinel makes a trailing or lone terminator count as a second line
+        if len(f"{line}x".splitlines()) != 1:
             raise ValueError(f"section {section.ref} holds a line break inside a line")
         if _FENCE_TAG.search(line):
             raise ValueError(f"section {section.ref} holds a fence tag")
+
+
+def _check_refs(section: SessionSection) -> None:
+    """The refs and the session id go into the manifest: check their shape, never echo them."""
+    if not _REF.fullmatch(section.ref):
+        raise ValueError("a section ref is not s1 to s500")
+    if not grammar.is_session_id(section.session_id):
+        raise ValueError(f"the session id of {section.ref} is not a Claude Code session id")
+    for item in section.items:
+        if not _ITEM_REF.fullmatch(item.ref) or not item.ref.startswith(f"{section.ref}."):
+            raise ValueError(f"an item ref of {section.ref} is not s<N>.i<NNN> of its section")
 
 
 def _nonce(gateway: Gateway, plain: tuple[str, ...]) -> str:
@@ -144,7 +160,7 @@ def _manifest(
         "digest_sha256": digest_sha256,
         "sessions": sessions,
         "coverage": result.coverage(digest_bytes),
-        "limits": LIMITS,
+        "limits": copy.deepcopy(LIMITS),
         "finding_categories": list(FINDING_CATEGORIES),
         "target_classes": list(TARGET_CLASSES),
     }
@@ -167,6 +183,7 @@ def finish_digest(
     if not result.sections:
         raise ValueError("a digest needs at least one session")
     for section in result.sections:
+        _check_refs(section)
         _check_section(section)
     plain = (*result.preamble(retro), *(section.text for section in result.sections))
     nonce = _nonce(gateway, plain)
