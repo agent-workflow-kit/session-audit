@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
@@ -37,7 +38,7 @@ from .grammar import (
     parse_label,
     parse_when,
 )
-from .store import open_read_only, state_dir
+from .store import open_read_only, state_dir, storage_error
 from .textsafe import show
 
 SELF_IMPROVE_LABEL = "owner=self-improve"
@@ -45,13 +46,21 @@ USAGE_ROW_MAX = 10_000
 PREFIX_PROBE = MAX_PREFIX_MATCHES + 1  # one more than the matches an error lists
 EPOCH_US_PER_MS = 1000
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_INSTANT = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z")
 
 
 def one_line(value: object) -> str:
-    """An untrusted value as text for one output line: sanitized, and every line break shown as a
-    visible ``\\n`` (the sanitizer keeps line breaks, and a field must not become several
-    lines)."""
-    return show(value).replace("\r", "\\r").replace("\n", "\\n")
+    """An untrusted value as text for one output line, sanitized exactly once. The sanitizer
+    turns every line break (and every control character) into a visible marker such as
+    ``<U+000A>``, so the result has no line break and cannot start a forged line. Its output is
+    final: print it with ``put``, never through ``Context.say``, which would sanitize the
+    markers again."""
+    return show(value)
+
+
+def put(ctx: Context, text: str) -> None:
+    """Print one line whose every untrusted part already went through ``one_line``."""
+    ctx.out.write(text + "\n")
 
 
 # --- the store ---------------------------------------------------------------------------------
@@ -74,6 +83,25 @@ def open_reader(ctx: Context) -> Iterator[sqlite3.Connection | None]:
         yield conn
     finally:
         conn.close()
+
+
+def read_store[T](ctx: Context, work: Callable[[sqlite3.Connection | None], T]) -> T:
+    """Run the read phase of a command in one read transaction (``work`` gets the connection, or
+    None without a store) and return its result. A read-only view opened ``immutable`` can meet a
+    writer that started after the ``-wal`` check and read a torn page (``sqlite3.DatabaseError``):
+    the view is then reopened, checking for ``-wal`` again, and the work retried once. A second
+    failure, or any other ``sqlite3.Error`` (an empty or unmigrated ``state.db``), is the store
+    error (exit 12 ``store_unwritable``). ``work`` must have no side effect outside its result."""
+    for attempt in (1, 2):
+        try:
+            with open_reader(ctx) as conn:
+                return work(conn)
+        except sqlite3.DatabaseError as exc:
+            if attempt == 2:
+                raise storage_error(exc) from None
+        except sqlite3.Error as exc:
+            raise storage_error(exc) from None
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def freshness(conn: sqlite3.Connection | None) -> dict[str, str | None]:
@@ -126,15 +154,21 @@ class Snapshot:
     repo: str | None
 
     @property
+    def shown_kind(self) -> str:
+        """The kind as output and as ``--kind`` compares it (a null kind is ``unknown``)."""
+        return self.kind if self.kind is not None else "unknown"
+
+    @property
     def order(self) -> tuple[str, str]:
         """``updated_at`` compared as an instant would be (the fraction padded to nine digits,
-        so ``...05Z`` and ``...05.5Z`` order right), for any text of the stored shape."""
+        so ``...05Z`` and ``...05.5Z`` order right). Text that is not a timestamp ranks below every
+        real one."""
         return _instant_key(self.updated_at)
 
     def to_json(self) -> dict[str, object]:
         return {
             "csession_id": self.csession_id,
-            "kind": self.kind if self.kind is not None else "unknown",
+            "kind": self.shown_kind,
             "run": self.run if self.run is not None else 0,
             "labels": list(self.labels),
             "updated_at": self.updated_at,
@@ -149,9 +183,14 @@ class Snapshot:
 
 
 def _instant_key(text: str) -> tuple[str, str]:
-    if len(text) >= 20 and text.endswith("Z") and text[19] in ".Z":
-        return text[:19], text[20:-1].ljust(9, "0") if text[19] == "." else "0" * 9
-    return text, ""
+    found = _INSTANT.fullmatch(text)
+    if found is None:
+        return "", ""
+    try:
+        datetime.strptime(found.group(1), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:  # the shape of a timestamp, not a date
+        return "", ""
+    return found.group(1), (found.group(2) or "").ljust(9, "0")
 
 
 def _labels(text: object) -> tuple[str, ...]:
@@ -167,7 +206,8 @@ def _labels(text: object) -> tuple[str, ...]:
 _SNAPSHOT_SELECT = (
     "SELECT j.value, h.csession_id, h.updated_at, h.kind, h.labels, h.run, h.outcome, "
     "h.end_reason, h.cost_usd, h.turns, h.skill, h.repo "
-    "FROM harness_runs h, json_each(h.claude_session_ids) j"
+    "FROM harness_runs h, json_each(h.claude_session_ids) j "
+    "WHERE json_valid(h.claude_session_ids)"
 )
 
 
@@ -212,7 +252,7 @@ def snapshot_index(conn: sqlite3.Connection) -> dict[str, Snapshot]:
 def snapshot_for(conn: sqlite3.Connection, session_id: str) -> Snapshot | None:
     """The snapshot joined to one session, or None."""
     best: Snapshot | None = None
-    for row in conn.execute(_SNAPSHOT_SELECT + " WHERE j.value = ?", (session_id,)):
+    for row in conn.execute(_SNAPSHOT_SELECT + " AND j.value = ?", (session_id,)):
         snap = _snapshot(row)
         if _newer(snap, best):
             best = snap
@@ -274,7 +314,7 @@ class Filters:
             return True
         if snapshot is None:
             return False
-        if self.kind is not None and snapshot.kind != self.kind:
+        if self.kind is not None and snapshot.shown_kind != self.kind:
             return False
         if self.outcome is not None and snapshot.outcome != self.outcome:
             return False
@@ -390,7 +430,8 @@ def resolve_session(conn: sqlite3.Connection | None, prefix: str) -> str:
     raise error
 
 
-# One group per (slot, agent, model): the day needs the time zone, so it is applied in Python.
+# One group per (slot, agent, resolved model; column 3, because a name in GROUP BY would be the
+# raw ``e.model`` column): the day needs the time zone, so it is applied in Python.
 # The WHERE names the session and ``counted`` so ``events_session_counted`` serves it.
 USAGE_SQL = (
     "SELECT e.slot, e.agent_id, "
@@ -405,7 +446,7 @@ USAGE_SQL = (
     f"SUM(CASE WHEN e.kind = 'turn' THEN {derive.SECONDS_MS_SQL.replace('seconds', 'e.seconds')} "
     "END) "
     "FROM events e WHERE e.session_id = ? AND e.counted = 1 "
-    "GROUP BY e.slot, e.agent_id, model"
+    "GROUP BY e.slot, e.agent_id, 3"
 )
 
 

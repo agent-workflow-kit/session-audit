@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import heapq
+import sqlite3
 from collections.abc import Callable
 from typing import Any
 
@@ -24,7 +25,8 @@ from ..sessionquery import (
     build_filters,
     freshness,
     one_line,
-    open_reader,
+    put,
+    read_store,
     selected,
     session_json,
 )
@@ -67,13 +69,16 @@ def sort_key(sort: str) -> Callable[[Row], tuple[Any, ...]]:
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
     filters = build_filters(ctx, args)
-    with open_reader(ctx) as conn:
-        rows: list[Row] = []
+
+    def read(conn: sqlite3.Connection | None) -> tuple[list[Row], dict[str, str | None]]:
+        found: list[Row] = []
         if conn is not None:
-            rows = heapq.nsmallest(
+            found = heapq.nsmallest(
                 args.limit + 1, selected(conn, ctx, filters), key=sort_key(args.sort)
             )
-        store = freshness(conn)
+        return found, freshness(conn)
+
+    rows, store = read_store(ctx, read)
     truncated = len(rows) > args.limit
     rows = rows[: args.limit]
     if ctx.json:
@@ -92,19 +97,21 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 def print_table(
     ctx: Context, rows: list[Row], truncated: bool, store: dict[str, str | None]
 ) -> None:
-    """One line per session; every field that is not a constant goes through the sanitizer
-    (``Context.say``)."""
+    """One line per session; every stored text goes through ``one_line`` (the sanitizer, once)
+    and the line is printed with ``put``."""
     for values, _snapshot in rows:
-        doc = values.to_json()
-        started = doc["started_at"] or "-"
+        started = values.to_json()["started_at"] or "-"
         tokens = values.tokens.total + values.subagent_tokens
-        cost = doc["cost"]["estimated_usd"]  # type: ignore[index]
+        cost = derive.usd_json(values.cost.estimated)
         project = one_line(values.project or "-")
-        ctx.say(f"{values.session_id}  {started}  {tokens} tokens  ${cost:.2f}  {project}")
+        put(
+            ctx,
+            f"{one_line(values.session_id)}  {started}  {tokens} tokens  ${cost:.2f}  {project}",
+        )
     noun = "session" if len(rows) == 1 else "sessions"
     more = " (more matched; raise --limit)" if truncated else ""
-    ctx.say(f"{len(rows)} {noun}{more}")
-    ctx.say(f"last ingest: {store['last_ingest_at'] or 'never'}")
+    put(ctx, f"{len(rows)} {noun}{more}")
+    put(ctx, f"last ingest: {store['last_ingest_at'] or 'never'}")
 
 
 COMMANDS = (Command(("sessions",), "list stored sessions", add_arguments, check, run),)

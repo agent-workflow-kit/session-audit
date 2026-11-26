@@ -84,13 +84,14 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 | `--label`, `--project`, `--kind`, `--outcome` | yes | yes | yes | no |
 | `--since`, `--until` | sessions | events | sessions | `--since` only, per type |
 | `--model`, `--entrypoint` | yes | yes | no | no |
+| `--include-self-improve` | yes | yes | yes | yes |
 
 - All flags AND together. Repeated `--session` ids are a union among themselves; repeated `--label` pairs AND (a pair matches when the harness snapshot's labels contain exactly that pair).
 - `--since S` and `--until U` select sessions with `ended_at >= S` and `started_at < U` (a session with null times never matches); in `usage` they select events with `S <= ts < U` (an event with null `ts` never matches a time filter). A date `YYYY-MM-DD` is the start of that day in `time_zone`, so `--until 2026-11-20` excludes that day.
 - `--project P` matches the stored project (the first non-empty `cwd`, see Session object) by path boundary with bound parameters: `project = P or substr(project, 1, len(P) + 1) = P || '/'`, after stripping one trailing `/` from `P`. There is no wildcard and no symlink resolution.
 - `--kind` and `--outcome` match only sessions with a harness snapshot. `--model` is an exact model name among the session's models (1 to 128 characters, no control characters, DEL or surrogates; exit 2 otherwise). `--entrypoint` filters on `interactive` or `headless`.
 - Labels are unauthenticated hints: a label scope is not a confidentiality boundary (see Safety).
-- `--include-self-improve` (`sessions`, `usage`, `export` and `retro run`'s scope; not `ingest`): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
+- `--include-self-improve` (taken by `sessions` now; `usage`, `export` and `retro run`'s scope adopt it in their own issues; not `ingest`): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
 
 ## Time arguments
 

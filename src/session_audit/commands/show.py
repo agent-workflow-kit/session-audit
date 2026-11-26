@@ -11,6 +11,7 @@ TODO(#19): snapshots are read from ``harness_runs``; ``ingest`` fills it once #1
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from typing import Any
 
 from .. import derive, errors
@@ -19,7 +20,8 @@ from ..grammar import GrammarError, parse_session_prefix
 from ..sessionquery import (
     freshness,
     one_line,
-    open_reader,
+    put,
+    read_store,
     resolve_session,
     session_json,
     snapshot_for,
@@ -41,7 +43,7 @@ def check(ctx: Context, args: argparse.Namespace) -> None:
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
-    with open_reader(ctx) as conn:
+    def read(conn: sqlite3.Connection | None) -> dict[str, Any]:
         try:
             session_id = resolve_session(conn, args.session_id)
         except GrammarError as exc:
@@ -55,14 +57,15 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         snapshot = snapshot_for(conn, session_id)
         agents, agents_cut = derive.agent_values(conn, session_id)
         usage, usage_cut = usage_rows(conn, session_id, ctx.settings.zone())
-        store = freshness(conn)
-    document = {
-        "session": session_json(values, snapshot),
-        "agents": [x.to_json() for x in agents],
-        "usage": usage,
-        "truncated": agents_cut or usage_cut,
-        "store": store,
-    }
+        return {
+            "session": session_json(values, snapshot),
+            "agents": [x.to_json() for x in agents],
+            "usage": usage,
+            "truncated": agents_cut or usage_cut,
+            "store": freshness(conn),
+        }
+
+    document = read_store(ctx, read)
     if ctx.json:
         ctx.emit_json(document)
         return 0
@@ -71,46 +74,51 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def print_session(ctx: Context, document: dict[str, Any]) -> None:
-    """Human output: one fact per line, every untrusted text through the sanitizer."""
+    """Human output: one fact per line. Every value read from the store goes through ``one_line``
+    (the sanitizer, once) and the line is printed with ``put``, so a field is one visible run of
+    text and cannot start another line."""
+
+    def say(text: str) -> None:
+        put(ctx, text)
+
+    o = one_line
     s = document["session"]
-    ctx.say(f"session {s['session_id']}")
-    ctx.say(f"project: {one_line(s['project'] or '-')}")
-    ctx.say(f"entrypoint: {s['entrypoint']}  version: {one_line(s['version'] or '-')}")
-    ctx.say(f"started: {s['started_at'] or '-'}  ended: {s['ended_at'] or '-'}")
-    ctx.say(f"models: {', '.join(one_line(m) for m in s['models']) or '-'}")
+    say(f"session {o(s['session_id'])}")
+    say(f"project: {o(s['project'] or '-')}")
+    say(f"entrypoint: {o(s['entrypoint'])}  version: {o(s['version'] or '-')}")
+    say(f"started: {o(s['started_at'] or '-')}  ended: {o(s['ended_at'] or '-')}")
+    say(f"models: {', '.join(o(m) for m in s['models']) or '-'}")
     t = s["tokens"]
-    ctx.say(
+    say(
         f"tokens: input {t['input']} output {t['output']} cache_read {t['cache_read']} "
         f"cache_write {t['cache_write']} subagents {t['subagents']}"
     )
-    ctx.say(f"cost: ${s['cost']['estimated_usd']:.2f} (estimated)")
-    ctx.say(
+    say(f"cost: ${s['cost']['estimated_usd']:.2f} (estimated)")
+    say(
         f"tool calls {s['tool_calls']}  errors {s['tool_errors']}  denials {s['denials']}  "
         f"interruptions {s['interruptions']}"
     )
     if s["flags"]:
-        ctx.say(f"flags: {', '.join(s['flags'])}")
+        say(f"flags: {', '.join(o(f) for f in s['flags'])}")
     harness = s["harness"]
     if harness is not None:
-        ctx.say(
-            f"harness: {harness['csession_id']} kind {one_line(harness['kind'])} (labels are hints)"
-        )
+        say(f"harness: {o(harness['csession_id'])} kind {o(harness['kind'])} (labels are hints)")
         for label in harness["labels"]:
-            ctx.say(f"  label: {one_line(label)}")
-    ctx.say(f"agents: {len(document['agents'])}")
+            say(f"  label: {o(label)}")
+    say(f"agents: {len(document['agents'])}")
     for agent in document["agents"]:
-        ctx.say(
-            f"  {one_line(agent['agent_id'])}  {one_line(agent['agent_type'] or '-')}  "
+        say(
+            f"  {o(agent['agent_id'])}  {o(agent['agent_type'] or '-')}  "
             f"{sum(agent['tokens'].values())} tokens"
         )
-    ctx.say(f"usage rows: {len(document['usage'])}")
+    say(f"usage rows: {len(document['usage'])}")
     for row in document["usage"]:
-        who = one_line(row["agent_id"] or "main")
-        model = one_line(row["model"] or "-")
-        ctx.say(f"  {row['day'] or '-'}  {who}  {model}  {sum(row['tokens'].values())} tokens")
+        who = o(row["agent_id"] or "main")
+        model = o(row["model"] or "-")
+        say(f"  {o(row['day'] or '-')}  {who}  {model}  {sum(row['tokens'].values())} tokens")
     if document["truncated"]:
-        ctx.say("(output was cut at the documented caps)")
-    ctx.say(f"last ingest: {document['store']['last_ingest_at'] or 'never'}")
+        say("(output was cut at the documented caps)")
+    say(f"last ingest: {o(document['store']['last_ingest_at'] or 'never')}")
 
 
 COMMANDS = (Command(("show",), "show one stored session", add_arguments, check, run),)
