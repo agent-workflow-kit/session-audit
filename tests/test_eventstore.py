@@ -752,3 +752,37 @@ def test_force_rebuilds_and_gives_the_same_counted_events(env: Env) -> None:
 
 def test_the_ingest_lease_guard_is_the_real_lease_target(env: Env) -> None:
     assert isinstance(env.lease.target, IngestTarget)
+
+
+def test_a_big_file_is_written_and_rebuilt_in_bounded_transactions(env: Env) -> None:
+    """Scaled down (6,000 events, chunks of 500 and batches of 400 instead of 2,000 and 2,000, so
+    the test is quick): every write transaction changes a number of rows bounded by its batch, and
+    a rebuild never holds one over the whole file."""
+    n, chunk, batch = 6000, 500, 400
+    env.write("a", [message(f"k{i}", 5, t=i % 3000) for i in range(n)])
+    env.write("b", [message(f"k{i}", 4, t=i % 3000) for i in range(0, n, 3)])
+    changes: list[int] = []
+    real = env.store.transaction
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def measuring():  # type: ignore[no-untyped-def]
+        with real() as conn:
+            start = conn.total_changes
+            yield conn
+            changes.append(conn.total_changes - start)
+
+    env.store.transaction = measuring  # type: ignore[method-assign]
+    env.ingest("b", session=SESSION_B, chunk_events=chunk)
+    env.ingest("a", session=SESSION_A, chunk_events=chunk)
+    assert max(changes) <= 6 * chunk  # events, owner flips, identity and file rows of one chunk
+    changes.clear()
+    env.ingest("a", session=SESSION_A, force=True, chunk_events=chunk, delete_batch_size=batch)
+    assert max(changes) <= 6 * max(chunk, batch)
+    assert len(changes) >= n // batch + n // chunk  # many short transactions, not one
+    env.store.transaction = real  # type: ignore[method-assign]
+    assert rows(env, "SELECT count(*) FROM events WHERE counted = 1") == [(n,)]
+    assert rows(
+        env, "SELECT count(*) FROM events WHERE counted = 1 AND session_id = ?", SESSION_A
+    ) == [(n,)]
