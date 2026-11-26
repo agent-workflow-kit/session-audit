@@ -41,6 +41,7 @@ __all__ = [
     "RunFiles",
     "delete_local",
     "outcome_path",
+    "read_digest",
     "prompt_text",
     "write_run_files",
 ]
@@ -247,12 +248,13 @@ def _open_parent(gateway: Gateway, state: str, parent: str) -> DirHandle | None:
         root.close()
 
 
-def delete_local(gateway: Gateway, state: str, retro_id: str) -> bool:
+def delete_local(gateway: Gateway, state: str, retro_id: str, *, apply: bool = True) -> bool:
     """Remove ``prompts/<retro_id>/`` and ``outcomes/<retro_id>.json``; True when both are gone
     (Collect and cleanup, ``delete_local``). Idempotent; never follows a symlink, a symlinked
     ``prompts`` or ``outcomes`` included (that is "not clean", nothing is deleted through it). The
     digest directory stays until its retention expires. An id that is not a retro id removes
-    nothing (False)."""
+    nothing (False). With ``apply=False`` nothing is removed and the answer is the one a real
+    removal would give (the planning form)."""
     if not RETRO_ID.fullmatch(retro_id):
         return False
     clean = True
@@ -265,7 +267,7 @@ def delete_local(gateway: Gateway, state: str, retro_id: str) -> bool:
         if handle is None:
             continue
         try:
-            clean &= remove_tree(gateway, handle, name.encode())
+            clean &= remove_tree(gateway, handle, name.encode(), apply=apply)
         except OSError:
             clean = False
         finally:
@@ -273,10 +275,10 @@ def delete_local(gateway: Gateway, state: str, retro_id: str) -> bool:
     return clean
 
 
-def remove_digest(gateway: Gateway, state: str, retro_id: str) -> bool:
+def remove_digest(gateway: Gateway, state: str, retro_id: str, *, apply: bool = True) -> bool:
     """Remove ``digests/<retro_id>/`` (a retro that never ran has no use for its digest); a
     symlinked ``digests`` is not entered (False). An id that is not a retro id removes nothing
-    (False)."""
+    (False). ``apply=False`` is the planning form (see ``delete_local``)."""
     if not RETRO_ID.fullmatch(retro_id):
         return False
     try:
@@ -286,8 +288,43 @@ def remove_digest(gateway: Gateway, state: str, retro_id: str) -> bool:
     if handle is None:
         return True
     try:
-        return remove_tree(gateway, handle, retro_id.encode())
+        return remove_tree(gateway, handle, retro_id.encode(), apply=apply)
     except OSError:
         return False
     finally:
         handle.close()
+
+
+DIGEST_READ_MAX = 1024 * 1024  # the ``digest`` string of ``retro show --json`` holds at most this
+
+
+def read_digest(gateway: Gateway, state: str, retro_id: str) -> bytes | None:
+    """The bytes of ``digests/<retro_id>/digest.md`` (at most ``DIGEST_READ_MAX``), or None when it
+    is not there (pruned) or cannot be read as a plain file of this user: no symlink is followed
+    on the way, and an id that is not a retro id reads nothing."""
+    if not RETRO_ID.fullmatch(retro_id):
+        return None
+    try:
+        parent = _open_parent(gateway, state, DIGESTS)
+    except OSError:
+        return None
+    if parent is None:
+        return None
+    try:
+        directory = parent.open_dir(retro_id.encode())
+        try:
+            handle = directory.open_file(b"digest.md")
+            try:
+                info = gateway.fstat(handle)
+                if not statmod.S_ISREG(info.st_mode) or info.st_uid != gateway.uid():
+                    return None
+                gateway.set_blocking(handle)
+                return handle.read(DIGEST_READ_MAX)
+            finally:
+                handle.close()
+        finally:
+            directory.close()
+    except OSError:
+        return None
+    finally:
+        parent.close()

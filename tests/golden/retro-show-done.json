@@ -1,0 +1,100 @@
+{
+  "again_of": null,
+  "candidates": [
+    {
+      "findings": [
+        "f1"
+      ],
+      "id": "c1",
+      "proposal": "do it",
+      "risk": "medium",
+      "sessions": [
+        "s1"
+      ],
+      "target_class": "skill",
+      "target_hint": "a title"
+    }
+  ],
+  "cleanup": null,
+  "cost_usd": null,
+  "counts": {
+    "candidates": 1,
+    "findings": 1,
+    "items": 2,
+    "over_cap": 0,
+    "sessions": 1,
+    "skipped": 0
+  },
+  "coverage": {
+    "digest_bytes": 10,
+    "items_kept": 2,
+    "items_total": 2,
+    "sessions": []
+  },
+  "created_at": "1970-01-02T00:00:00Z",
+  "csession_id": null,
+  "dropped": {
+    "candidates": 0,
+    "findings": 0
+  },
+  "findings": [
+    {
+      "category": "friction",
+      "detail": "a detail",
+      "evidence": [
+        {
+          "kind": "item",
+          "ref": "s1.i001"
+        },
+        {
+          "kind": "metric",
+          "ref": "s1.active_seconds"
+        }
+      ],
+      "id": "f1",
+      "severity": "low",
+      "title": "a title"
+    }
+  ],
+  "finished_at": null,
+  "id": "ra-baaaaaaa",
+  "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "metrics": {
+    "total.tool_calls": 1
+  },
+  "model": null,
+  "num_turns": null,
+  "outcome": null,
+  "reason": null,
+  "redacted": 0,
+  "sandbox_active": null,
+  "scope": {
+    "kind": null,
+    "labels": [],
+    "outcome": null,
+    "project": null,
+    "sessions": [
+      "11111111-1111-4111-8111-111111111111"
+    ],
+    "since": null,
+    "until": null
+  },
+  "scope_resolved": {
+    "since": null,
+    "until": null
+  },
+  "sessions": [
+    {
+      "csession_id": null,
+      "ref": "s1",
+      "session_id": "11111111-1111-4111-8111-111111111111"
+    }
+  ],
+  "skill": "session-audit:audit",
+  "skipped": [],
+  "state": "done",
+  "summary": "a summary",
+  "superseded": true,
+  "updated_at": "1970-01-02T00:00:00Z",
+  "warnings": []
+}

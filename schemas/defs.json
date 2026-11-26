@@ -1459,6 +1459,10 @@
             "$ref": "defs.json#/$defs/stored_candidate"
           },
           "maxItems": 20
+        },
+        "superseded": {
+          "type": "boolean",
+          "description": "Optional. True when a later done retro with the same key exists (the retro list row's meaning). Printed by retro show and export retros."
         }
       },
       "required": [
@@ -2059,6 +2063,15 @@
               },
               "maxItems": 20,
               "uniqueItems": true
+            },
+            "deleted": {
+              "type": "array",
+              "items": {
+                "$ref": "defs.json#/$defs/retro_id"
+              },
+              "maxItems": 1000,
+              "uniqueItems": true,
+              "description": "retro delete: the retros that were deleted when a later step failed."
             },
             "field": {
               "type": "string",

@@ -30,7 +30,8 @@ def remove_tree(gateway: Gateway, parent: DirHandle, name: bytes, *, apply: bool
     """Remove the entry ``name`` of ``parent`` and everything below it. True when it is gone (a
     missing entry counts), False when something was left in place or ``name`` is not a single
     path component (nothing is touched then). With ``apply=False`` nothing is removed and the
-    answer is the one a real removal would give (the planning form of ``prune``)."""
+    answer is the one a real removal would give (the planning form of ``prune`` and ``retro
+    delete``); a directory the owner cannot write to and search is reported as not removable."""
     if not is_component(name):
         return False
     try:
@@ -77,6 +78,8 @@ def _remove_dir(
         names, more = handle.entries(MAX_ENTRIES)
         if more:
             return False
+        if names and not apply and opened.st_mode & 0o300 != 0o300:
+            return False  # planning: an owner without write and search on it cannot empty it
         for child in names:
             try:
                 child_info = handle.lstat(child)

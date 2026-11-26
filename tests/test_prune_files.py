@@ -301,3 +301,24 @@ def test_a_check_only_walk_removes_nothing_and_gives_the_same_answer(tmp_path: P
     assert remove_tree(ClockedGateway(), parent, b"tree", apply=False) is False
     assert deep.exists()
     parent.close()
+
+
+def test_an_empty_read_only_directory_plans_removable_but_a_full_one_does_not(
+    tmp_path: Path,
+) -> None:
+    parent_dir = tmp_path / "parent"
+    (parent_dir / "empty").mkdir(parents=True, mode=0o755)
+    (parent_dir / "empty").chmod(0o500)
+    full = parent_dir / "full"
+    full.mkdir()
+    (full / "f").write_text("x", encoding="utf-8")
+    full.chmod(0o500)
+    parent = handle_of(parent_dir)
+    try:
+        assert remove_tree(ClockedGateway(), parent, b"empty", apply=False) is True
+        assert remove_tree(ClockedGateway(), parent, b"full", apply=False) is False
+        assert remove_tree(ClockedGateway(), parent, b"empty") is True
+        assert not (parent_dir / "empty").exists()
+    finally:
+        parent.close()
+        full.chmod(0o700)

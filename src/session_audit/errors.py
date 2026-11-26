@@ -51,6 +51,7 @@ DETAIL_KEYS = {
     "retro_id",
     "id",
     "matches",
+    "deleted",
     "field",
     "hook",
     "outcome",
@@ -110,6 +111,7 @@ REQUIRED: dict[str, set[str]] = {
 
 _MESSAGE_MAX = 2048
 _MATCHES_MAX = 20
+_DELETED_MAX = 1000
 _STRING_KEYS = {"retro_id", "id", "field", "outcome", "end_reason"}
 _ID_MAX = 128
 # The patterns of schemas/defs.json (error.details, retro_id, token); ``fullmatch`` ends at the
@@ -161,6 +163,15 @@ def _check_details(code: str, details: dict[str, Any]) -> None:
             raise ValueError(
                 "details: matches must be at most 20 distinct strings of 1 to 128 characters"
             )
+    if "deleted" in details:
+        deleted = details["deleted"]
+        if (
+            not isinstance(deleted, list)
+            or len(deleted) > _DELETED_MAX
+            or len(set(map(str, deleted))) != len(deleted)
+            or not all(isinstance(d, str) and _PATTERNS["retro_id"].fullmatch(d) for d in deleted)
+        ):
+            raise ValueError("details: deleted must be at most 1000 distinct retro ids")
     if "hook" in details and details["hook"] not in _HOOKS:
         raise ValueError("details: hook is not a hook name")
 

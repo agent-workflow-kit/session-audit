@@ -127,6 +127,8 @@ class FakeGateway:
         self.on_open: Callable[[str], None] | None = None
         self._next_ino = 100
         self.calls: list[dict[str, object]] = []
+        self.prompts: list[str] = []
+        self.answers: list[str] = []
         self.crontab = ""
         self.pid_value = 4242
         self.process_starts: dict[int, str] = {4242: "boot-4242"}  # pid -> start token (running)
@@ -206,6 +208,10 @@ class FakeGateway:
 
     def sleep(self, seconds: float) -> None:
         self.clock.advance(seconds)
+
+    def ask(self, prompt: str, *, limit: int = 64) -> str:
+        self.prompts.append(prompt)
+        return self.answers.pop(0) if self.answers else ""
 
     def token_hex(self, nbytes: int) -> str:
         if self.nonces:
