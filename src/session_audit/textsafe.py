@@ -48,7 +48,7 @@ _INVISIBLE = frozenset(
 )
 _MAX_MARKS = 3
 _SURROGATES = re.compile("[\ud800-\udfff]")
-_UNTRUSTED_CLOSE = re.compile(r"(?i)</untrusted")
+_UNTRUSTED_TAG = re.compile(r"(?i)<(/?)untrusted")
 
 
 def _marker(ch: str) -> str:
@@ -118,8 +118,10 @@ def decode_utf8(data: bytes) -> str:
 
 
 def neutralize_untrusted(s: str) -> str:
-    """Write every ``</untrusted`` (any case) as ``&lt;/untrusted``; the digest applies it last."""
-    return _UNTRUSTED_CLOSE.sub("&lt;/untrusted", s)
+    """Write every ``</untrusted`` and ``<untrusted`` (any case) as ``&lt;/untrusted`` and
+    ``&lt;untrusted``; the digest applies it last, so no text holds a fence tag of either kind
+    (the real fence lines are added around the sections afterwards, with a random nonce)."""
+    return _UNTRUSTED_TAG.sub(lambda m: f"&lt;{m.group(1)}untrusted", s)
 
 
 def show(value: object) -> str:

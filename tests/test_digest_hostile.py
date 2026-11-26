@@ -138,6 +138,9 @@ def test_hostile_text_in_every_field_cannot_forge_a_line(
     assert_well_formed(text, out)
     assert text.count(OPEN) == 2 and text.count(CLOSE) == 2
     assert "</untrusted" not in text.replace(CLOSE, "").lower()
+    # an opening tag survives only in the two real fence lines and the one rule line
+    kept = [ln for ln in text.split("\n") if ln not in (OPEN, CLOSE, digest.DIGEST_RULE)]
+    assert "<untrusted" not in "\n".join(kept).lower()
     # every untrusted byte that is a line break, an escape, or a bidi control is a visible marker
     for bad in ("\x1b", "\u2028", "\u202e", "\x00", "\x85", "\ufeff"):
         assert bad not in text

@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import math
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -706,3 +707,10 @@ def test_open_private_read_only_refuses_create_and_append(tmp_path: Path) -> Non
         SystemGateway().open_private(tmp_path / "f", create=True, read_only=True)
     with pytest.raises(ValueError):
         SystemGateway().open_private(tmp_path / "f", create=False, append=True, read_only=True)
+
+
+def test_token_hex_is_random_lowercase_hex_of_twice_the_bytes() -> None:
+    gw = SystemGateway()
+    first, second = gw.token_hex(16), gw.token_hex(16)
+    assert re.fullmatch(r"[0-9a-f]{32}", first) and first != second
+    assert len(gw.token_hex(3)) == 6

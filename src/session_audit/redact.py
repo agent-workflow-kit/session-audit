@@ -2,9 +2,10 @@
 
 ``digest_text`` runs, in this order: ``fix_surrogates``, the 65,536 code point work bound, NFC,
 redaction, the cut (at a code point, never inside a ``[REDACTED:<kind>]`` marker), the sanitizer
-and the ``</untrusted`` neutralizer. The output is deterministic. Redaction reads a window of
-twice the work bound, so a secret that starts inside the bound and ends after it is redacted whole;
-the output ends at the bound, or after the marker of a match that starts inside it.
+and the fence-tag neutralizer (``</untrusted``, ``<untrusted``). The
+output is deterministic. Redaction reads a window of twice the work bound, so a secret that
+starts inside the bound and ends after it is redacted whole; the output ends at the
+bound, or after the marker of a match that starts inside it.
 
 Redaction finds spans (built-in patterns from ``redact_patterns.toml``, private-key blocks,
 literal masks, configured token prefixes), merges overlapping spans and writes one marker per
@@ -53,7 +54,8 @@ __all__ = [
 # database, so the sanitized text of a code point assigned in a newer Unicode version differs
 # across Python versions (U+2FFC: a marker on 3.12, kept on 3.13). UNICODE_VERSION names the
 # database in use so a consumer can record or compare it; it is NOT part of the retro key.
-DIGEST_FORMAT = 1
+# 2 (issue #22): an opening ``<untrusted`` tag in text is neutralized too, like ``</untrusted``.
+DIGEST_FORMAT = 2
 UNICODE_VERSION = unicodedata.unidata_version
 
 WORK_BOUND = 65_536

@@ -79,6 +79,9 @@ class FakeGateway:
         self.time_zone: str | None = "UTC"
         self.time_zone_env: Mapping[str, str] | None = None
         self.reads: list[str] = []
+        # Hex strings token_hex hands out in order (the last one repeats); empty: a counter.
+        self.nonces: list[str] = []
+        self._nonce_count = 0
         # Called with the normalized path of every directory or file opened below a root, before
         # the open looks at the tree: a test swaps the entry here to stage a race.
         self.on_open: Callable[[str], None] | None = None
@@ -118,6 +121,12 @@ class FakeGateway:
 
     def sleep(self, seconds: float) -> None:
         self.clock.advance(seconds)
+
+    def token_hex(self, nbytes: int) -> str:
+        if self.nonces:
+            return self.nonces.pop(0) if len(self.nonces) > 1 else self.nonces[0]
+        self._nonce_count += 1
+        return f"{self._nonce_count:0{2 * nbytes}x}"
 
     def pid(self) -> int:
         return self.pid_value

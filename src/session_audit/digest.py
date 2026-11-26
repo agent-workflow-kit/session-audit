@@ -2,9 +2,9 @@
 
 ``build_digest(ctx, scope, env=...)`` builds, with no model, the sessions of a retro scope as
 sections of ``digest.md`` (``docs/interface.md``, Digest and Freshness). Fencing, the section
-hashes, the nonce and the manifest are #22: the result gives each session as a ``SessionSection``
-(the lines between its two fence lines) and ``DigestResult.render`` takes the fence from the
-caller.
+hashes, the nonce and the manifest are ``fencing.finish_digest`` (#22): the result gives each
+session as a ``SessionSection`` (the lines between its two fence lines) and
+``DigestResult.render`` takes the fence from the caller.
 
 Flow, all inside ONE read transaction of the store (``sessionquery.read_store``):
 
@@ -30,8 +30,8 @@ pass 2 makes the build start again without that session.
 
 Text. One ``Redactor`` per run (``redact.build_masks`` over the env mapping the caller passes,
 never ``os.environ``); every text part, and every untrusted field of a header, goes through
-``redact.digest_text``, so no part holds a line break, a ``</untrusted`` or a raw control
-character. Item text never reaches the store, a log or an error message.
+``redact.digest_text``, so no part holds a line break, a ``</untrusted`` or ``<untrusted`` or a
+raw control character. Item text never reaches the store, a log or an error message.
 
 Bytes. Sizes are of the final rendered UTF-8 text. The total cap counts the title, the rule, the
 totals line and the two fence lines of each session (at their documented size, a 32 hex character
@@ -263,7 +263,8 @@ def _seconds(ms: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class KeptItem:
-    """One kept item, its text already redacted and sanitized (one line, no ``</untrusted``)."""
+    """One kept item, its text already redacted and sanitized (one line, no fence tag: neither
+    ``</untrusted`` nor ``<untrusted``)."""
 
     ref: str  # s<N>.i<NNN>
     kind: str
@@ -310,7 +311,8 @@ class DigestResult:
     """The digest as built. ``sections`` are the kept sessions in ref order; ``skipped`` every
     candidate that was reached and left out; ``over_cap`` the candidates never reached (after
     ``max_sessions`` were kept); ``matched_total`` every session the scope matched.
-    ``unicode_version`` and ``digest_format`` are for the manifest (#22). ``over_budget`` is True
+    ``unicode_version`` and ``digest_format`` are for the caller of ``fencing.finish_digest`` (#22;
+    the manifest schema is closed). ``over_budget`` is True
     when the fixed parts and the headers alone exceed ``max_bytes`` (every item is then dropped by
     the total cap and the digest is still larger than the cap: the caller decides)."""
 
@@ -502,9 +504,6 @@ def _render_text(raw: _Raw, caps: _Caps, redactor: redact.Redactor) -> str:
         name = redact.digest_text(raw.tool or "unknown", NAME_CAP, redactor) or "unknown"
         summary = redact.digest_text(raw.text, caps.arg, redactor) if raw.text else ""
         return f"{name} {summary}" if summary else name
-    # todo(#22): digest_text neutralizes only closing ``</untrusted`` tags; an opening fence text
-    # ``<untrusted source=... id=...>`` inside item text is not neutralized. Deferred to the fence
-    # work of #22 (the fence and nonce are its seam), not changed here.
     cap = {
         DigestKind.PROMPT: caps.prompt,
         DigestKind.ASSISTANT: caps.assistant,
