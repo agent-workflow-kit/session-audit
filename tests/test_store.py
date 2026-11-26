@@ -19,7 +19,7 @@ from session_audit import store as store_module
 from session_audit.errors import CliError
 from session_audit.migrations import MIGRATIONS, Migration, validate_registry
 from session_audit.migrations.m800_initial_schema import MIGRATION as M800
-from session_audit.store import inspect_store, open_store, state_dir
+from session_audit.store import inspect_store, open_read_only, open_store, state_dir
 
 from .storehelp import V1, V2, V3, ClockedGateway, extra, foreign_gateway, ledger, state_path
 
@@ -892,3 +892,49 @@ def test_a_0400_database_is_refused_by_both_paths_without_a_crash(tmp_path: Path
         assert caught.value.details["reason"] == "store_unwritable"
     finally:
         os.chmod(f"{directory}/state.db", 0o600)
+
+
+# --- open_read_only ---------------------------------------------------------------------------
+
+
+def test_open_read_only_creates_no_store_when_there_is_none(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    assert open_read_only(ClockedGateway(), directory) is None
+    assert not Path(directory).exists()
+
+
+def test_open_read_only_is_immutable_only_without_a_wal_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    uris: list[str] = []
+    real = sqlite3.connect
+
+    def recording(*args: object, **kwargs: object) -> sqlite3.Connection:
+        uris.append(str(args[0] if args else kwargs.get("database")))
+        return real(*args, **kwargs)  # type: ignore[call-overload, no-any-return]
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", recording)
+    before = sorted(os.listdir(directory))
+    conn = open_read_only(ClockedGateway(), directory)
+    assert conn is not None
+    assert conn.execute("SELECT count(*) FROM meta").fetchone()[0] >= 1
+    conn.close()
+    assert "immutable=1" in uris[-1]
+    assert sorted(os.listdir(directory)) == before  # no -wal or -shm appeared
+    wal = Path(f"{directory}/state.db-wal")
+    wal.write_bytes(b"")
+    wal.chmod(0o600)
+    conn = open_read_only(ClockedGateway(), directory)
+    assert conn is not None
+    conn.close()
+    assert "mode=ro" in uris[-1] and "immutable" not in uris[-1]
+
+
+def test_open_read_only_refuses_a_newer_store(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    make_newer(directory)
+    with pytest.raises(CliError) as caught:
+        open_read_only(ClockedGateway(), directory)
+    assert caught.value.details["reason"] == "store_newer"

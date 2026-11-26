@@ -898,3 +898,15 @@ def test_the_owner_with_more_than_eight_copies_can_depend_on_chunk_boundaries(
         assert owner(other, chunk_lines=1) == (True, len(first), 1620284410000)
     finally:
         other.close()
+
+
+def test_a_result_reports_the_error_and_unknown_lines_of_its_own_run(env: Env) -> None:
+    unknown = raw({"type": "bogus-kind", "timestamp": ts(1)})
+    env.write("f", [message("m1", 5), b"not json\n", unknown])
+    first = env.ingest("f")
+    assert (first.lines, first.errors, first.unknown) == (3, 1, 1)
+    env.append("f", [b"{broken\n", message("m2", 6, t=2)])
+    second = env.ingest("f")
+    assert (second.lines, second.errors, second.unknown) == (2, 1, 0)  # this run only
+    env.append("f", [b"x\n"])
+    assert env.ingest("f", force=True).errors == 3  # a full reread counts the whole file

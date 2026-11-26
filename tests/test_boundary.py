@@ -41,6 +41,7 @@ FORBIDDEN_OS_CALLS = frozenset(
     {"open", "fdopen", "scandir", "listdir", "walk", "system", "popen", "fork", "forkpty"}
 )
 FORBIDDEN_OS_PREFIXES = ("exec", "spawn", "posix_spawn")
+SAFE_OPEN_USERS = frozenset({"commands/ingest.py"})
 FORBIDDEN_METHODS = frozenset({"open", "read_text", "read_bytes", "iterdir", "glob", "rglob"})
 # Dotted names (after import aliases are resolved) that are forbidden to call or to import.
 FORBIDDEN_NAMES = frozenset(
@@ -163,7 +164,13 @@ def violations(source: str, filename: str) -> list[str]:
                         add(node, f"{'.'.join(dotted)}() with a name that is not a literal")
                     elif _forbidden(target.value.split(".")):
                         add(node, f"{'.'.join(dotted)}({target.value!r})")
-            if isinstance(node.func, ast.Attribute) and node.func.attr in FORBIDDEN_METHODS:
+            # reader.Discovery.open, the safe open, is called only by the ingest command.
+            sanctioned = chain == ["discovery", "open"] and filename in SAFE_OPEN_USERS
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in FORBIDDEN_METHODS
+                and not sanctioned
+            ):
                 add(node, f".{node.func.attr}() call")
     return found
 
@@ -196,6 +203,13 @@ def test_a_deliberate_subprocess_import_outside_the_gateway_fails(tmp_path: Path
     (tmp_path / "gateway.py").write_text("import subprocess\n", encoding="utf-8")
     (tmp_path / "sneaky.py").write_text("import subprocess\n", encoding="utf-8")
     assert scan(tmp_path) == ["sneaky.py:1: import subprocess"]
+
+
+def test_the_safe_open_exemption_is_scoped_to_the_ingest_command(tmp_path: Path) -> None:
+    call = "discovery.open(candidate)\n"
+    assert violations(call, "commands/ingest.py") == []
+    assert violations(call, "commands/other.py") == ["commands/other.py:1: .open() call"]
+    assert violations(call, "elsewhere.py") == ["elsewhere.py:1: .open() call"]
 
 
 def test_the_gateway_itself_is_exempt(tmp_path: Path) -> None:
@@ -313,3 +327,12 @@ def test_each_way_around_the_gateway_is_caught(source: str) -> None:
 )
 def test_ordinary_code_is_not_flagged(source: str) -> None:
     assert violations(source, "m.py") == []
+
+
+def test_discovery_open_is_the_one_sanctioned_open_method(tmp_path: Path) -> None:
+    (tmp_path / "gateway.py").write_text("", encoding="utf-8")
+    (tmp_path / "commands").mkdir()
+    allowed = tmp_path / "commands" / "ingest.py"
+    allowed.write_text("discovery.open(candidate)\n", encoding="utf-8")
+    (tmp_path / "bad.py").write_text("other.open(candidate)\n", encoding="utf-8")
+    assert scan(tmp_path) == ["bad.py:1: .open() call"]

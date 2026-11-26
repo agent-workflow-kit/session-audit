@@ -503,6 +503,8 @@ class FileResult:
     reading: bool = False  # lines were read (False: only the deletion ran, a budget ended it)
     lines: int = 0
     oversized: int = 0
+    errors: int = 0  # error lines read in this run (the per-file ``parse_errors`` delta)
+    unknown: int = 0  # unknown-type lines read in this run (the ``unknown_lines`` delta)
     bytes_read: int = 0
     chunks: int = 0
     events: int = 0  # events offered to the owner rule (before the within-file merge)
@@ -610,6 +612,7 @@ def read_file(
             result.stop = clock.hit() or Stop.FILE_BUDGET
             return result
     facts = load_facts(store.conn, candidate.path)
+    errors_before, unknown_before = facts.parse_errors, facts.unknown_lines
     context = ParseContext(mtime_ns=opened.stat.st_mtime_ns, main=candidate.kind == "main")
     pending: list[tuple[Event, int]] = []
     chunk_line_count = 0
@@ -639,6 +642,8 @@ def read_file(
     result.stop = run.stop
     result.lines = run.counts.lines
     result.oversized = run.counts.oversized
+    result.errors = facts.parse_errors - errors_before
+    result.unknown = facts.unknown_lines - unknown_before
     result.bytes_read = run.counts.bytes_read
     result.progress = run.checkpoint()
     return result

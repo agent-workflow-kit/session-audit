@@ -109,7 +109,7 @@ Linked from `ingest`, `sessions`, `usage`, `retro run`, `retro list` and `export
 
 Reads new transcript bytes into the store and, when claude-session is installed, captures harness snapshots. Idempotent. Never recovers retros. The ingest lease is a design guide §4.3 lease on `meta` with the rule in Retro lifecycle, Leases, so a killed ingest never wedges later runs. A second caller exits 0 with `already_running: true`.
 
-- `--since`: a session's files are all considered when any of them (main or subagent) was modified after the time (see Time arguments). Default: every file under the roots.
+- `--since`: a session's files are all considered when any of them (main or subagent) was modified at or after the time (see Time arguments). Default: every file under the roots. An unsafe entry (a symlink, a hard-linked or foreign file) cannot be attributed to a session, so `--since` never leaves it out: it is counted in `files.seen` and `files.unsafe` whatever the time.
 - `--path`: restrict to files under this root (repeatable; resolved by components below a configured root; a path outside every root exits 2 naming `--path`).
 - `--session CSESSION_ID`: takes a claude-session id (other commands take Claude Code session ids). The id must match `^cs-[a-z2-7]{8}$` (else exit 2 naming `--session`, with a hint when the value is a Claude Code session id). Runs `claude-session status --json` (no lease needed) and stores the snapshot (`upsert_harness_run` in Harness enrichment); exit 10 when claude-session reports the id unknown. Then, when the ingest lease is free, it reads the transcript files of the snapshot's Claude session ids; when the lease is held it exits 0 with `files_deferred: true` (the running or next full ingest reads them). `--dry-run` with `--session` exits 2 (a dry run never calls claude-session). This is the target of the hook recipe in Harness enrichment.
 - `--no-harness`: skip claude-session entirely for this run.
@@ -118,6 +118,25 @@ Reads new transcript bytes into the store and, when claude-session is installed,
 - `--dry-run`: reads and parses but writes nothing and never calls claude-session; prints what would change. Combined with `--session` it exits 2 (`details.field`: `--dry-run`).
 
 `--json` output: `schemas/cli/ingest.json` (the key list is in the schema). Ingest counts files (`seen`, `new`, `changed`, `unchanged`, `unsafe`, `excluded`, `vanished`, `rewritten`, `remaining`), lines (`parsed`, `errors`, `oversized`, `unknown`), sessions, harness and `warnings` (free strings, untrusted because they can name transcript paths). An `already_running` result has every count zero and `complete: false`; `files_deferred` is true only for a `--session` capture whose file reads were left to the lease holder.
+
+How the counts are taken (copy):
+
+```text
+files.seen        every file whose name is a transcript name and that --since did not leave out
+                  (unsafe entries are never left out: they belong to no session)
+files.new         a file with no stored row, read
+files.changed     a stored file read on from its offset (its size is not equal to its offset, or a reread was pending)
+files.rewritten   a stored file read again from the start (changed identity, shorter, head or tail hash differs,
+                  lower rules_version, --rebuild); with --rebuild --dry-run, the files that would be
+files.unchanged   size equals the stored offset, the hashes match and the rules are current (nothing is written for it);
+                  a pruned session's file that has not changed since the prune is counted here too
+files.remaining   files not finished when a budget ended the run (not reached, or stopped partway); files whose
+                  listing already equals their stored offset are not counted
+lines.parsed      complete lines read in this run; errors and unknown are the error lines and the unknown-type lines among them
+sessions.new      sessions whose first file was read in this run; sessions.updated: sessions with a file read that already existed
+```
+
+`meta.last_ingest_at` is set by every ingest that finishes (exit 0, not a dry run); `meta.last_complete_ingest_at` by one that is also `complete` and has no `--path` and no `--since`. The failure counters follow Hooks (`ingest_failing`); both are epoch milliseconds. A dry run opens the store read-only (it creates none, applies no migration, takes no lease, appends no log line). `--rebuild` sets the stored `rules_version` of every listed file to 0 before reading, so a run stopped by its budget is finished by the next plain run (lower versions first) and rows of files that are gone are never touched. A `root_unusable` warning names the root (sanitized) and the reason; `scan_capped` and `dirs_unreadable` are fixed tokens.
 
 ### `sessions`
 

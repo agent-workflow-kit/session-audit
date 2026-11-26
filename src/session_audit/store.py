@@ -61,6 +61,7 @@ __all__ = [
     "Store",
     "StoreStatus",
     "inspect_store",
+    "open_read_only",
     "open_store",
     "state_dir",
 ]
@@ -534,6 +535,35 @@ def inspect_store(
     if pending:
         return StoreStatus("pending", version, latest, tuple(m.number for m in pending))
     return StoreStatus("ok", version, latest)
+
+
+def open_read_only(
+    gateway: Gateway, directory: str, *, migrations: Sequence[Migration] = MIGRATIONS
+) -> sqlite3.Connection | None:
+    """A read-only connection to ``state.db`` for a command that must write nothing (``ingest
+    --dry-run``), or None when there is no store yet. Nothing is created, applied or changed (a
+    pending migration is left pending: the tables a read needs exist since migration 800); a store
+    written by a newer version is refused as ``store_newer`` like any other open. The same
+    ``immutable`` rule as ``inspect_store`` keeps SQLite from creating ``-wal`` or ``-shm``."""
+    status = inspect_store(gateway, directory, migrations=migrations)
+    if status.state == "missing":
+        return None
+    if status.state == "newer":
+        raise store_newer()
+    db_path = f"{directory}/{DB_NAME}"
+    try:
+        try:
+            gateway.lstat(db_path + "-wal")
+            options = "mode=ro"
+        except FileNotFoundError:
+            options = "mode=ro&immutable=1"
+        conn = sqlite3.connect(
+            f"file:{quote(db_path)}?{options}", uri=True, timeout=5.0, isolation_level=None
+        )
+        conn.execute("PRAGMA query_only=ON")
+        return conn
+    except (OSError, sqlite3.Error) as exc:
+        raise storage_error(exc) from None
 
 
 def column_names(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
