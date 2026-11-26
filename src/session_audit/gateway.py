@@ -279,6 +279,24 @@ class SystemGateway:
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
     ) -> CallResult:
+        return self._run(
+            argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, stdout_limit=stdout_limit
+        )
+
+    def _run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        escape: bool = False,
+    ) -> CallResult:
+        """``run``; with ``escape`` the bytes that are not UTF-8 survive a round trip: output is
+        decoded and stdin encoded with ``surrogateescape`` (the crontab, which holds the user's
+        own lines and must come back byte for byte)."""
         if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
             raise ValueError("argv must be a non-empty list of strings without NUL")
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
@@ -299,7 +317,11 @@ class SystemGateway:
                         "env must map non-empty names (no '=' or NUL) to strings without NUL"
                     )
         # Strict: a lone surrogate is a bug in the caller, refused before anything is started.
-        data = stdin.encode("utf-8", "strict") if stdin is not None else None
+        data = (
+            stdin.encode("utf-8", "surrogateescape" if escape else "strict")
+            if stdin is not None
+            else None
+        )
         try:
             popen = subprocess.Popen(
                 list(argv),
@@ -313,7 +335,7 @@ class SystemGateway:
             )
         except OSError as exc:
             return CallResult(CallStatus.SPAWN_FAILED, detail=f"{type(exc).__name__}: {exc}")
-        return self._supervise(popen, data, timeout, stdout_limit)
+        return self._supervise(popen, data, timeout, stdout_limit, escape)
 
     def _supervise(
         self,
@@ -321,6 +343,7 @@ class SystemGateway:
         stdin: bytes | None,
         timeout: float,
         stdout_limit: int,
+        escape: bool = False,
     ) -> CallResult:
         deadline = time.monotonic() + timeout
         out = bytearray()
@@ -368,12 +391,12 @@ class SystemGateway:
                 self._end_group(popen)
                 return CallResult(
                     failure,
-                    stdout=_text(out[:stdout_limit]),
+                    stdout=_text(out[:stdout_limit], escape),
                     stderr=_text(err[:stdout_limit]),
                     detail=_detail(failure, timeout, stdout_limit),
                 )
             code = popen.returncode
-            text = _text(out[:stdout_limit]), _text(err[:stdout_limit])
+            text = _text(out[:stdout_limit], escape), _text(err[:stdout_limit])
             if len(out) > stdout_limit:
                 return CallResult(
                     CallStatus.OUTPUT_LIMIT,
@@ -560,10 +583,10 @@ class SystemGateway:
         return None
 
     def crontab_read(self) -> CallResult:
-        return self.run(["crontab", "-l"], timeout=CRONTAB_TIMEOUT_SECONDS)
+        return self._run(["crontab", "-l"], timeout=CRONTAB_TIMEOUT_SECONDS, escape=True)
 
     def crontab_write(self, text: str) -> CallResult:
-        return self.run(["crontab", "-"], timeout=CRONTAB_TIMEOUT_SECONDS, stdin=text)
+        return self._run(["crontab", "-"], timeout=CRONTAB_TIMEOUT_SECONDS, stdin=text, escape=True)
 
     @contextlib.contextmanager
     def umask(self, mask: int) -> Iterator[None]:
@@ -806,8 +829,8 @@ def _signal_group(pgid: int, sig: int) -> None:
         pass
 
 
-def _text(data: bytes | bytearray) -> str:
-    return bytes(data).decode("utf-8", "replace")
+def _text(data: bytes | bytearray, escape: bool = False) -> str:
+    return bytes(data).decode("utf-8", "surrogateescape" if escape else "replace")
 
 
 def discard_stream(stream: IO[str] | None) -> None:

@@ -471,6 +471,28 @@ def test_crontab_goes_through_the_program_named_crontab(
     assert log.read_text(encoding="utf-8").splitlines() == ["-l", "-", "0 * * * * job"]
 
 
+def test_crontab_bytes_that_are_not_utf8_survive_a_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.write_bytes(b"0 * * * * echo \xff\xfe\r\n# \xc3\n")
+    fake = bindir / "crontab"
+    fake.write_text(
+        f'#!/bin/sh\nif [ "$1" = "-l" ]; then cat "{store}"; else cat > "{store}"; fi\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    gw = SystemGateway()
+    held = gw.crontab_read()
+    assert held.ok and "\udcff" in held.stdout
+    store.write_bytes(b"")
+    assert gw.crontab_write(held.stdout + "# more\n").ok
+    assert store.read_bytes() == b"0 * * * * echo \xff\xfe\r\n# \xc3\n# more\n"
+
+
 def test_read_file_reads_up_to_the_limit_and_reports_truncation(tmp_path: Path) -> None:
     (tmp_path / "f").write_bytes(b"abcdef")
     gw = SystemGateway()

@@ -1128,16 +1128,20 @@ ingest line: every <n>m -> "*/<n> * * * *"; every <n>h -> "7 */<n> * * *"; 24h -
 prune line: "17 3 * * *" (03:17 in the cron daemon's zone)
 retro line: "M H * * D" with M = 23, H = schedule.retro.hour, D = schedule.retro.weekday, running
             session-audit retro run <flags rendered from scope> --actor auto:schedule --quiet
-PATH: ~/.local/bin, then the directories of claude-session and claude found on the installing process's PATH
-values: every embedded path or scope value is shell-quoted; a value containing %, newline or NUL -> exit 2 naming it
+PATH: ~/.local/bin, then the directories of claude-session and claude found on the installing process's PATH,
+      then /usr/local/bin:/usr/bin:/bin; set inside each line (PATH='...' session-audit ...), never as a crontab
+      variable line, so nothing outside the block is affected
+values: every embedded path or scope value is shell-quoted; a value containing %, a control character (newline and
+        NUL among them) or a lone surrogate -> exit 2 naming it (PATH, --env-file or schedule.retro.scope);
+        a line longer than 1000 characters -> exit 2 naming PATH or schedule.retro.scope
 scope: since and until must match the WHEN duration grammar <n>(s|m|h|d) -> else exit 2 naming schedule.retro.scope
 --env-file: absolute, regular file, owned by the user, not group or other writable, not a symlink, else exit 2;
             validate re-checks it (warning env_file_unsafe); the line is ". '<path>' && <command>"
-crontab missing or failing -> exit 12 crontab_unavailable
+crontab missing or failing -> exit 12 crontab_unavailable (no crontab yet, `crontab -l` exit 1 saying so, is an empty one)
 uninstall --dry-run: block lists the lines that would be removed
 ```
 
-- `ingest --quiet` at `--ingest-every` (default `1h`, see Time arguments), a daily `prune --quiet`, and a retro line only when `schedule.retro` is set. A scheduled retro obeys the daily limit and the content key, so a repeat of unchanged input is free; refusals go to stderr (cron mails them), which is the intended signal. `--env-file` supplies the login variables a scheduled retro's session needs.
+- `ingest --quiet` at `--ingest-every` (default `1h`, see Time arguments), a daily `prune --quiet`, and a retro line only when `schedule.retro` is set. A scheduled retro obeys the daily limit and the content key, so a repeat of unchanged input is free; refusals go to stderr (cron mails them), which is the intended signal. `--env-file` supplies the login variables a scheduled retro's session needs: only the retro line sources it, so a bad file never stops `ingest` or `prune`. A real `install` (also when the block is unchanged) records the interval in `meta` key `ingest_interval` as its canonical text (`15m`, `1h`). The crontab outside the block is carried through byte for byte (non-UTF-8 bytes, CRLF, a missing final newline in the last outside line is the only addition); the read-modify-write is not atomic against another editor.
 - `cron install --dry-run --json` prints the block and what would change (`unchanged`, `replaced`, `installed`). `cron uninstall` removes only the managed block. awkit's `awkit cron install` runs the tool's own installer; this tool never edits the crontab outside its block.
 
 ## Safety
