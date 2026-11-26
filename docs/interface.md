@@ -63,7 +63,7 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 | `reason` | When |
 |---|---|
 | `scope_too_large` | An explicit `--session` list names more sessions than `retro.max_sessions` (the count is in `details.matched`); a filter scope is never refused for size (see `retro run`) |
-| `daily_limit` | `limits.retros_per_day` starts today plus retros waiting on their `pre-retro` hook |
+| `daily_limit` | `limits.retros_per_day` starts today plus retros waiting on their `pre-retro` hook (`details.limit` is the limit) |
 | `config_unsafe` | The config, its directory, a drop-in or the permission profile file is unsafe (see Config), or `retro.sandbox` is below `required` while stdin is not a terminal |
 | `live_sessions_only` | Every matched session changed within `retro.quiet_after` |
 | `empty_scope` | The scope matches no stored session, or every skip was not `live` and nothing is left |
@@ -726,6 +726,14 @@ during validating or cleanup: finish (bounded 30 s); final canceled/interrupted 
 a second signal while handling: exit at once with the same code (housekeeping recovers later)
 SIGPIPE: default disposition is ignored; a failed stdout write ends with exit 1
 ```
+
+The handlers only record the first signal (no database work, no process start in signal context); the tool acts on it at its next safe point, so a signal never lands inside a transaction or a compare-and-set. A signal before step 13 raises at once. From step 13 on:
+
+- A signal that arrives before the artifact check starts (any earlier phase, including `collect`) ends the retro `canceled/interrupted`. One that arrives during the artifact check lets its verdict (`done` or `failed`) stand, and one during the final write, cleanup or the post hooks leaves the state as it is. Every one of them exits 128 plus the signal and prints no envelope.
+- During the exec wait the signal is forwarded once, to the exact exec child; 30 s later, when the child still runs, `stop` is called by the recorded id; 15 s after that its process group is ended (SIGTERM, 5 s, SIGKILL).
+- A signal during the cleanup lets it go on for 30 s more: a claude-session call in flight past that is ended and the row stays `pending` for housekeeping. A signal during a hook ends the hook's group (SIGTERM, 5 s, SIGKILL).
+- The second signal raises at once with the code of the first: the lease is released by compare-and-set, a started hook or `start` call is ended, the exec child is left to its own timeout, and the row stays in the state of its last write. Housekeeping then recovers it by the recorded id (`failed/runner_lost`; a cleanup that was cut is retried); no `post-retro` fires for it (no outbox).
+- Every child the tool starts begins with SIGHUP, SIGINT and SIGTERM at their default disposition, even when the tool itself was started with them ignored.
 
 ### Order of checks
 

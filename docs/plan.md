@@ -34,7 +34,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `harness` | 3 | claude-session snapshots and the query-time join |
 | `redact` | 4 | redaction patterns (package data), literal masks, encoded-value check, the cut and `digest_text` |
 | `digest` | 4 | items, numbering, selection, budget, redaction and sanitizing, the stored-offset read (#21); fencing, section hashes, manifest (#22, `fencing.py`) |
-| `retro` | 5 | order of checks, key, launch, outcome mapping, collect and cleanup, recovery (#23: steps 1 to 10; #26: steps 13 to 16 in `retrolaunch`, `retrostate`, `retrofiles`, `retrooutcome`; #27 and #29 onward: the rest) |
+| `retro` | 5 | order of checks, key, launch, outcome mapping, collect and cleanup, recovery (#23: steps 1 to 10; #26: steps 13 to 16 in `retrolaunch`, `retrostate`, `retrofiles`, `retrooutcome`; #27 and #29 onward: the rest; #28: the daily limit in `retrostate`, `retro.reserved`, and the signals) |
 | `retrolaunch` | 5 | steps 13 to 16 of `retro run`: the row, `pre-retro`, the files, `start`, the adopting `exec`, the outcome mapping, the final state, the claude-session half of cleanup, `post-retro` (#26) |
 | `retrostate` | 5 | the retro row: the step 13 insert and every compare-and-set state write with its log entry (#26) |
 | `retrofiles`, `retrooutcome`, `retrocleanup`, `retroartifact` | 5 | the step 15 files and `delete_local`; strict parsing of `start`, `exec`, `status` and `forget` and the Outcome mapping table; `collect`, `forget` with `stop` on exit 20 and the whole `cleanup` step list (#26, #27); the artifact check seam (#29) |
@@ -42,6 +42,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `plugins` | 5 | the skill preflight (#24): skill name, bundled plugin as a package resource, credential locations, the descriptor walk of configured plugin directories |
 | `launchplan` | 5 | the `start` flags, the launch plan check against the pinned plan schema's fields, `project_dir_name` (#24) |
 | `hooks` | 5 | hook execution, process groups, payloads (#25: `hooks.py`, `Gateway.run_hook`; the `retro run` call sites are in `retrolaunch`, #26) |
+| `interrupt` | 5 | the signal controller (raise and deferred modes, `Bound`) and `Gateway.spawn`'s process handle: the daily limit and the signal handling of `retro run` (#28) |
 | `artifact` | 6 | closed-shape validation and evidence checks |
 | `cron` | 7 | managed block read, write, dry run |
 | `plugin/` | 6 | skill, marker reference, retro profile, manifest |
