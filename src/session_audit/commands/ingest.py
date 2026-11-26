@@ -738,7 +738,16 @@ def run_session(ctx: Context, args: argparse.Namespace, store: Store) -> dict[st
     check = check_version(ctx.gateway, command)
     if not check.ok:
         raise harness.unavailable(check)
-    fetched = harness.fetch_status(ctx.gateway, command, args.session)
+    deadline = run_deadline(ctx.gateway, _budget(ctx, args))
+    remaining = deadline - ctx.gateway.monotonic()
+    if remaining < harness.MIN_CALL_SECONDS:
+        raise harness.status_failed()  # the budget is spent: no call, as a failed status maps
+    fetched = harness.fetch_status(
+        ctx.gateway,
+        command,
+        args.session,
+        timeout=min(harness.STATUS_TIMEOUT, remaining),
+    )
     if fetched.kind is harness.Fetch.FORGOTTEN:
         raise errors.CliError(
             "not_found",
@@ -759,7 +768,6 @@ def run_session(ctx: Context, args: argparse.Namespace, store: Store) -> dict[st
     lease = acquire(store, IngestTarget())
     if lease is None:
         return build_report(Tally(), dry_run=False, harness_counts=counts, files_deferred=True)
-    deadline = run_deadline(ctx.gateway, _budget(ctx, args))
     try:
         with discover(ctx, args.path or ()) as discovery, lease:
             return _locked(

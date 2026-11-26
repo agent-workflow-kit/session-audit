@@ -933,6 +933,40 @@ def test_session_writes_the_snapshot_and_reads_only_its_transcripts(
     assert set(snapshots(_private_environment)) == {CS1}
 
 
+def test_session_bounds_the_status_call_by_the_budget(
+    corpus: Corpus,
+    world: World,
+    fake: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Recording(ClockedGateway):
+        calls: list[tuple[list[str], float]] = []
+
+        def run(self, argv: Any, *, timeout: float, **kwargs: Any) -> CallResult:
+            Recording.calls.append((list(argv), timeout))
+            return super().run(argv, timeout=timeout, **kwargs)
+
+    Recording.calls = []
+    world.add(CS1, [S1]).publish()
+    run = ingest(capsys, Recording(), "--session", CS1, "--budget", "15s")
+    assert run.code == 0
+    statuses = [c for c in Recording.calls if c[0][1] == "status"]
+    assert len(statuses) == 1
+    assert 0 < statuses[0][1] <= 15.0
+
+
+def test_session_with_the_budget_spent_makes_no_status_call(
+    corpus: Corpus,
+    world: World,
+    fake: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    world.add(CS1, [S1]).publish()
+    run = ingest(capsys, ClockedGateway(), "--session", CS1, "--budget", "500ms")
+    assert run.code == 12
+    assert keys(fake) == ["--version"]
+
+
 def test_session_with_a_held_lease_writes_the_snapshot_and_defers_the_files(
     gw: ClockedGateway,
     corpus: Corpus,
