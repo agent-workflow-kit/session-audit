@@ -379,7 +379,7 @@ class FakeClaudeSession:
 
     def script(self, key: str, *steps: dict[str, Any]) -> None:
         """Script the calls with ``key`` (see the fake's docstring), validating every step.
-        ``status <csession id>`` scripts the calls of one id; plain ``status`` answers the others."""
+        ``status <csession id>`` scripts the calls of one id; plain ``status`` the others."""
         for one in steps:
             self._check(key, one)
         self._steps[key] = list(steps)

@@ -1,6 +1,8 @@
 """``retro run``: run one retro (interface, Commands, ``retro run``).
 
-TODO(#23): the order of checks through reuse. TODO(#24): the dry run. TODO(#26): the launch.
+TODO(#23): the order of checks through reuse, and ``--include-self-improve`` in the digest scope
+(``args.add_owner_filter``; ``sessionquery.Filters(include_self_improve=...)`` already applies it).
+TODO(#24): the dry run. TODO(#26): the launch.
 ``check`` already holds the usage errors; ``run`` is replaced by the issues above.
 """
 

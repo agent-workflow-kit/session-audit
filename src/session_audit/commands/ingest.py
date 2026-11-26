@@ -37,9 +37,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .. import args as a
-from .. import errors
+from .. import errors, harness
 from ..command import Command, Context
-from .. import harness
 from ..csversion import Presence, check_version
 from ..eventstore import FileResult, read_file
 from ..grammar import (

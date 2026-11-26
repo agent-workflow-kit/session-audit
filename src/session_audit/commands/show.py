@@ -5,7 +5,7 @@ at most 1000 agents and at most 10000 usage rows are read in one read transactio
 constrained by the resolved session id. A session is shown when asked for by id even if its
 snapshot labels it ``owner=self-improve`` (the default exclusion applies to listings).
 
-TODO(#19): snapshots are read from ``harness_runs``; ``ingest`` fills it once #19 lands.
+Snapshots are read from ``harness_runs`` (written by ``ingest``, see ``harness``).
 """
 
 from __future__ import annotations

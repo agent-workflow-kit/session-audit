@@ -526,11 +526,11 @@ def test_path_restricts_the_run_and_a_path_outside_the_roots_is_exit_2(
     assert run.code == 2 and run.doc["error"]["details"]["field"] == "--path"
 
 
-def test_session_is_not_implemented_yet(
-    gw: TickGateway, capsys: pytest.CaptureFixture[str]
+def test_a_dry_run_starts_no_process(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run = ingest(capsys, gw, "--session", "cs-abcdefgh")
-    assert run.code == 1 and gw.runs == []
+    corpus.write_main(S1, messages("a", 2))
+    assert ingest(capsys, gw, "--dry-run").code == 0 and gw.runs == []
 
 
 # --- meta and log -----------------------------------------------------------------------------

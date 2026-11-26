@@ -417,7 +417,9 @@ def capture(
         return counts
     counts.errors += bad
     stored = _stored_updated(store)
-    todo = [e for e in entries if e.csession_id not in stored or stored[e.csession_id] != e.updated_at]
+    todo = [
+        e for e in entries if e.csession_id not in stored or stored[e.csession_id] != e.updated_at
+    ]
     counts.matched = len(todo)
     todo.sort(key=lambda e: (e.updated_at, e.csession_id), reverse=True)
     for entry in todo[:CAP_PER_RUN]:
