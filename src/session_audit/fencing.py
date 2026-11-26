@@ -41,6 +41,7 @@ __all__ = [
     "FencedDigest",
     "SectionHash",
     "finish_digest",
+    "section_hashes",
 ]
 
 NONCE_BYTES = NONCE_HEX_LEN // 2
@@ -92,6 +93,16 @@ class FencedDigest:
     nonce: str
     unicode_version: str
     digest_format: int
+
+
+def section_hashes(result: DigestResult) -> tuple[SectionHash, ...]:
+    """The hash of each kept section: the SHA-256 of exactly ``SessionSection.text``. It needs
+    no retro id, run token or nonce, so the retro key (``retrokey``) is computed from it before
+    any row exists and ``finish_digest`` reports the same values."""
+    return tuple(
+        SectionHash(s.ref, s.session_id, hashlib.sha256(s.text.encode("utf-8")).hexdigest())
+        for s in result.sections
+    )
 
 
 def _check_run_token(run_token: object) -> str:
@@ -187,10 +198,7 @@ def finish_digest(
         _check_section(section)
     plain = (*result.preamble(retro), *(section.text for section in result.sections))
     nonce = _nonce(gateway, plain)
-    hashes = tuple(
-        SectionHash(s.ref, s.session_id, hashlib.sha256(s.text.encode("utf-8")).hexdigest())
-        for s in result.sections
-    )
+    hashes = section_hashes(result)
     data = result.render(
         retro, lambda _s: (FENCE_OPEN.format(nonce=nonce), FENCE_CLOSE.format(nonce=nonce))
     )

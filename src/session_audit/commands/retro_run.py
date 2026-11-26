@@ -1,9 +1,9 @@
 """``retro run``: run one retro (interface, Commands, ``retro run``).
 
-TODO(#23): the order of checks through reuse, and ``--include-self-improve`` in the digest scope
-(``args.add_owner_filter``; ``sessionquery.Filters(include_self_improve=...)`` already applies it).
-TODO(#24): the dry run. TODO(#26): the launch.
-``check`` already holds the usage errors; ``run`` is replaced by the issues above.
+``check`` holds the usage errors (Order of checks step 1). ``run`` does steps 2 to 10 through
+``retro.prepare`` (the order, the digest, the key, reuse and ``already_running``) and prints a
+reused retro. TODO(#24): the plan check and the dry run's plan (steps 11 and 12).
+TODO(#26): the launch (steps 13 to 16).
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 
 from .. import args as a
-from .. import errors
+from .. import errors, retro
 from ..command import Command, Context
 from ..grammar import (
     MAX_TURNS_RANGE,
@@ -23,7 +23,10 @@ from ..grammar import (
     parse_int,
     parse_session_prefix,
 )
+from ..sessionquery import one_line, put
 
+# The hook points of steps 4 and 5 (TODO(#24), TODO(#27)); tests replace them.
+STEPS: retro.Steps = retro.NoSteps()
 MAX_SESSION_FLAGS = 1000
 SCOPE_FLAGS = ("session", "label", "project", "since", "until", "kind", "outcome")
 
@@ -34,6 +37,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     a.add_time_filters(parser)
     a.add_session_filters(parser)
+    a.add_owner_filter(parser)
     parser.add_argument("--skill", metavar="NAME", help="a plugin skill, plugin:skill")
     parser.add_argument("--mode", default="headless", metavar="MODE", help="only headless in 0.x")
     parser.add_argument("--model", metavar="M", help="the retro model")
@@ -92,7 +96,32 @@ def check(ctx: Context, args: argparse.Namespace) -> None:
         )
 
 
+def _print_reused(ctx: Context, retro_object: dict[str, object]) -> None:
+    if ctx.json:
+        ctx.emit_json({**retro_object, "reused": True})
+        return
+    ctx.say(f"retro {retro_object['id']} is done (reused, key {retro_object['key']})")
+    put(ctx, "summary: " + one_line(retro_object["summary"]))  # model text: one sanitized line
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
+    prepared = retro.prepare(ctx, args, steps=STEPS)
+    for warning in (*prepared.warnings, *prepared.notes):
+        ctx.note(f"session-audit: warning: {warning}")
+    if prepared.unfit_retros and not args.again:
+        ctx.note(
+            f"session-audit: {prepared.unfit_retros} stored retro(s) with this key did not fit "
+            "and were not reused"
+        )
+    if prepared.reuse is not None:
+        _print_reused(ctx, prepared.reuse)
+        return 0
+    ctx.note(
+        f"retro: {prepared.kept} sessions kept, {len(prepared.skipped)} skipped, "
+        f"{prepared.projects} projects"
+    )
+    # TODO(#24): steps 11 and 12 (the launch plan check and the dry run's plan).
+    # TODO(#26): steps 13 to 16 (the row, the hooks, the launch) from ``prepared``.
     raise a.not_implemented()
 
 

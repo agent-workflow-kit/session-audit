@@ -44,7 +44,7 @@ Errors go to stderr. With `--json` they are also printed on stdout as `{"error":
 | 2 | Usage error or invalid config. Reasons with a name: `retro run --mode interactive` in 0.x (`details.reason: mode_unsupported`), `ingest --rebuild` or `retro delete` without a terminal and without `--yes` (`details.reason: confirmation_required`). Also a malformed skill (a bare name, a value longer than 128 characters, a plugin part outside `defs.json#/$defs/skill` or a name part after the colon outside `^[a-z0-9][a-z0-9-]{0,63}$`; `details.field`: `--skill`), a session prefix shorter than 8 characters, a retro prefix shorter than 4 characters after `ra-`, `--limit` outside 1 to 1000, a flag out of range (`details.field` names it), `--rebuild` combined with `--path`, `--since` or `--session`, `ingest --dry-run` combined with `--session`, `ingest --session` combined with `--no-harness` (`details.field`: `--no-harness`) or with `harness.enabled: off` (`details.field`: `harness.enabled`), an `ingest --session` value that is not a claude-session id (`^cs-[a-z2-7]{8}$`; the hint says the flag takes a claude-session id when the value looks like a Claude Code session id), a `retro run --session` value that is a claude-session id (the hint says the flag takes a Claude Code session id), more than 1000 `--session` flags on `retro run` and a `cron install` input that cannot be written into a cron line: a scope that does not match the `WHEN` duration grammar, a `%`, control or unsafe character (C1, U+2028/2029, bidirectional control, lone surrogate) or a leading `-` in a scope value (`details.field`: `schedule.retro.scope`), the same characters in PATH (`details.field`: `PATH`) or in `--env-file`, an `--env-file` that fails its checks (not absolute, not a regular file, a symlink, not owned by the user, group or other writable, or in an unsafe directory; `details.field`: `--env-file`), and a cron line over 1000 bytes (field: the largest of `PATH`, `--env-file`, `schedule.retro.scope`) |
 | 10 | Not found: a session, retro or artifact id |
 | 11 | A `pre-retro` hook vetoed the run (retro `canceled`, reason `hook_vetoed`; `details.retro_id` names it) |
-| 12 | The requested operation failed for a reportable reason. `details.reason` is one of `claude_session_missing`, `claude_session_too_old`, `store_unwritable` (the state directory or `state.db` cannot be created or written: `ingest`, `retro run`, `prune`), `no_readable_roots` (every transcript root unreadable), `skill_not_found`, `unsafe_plugin_dir` (a configured plugin directory failed the preflight, see Retro launch item 0), `launch_settings_mismatch` (the launch plan differs from the required settings, see Retro launch item 1), `session_not_started` (a retro session that never started; `details.end_reason` is claude-session's token, `sandbox_unavailable` among them), `claude_session_error` (any claude-session result outside the Outcome mapping table, and the tool's own deadline) or `crontab_unavailable`; `details.retryable` says whether trying again can help. A retro row exists only when the failure happened after step 13 of the Order of checks |
+| 12 | The requested operation failed for a reportable reason. `details.reason` is one of `claude_session_missing`, `claude_session_too_old`, `store_unwritable` (the state directory or `state.db` cannot be created or written: `ingest`, `retro run`, `prune`), `no_readable_roots` (every transcript root unreadable), `skill_not_found`, `unsafe_plugin_dir` (a configured plugin directory failed the preflight, see Retro launch item 0), `launch_settings_mismatch` (the launch plan differs from the required settings, see Retro launch item 1), `session_not_started` (a retro session that never started; `details.end_reason` is claude-session's token, `sandbox_unavailable` among them), `claude_session_error` (any claude-session result outside the Outcome mapping table, and the tool's own deadline), `crontab_unavailable` or `ingest_busy` (`retro run --session` named a full session id that is on disk but not in the store, and the refresh that would ingest it did not run: the ingest lease stayed busy for the 60 s wait or the budget ended; `retryable` is true; an id on no disk is exit 10); `details.retryable` says whether trying again can help. A retro row exists only when the failure happened after step 13 of the Order of checks |
 | 13 | Needs a human: a `pre-retro` hook escalated (reason `hook_escalated`), or the retro session reported blocked or needs-input (reasons `session_blocked`, `session_needs_input`); retro state `escalated` |
 | 14 to 18 | The retro session's outcome passed through unchanged from claude-session: 14 exited-unreported, 15 killed, 16 timeout, 17 lost, 18 reported failed. `details.outcome` is the outcome token and `details.retro_id` names the retro |
 | 20 | Refused, with `details.reason` (see Refusal reasons). Housekeeping (Order of checks step 5) may have recovered other retros before a refusal; their results are in the log |
@@ -91,7 +91,7 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 - `--project P` matches the stored project (the first non-empty `cwd`, see Session object) by path boundary with bound parameters: `project = P or substr(project, 1, len(P) + 1) = P || '/'`, after stripping one trailing `/` from `P`. There is no wildcard and no symlink resolution.
 - `--kind` and `--outcome` match only sessions with a harness snapshot. `--model` is an exact model name among the session's models (1 to 128 characters, no control characters, DEL or surrogates; exit 2 otherwise). `--entrypoint` filters on `interactive` or `headless`.
 - Labels are unauthenticated hints: a label scope is not a confidentiality boundary (see Safety).
-- `--include-self-improve` (taken by `sessions`, `usage` and `export`; `retro run`'s scope adopts it in its own issue; not `ingest`; `export retros` ignores it): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
+- `--include-self-improve` (taken by `sessions`, `usage` and `export`; `retro run`'s scope takes it too; not `ingest`; `export retros` ignores it): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
 
 ## Time arguments
 
@@ -171,19 +171,19 @@ One stored session: the Session object, its agents and its usage rows. An agent 
 
 ### `retro run`
 
-`session-audit retro run SCOPE [--skill NAME] [--mode headless] [--model M] [--timeout DURATION] [--max-turns N] [--again] [--decision-id ID]... [--dry-run] [--actor ACTOR] [--json]`
+`session-audit retro run SCOPE [--include-self-improve] [--skill NAME] [--mode headless] [--model M] [--timeout DURATION] [--max-turns N] [--again] [--decision-id ID]... [--dry-run] [--actor ACTOR] [--json]`
 
 Runs one retro. Blocks until the retro is final. `SCOPE` is one or more of `--session ID` (a Claude Code session id or prefix; repeatable, at most 1000), `--label K=V` (repeatable), `--project PATH`, `--since WHEN`, `--until WHEN`, `--kind K`, `--outcome O`, filtered as in Session filters. At least one scope flag is required (exit 2 otherwise). The flow is the Order of checks under Retro lifecycle, Retro launch and Retro validation. Before launch it prints to stderr (unless `--quiet`) the kept and skipped session counts and the number of distinct projects.
 
 - `--skill`: a plugin skill `plugin:skill` from the bundled plugin or from `retro.plugin_dirs`; default `retro.skill` (`session-audit:audit`). Bare names exit 2 (see Deviations).
 - `--mode`: only `headless` is accepted in 0.x. `interactive` exits 2 with `details.reason: mode_unsupported`.
 - `--model`: the model for the retro session. 1 to 128 characters without control characters, DEL or surrogates (as `defs.json#/$defs/model`), and, deliberately narrower, not starting with `-` because the value reaches claude-session; otherwise exit 2 (`details.field`: `--model`).
-- `--again`: run the model even when a stored retro has the same key; the new retro records `again_of`.
+- `--again`: run the model even when a stored retro has the same key; the new retro records `again_of`: the newest retro with that key in any final state (`done`, `failed`, `escalated` or `canceled`), not only a `done` one. A live run of the same key still refuses (`already_running`).
 - `--max-turns` is bounded like `retro.max_turns` (1 to 1000) and `--timeout` like `retro.timeout` (1 s to 2 h); out of range is exit 2 naming the flag.
 - `--dry-run`: applies steps 1 to 4 and 6 to 12 of the Order of checks; it never recovers, writes, runs hooks or launches (step 11 runs `claude-session start --dry-run`, which allocates nothing). It prints the plan and exits 0, and never prints digest text. The plan is `{dry_run: true, scope, matched, matched_total, skipped, over_cap, items, items_by_kind, digest_bytes, key, skill, model, launch_flags, reused_retro, running_retro, daily_remaining}`: `matched` lists the full ids of the sessions that would be digested (at most 1000; `matched_total` counts them all), `skipped` has the `{session_id, reason}` rows (at most 1000), `over_cap` counts the candidates never reached, `items_by_kind` counts items per item kind, `launch_flags` is the list of claude-session flags without the prompt, `reused_retro` and `running_retro` are retro ids or null (what a real run would return or refuse with) and `daily_remaining` is `max(0, limits.retros_per_day - reserved(today))`. The dry-run key equals the key a real run computes over the same transcript bytes (see Freshness).
 - A filter scope (no `--session`) keeps up to `retro.max_sessions` sessions (Order of checks step 8); the candidates never reached are counted in `counts.over_cap` and, in the dry-run plan, `over_cap`; they are not listed. Only an explicit `--session` list over the cap is refused (`scope_too_large`).
 
-Exit codes: see Exit codes. When a stored `done` retro with the same key exists and `--again` is absent, the command exits 0 and prints that retro with `reused: true` (no hook, no limit, no row; a dry run reports it as `reused_retro` and never prints it). A second run whose key matches a non-final retro with a live lease exits 20 `already_running`.
+Exit codes: see Exit codes. When a stored `done` retro with the same key exists and `--again` is absent, the command exits 0 and prints that retro with `reused: true` (no hook, no limit, no row; a dry run reports it as `reused_retro` and never prints it). A second run whose key matches a non-final retro with a live lease exits 20 `already_running`. Human output of a reused retro prints the summary as one sanitized line. When stored `done` retros with the key exist but none could be reused (a row that does not fit the stored layout or the schema is never reused), a stderr note says how many (`N stored retro(s) with this key did not fit and were not reused`; a count only, no row text, no warning token) and the run goes on to a model run.
 
 `--json` output: `schemas/cli/retro-run.json`: the Retro object plus `reused`, or the dry-run plan. A non-zero exit prints the error envelope instead (see Exit codes).
 
@@ -717,14 +717,17 @@ retro run:
  1  parse flags; no scope flag or --mode interactive -> exit 2; more than 1000 --session flags -> exit 2
  2  load config; unsafe config or profile file -> 20 config_unsafe (Config);
     retro.sandbox below required while stdin is not a terminal -> 20 config_unsafe; store newer -> 20 store_newer
+    (the store is only read here, also for a real run: nothing is created before step 3 has passed)
  3  claude-session present and >= MIN_CS -> else 12 claude_session_missing | claude_session_too_old
  4  skill preflight -> else 2 (malformed skill) | 12 skill_not_found | 12 unsafe_plugin_dir
  5  housekeeping (not with --dry-run); its results are logged even when a later step refuses
  6  resolve scope from the store (a full session id unknown to the store is first looked up on disk under the roots
-    and ingested); unknown --session -> 10; ambiguous prefix -> 21; nothing matched -> 20 empty_scope;
+    and ingested; on disk but not ingestible now (lease busy, budget spent) -> 12 ingest_busy, retryable);
+    unknown --session -> 10; ambiguous prefix -> 21; nothing matched -> 20 empty_scope;
     explicit --session list longer than retro.max_sessions -> 20 scope_too_large
  7  candidates = matched sessions by stored ended_at descending (null last), then session_id
- 8  for each candidate until retro.max_sessions are kept: refresh its files (Freshness), then skip it as
+ 8  for each candidate until retro.max_sessions are kept (candidates are refreshed in batches in order, see
+    Freshness): refresh its files (Freshness), then skip it as
     live | transcript_missing | transcript_changed | empty, or keep it with its items;
     candidates never reached are counted as over_cap;
     nothing kept -> 20 live_sessions_only if every skip is live, else 20 empty_scope
@@ -733,7 +736,7 @@ retro run:
     without --dry-run: reuse and no --again -> print it, reused: true, exit 0; running -> 20 already_running
 11  launch plan check (Retro launch item 1) -> else 12; nothing is stored
 12  --dry-run -> print the plan and exit 0
-13  BEGIN IMMEDIATE: repeat step 10 (same outcomes); reserved(today) >= limits.retros_per_day -> 20 daily_limit;
+13  BEGIN IMMEDIATE: repeat step 10, the key lookup and again_of included (same outcomes); reserved(today) >= limits.retros_per_day -> 20 daily_limit;
     insert the retro row (state digesting, lease, key, coverage); COMMIT
 14  pre-retro hook (lease renewed): veto -> canceled/hook_vetoed, exit 11; escalate -> escalated/hook_escalated, exit 13
 15  BEGIN IMMEDIATE: insert retro_starts row, state running; COMMIT; write digests/<id>/ and the prompt
@@ -749,6 +752,9 @@ The digest reads exactly the bytes the store counted (copy):
 refresh (step 8): ingest the candidate's files only (no harness), holding the ingest lease, which is waited for at
     most 60 s once; the refreshes of one retro share ingest.budget and each file has ingest.file_budget
     a candidate not refreshed (lease not obtained, budget spent) is read at its stored offsets; warning ingest_busy
+    batches: the candidates are refreshed in batches in order (the first retro.max_sessions, then the deficit or half
+    of what was tried, whichever is larger); a batch may include candidates beyond the last one that ends up kept:
+    they count in over_cap with the candidates never offered
 digest read: each file is opened with the Ingest rules and read only up to its stored offset; the stored
     dev, inode, head_sha and tail_sha must match, else the session is skipped transcript_changed
 one read snapshot: the metrics, turn costs, offsets and hashes of every kept session are read in one read transaction

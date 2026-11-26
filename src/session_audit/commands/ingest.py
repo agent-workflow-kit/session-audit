@@ -878,6 +878,22 @@ def _locked(
     return report
 
 
+def run_files(
+    ctx: Context,
+    store: Store,
+    lease: Lease,
+    discovery: Discovery,
+    deadline: float,
+    session_ids: frozenset[str],
+) -> dict[str, Any]:
+    """An ingest run over the files of ``session_ids`` only, no harness, under a lease the caller
+    holds (``retro run``'s refresh and disk lookup, Freshness). It is a partial run: it logs an
+    ``ingest`` entry and sets ``last_ingest_at``, never ``last_complete_ingest_at`` or the failure
+    counters. The report's ``complete`` is false when the budget ended first."""
+    args = argparse.Namespace(rebuild=False, path=None, session="files", since=None, dry_run=False)
+    return _locked(ctx, args, store, lease, discovery, deadline, None, only=session_ids)
+
+
 COMMANDS = (
     Command(
         ("ingest",),
