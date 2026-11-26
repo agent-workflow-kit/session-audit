@@ -915,7 +915,7 @@ def test_denial_item_takes_the_first_error_result_text_else_nothing():
         for i in parse(user([ok, err], toolDenialKind="auto"), DCTX).digest
         if i.kind is DigestKind.DENIAL
     ]
-    assert item.text == "denied here"
+    assert (item.text, item.tool_use_id) == ("denied here", "t")
     (item,) = parse(user("plain text", toolDenialKind="auto"), DCTX).digest
     assert (item.kind, item.text, item.tool_use_id) == (DigestKind.DENIAL, "", None)
     decision = {"decision": "reject"}

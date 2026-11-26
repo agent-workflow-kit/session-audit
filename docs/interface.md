@@ -754,9 +754,11 @@ digest read: each file is opened with the Ingest rules and read only up to its s
 one read snapshot: the metrics, turn costs, offsets and hashes of every kept session are read in one read transaction
 skip reasons: live (newest mtime of the session's main and subagent files is within retro.quiet_after),
     transcript_missing (no file of the session is on disk), transcript_changed, empty (no item)
-order of the checks: no stored main file, or one Discovery.open refuses (vanished, symlink, hard link, not
-    regular, excluded, pruned, or a stored path that is not a transcript name) -> transcript_missing; a main file
-    whose reread is in progress, or whose identity or hashes differ -> transcript_changed; then live; then empty
+order of the checks: no stored main file -> transcript_missing; a main file whose reread is in progress ->
+    transcript_changed (tested before the file is opened, so a vanished file in that state is still
+    transcript_changed); then a file Discovery.open refuses (vanished, symlink, hard link, not regular, excluded,
+    pruned, or a stored path that is not a transcript name) -> transcript_missing; then an identity, size or hash
+    mismatch, or a line straddling the stored offset -> transcript_changed; then live; then empty
 detection: the head and tail hash checks see changes at the head and tail of the file only; a same-size in-place
     edit of the middle is not detected (the metrics come from the store, the item text from the file)
 --dry-run: reads to the current end of each file in memory (same bytes a real run would ingest), writes nothing

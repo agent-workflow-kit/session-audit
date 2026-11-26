@@ -494,11 +494,13 @@ class _Line:
                     tool_use_id=_ident(block.get("tool_use_id")),
                 )
         text = None  # the first error result's text; a successful result's is never used
+        source = results[0][1] if results else None  # the id comes from the same block as the text
         for _, block in results:
             if block.get("is_error") is True:
                 text = block.get("content")
+                source = block
                 break
-        first = _ident(results[0][1].get("tool_use_id")) if results else None
+        first = _ident(source.get("tool_use_id")) if source is not None else None
         if obj.get("toolDenialKind") == "user-rejected":
             self.item(DigestKind.REJECTION, _content_text(text) or "", tool_use_id=first)
         elif self._denied:
