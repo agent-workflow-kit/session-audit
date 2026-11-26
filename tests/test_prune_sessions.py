@@ -163,9 +163,10 @@ def test_deleting_the_counted_owner_promotes_the_copy_in_another_session(env: En
     env.ingest("a", session=SESSION_A)
     env.write("b", [message(f"m{i}", o, t=50) for i, o in ((1, 5), (2, 7), (3, 9))])
     env.ingest("b", session=SESSION_B)  # later copies of the same keys: A owns them
-    assert rows(env, "SELECT session_id, counted FROM events ORDER BY id") == [
-        (SESSION_A, 1)
-    ] * 3 + [(SESSION_B, 0)] * 3
+    assert (
+        rows(env, "SELECT session_id, counted FROM events ORDER BY id")
+        == [(SESSION_A, 1)] * 3 + [(SESSION_B, 0)] * 3
+    )
     before = env.counted()
     retention._prune_session(env.store, env.lease, SESSION_A, lambda: 1, Report(), 2)
     assert rows(env, "SELECT session_id, counted FROM events") == [(SESSION_B, 1)] * 3

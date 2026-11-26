@@ -1151,6 +1151,26 @@ retro_starts rows older than two days are removed
 again_of may name a deleted retro (it dangles; retro show of that id exits 10)
 ```
 
+Details of the rules above (copy):
+
+```text
+session age: the largest ts of the session's counted events (agents included), else the largest max_ts of its files, else last_ingested_at
+the old pruned_sessions rows are part of session retention: they are skipped with it under ingest_busy
+a session is deleted in transactions of at most 2,000 rows; meta.prune_session names it until its last transaction, and a
+    crashed prune finishes that session first at the next run, whatever its age by then; deleting a counted event promotes the
+    best remaining stored copy of its key, so one counted row per key stays
+retro_starts: rows with day < (today in time_zone) - 2 days
+harness_runs: updated_at is claude-session's text; a value that is not an ISO 8601 time is kept
+retros and digests: a digest directory that cannot be removed completely (another owner, another device, too deep) keeps its retro
+    for the next prune; digests/<retro_id>/ is looked at only for names of the form ra-xxxxxxxx; the age of a digest is its retro's
+    created_at, or the directory's own time when there is no retro row; a digest of a retro that is not final is never expired
+retro_sessions: project_dir is looked up by name, one path component, below every transcript root (lstat; a symlink counts as
+    present); a root that cannot be examined (other than missing) keeps every row
+log: entries with ts below the cutoff go; a line that is not a dated entry (a torn line) is kept byte for byte
+order of a real run: sessions (ingest lease), harness_runs, retros and digests, retro_starts, retro_sessions, log rewrite, the prune log
+    entry, wal_checkpoint(TRUNCATE) (a busy checkpoint is exit 12 retryable; it is also attempted when a step failed)
+```
+
 It reports counts per table. It never touches transcripts, which belong to Claude Code. `retro delete` removes one retro and its files at once. Expired digests are also deleted by every `retro run` housekeeping step.
 
 ## Cron
