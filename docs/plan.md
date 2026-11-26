@@ -29,7 +29,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `store` | 0, 2 | SQLite schema and migrations, leases, queries, file modes |
 | `reader` | 1 | discovery, safe open, incremental lines, change detection, budgets |
 | `parse` | 1 | tolerant line parsing into events by the transcript field map |
-| `count` | 2 | owner rule, slots, cost basis, query-time session values |
+| `derive` | 2 | query-time session values, slot buckets, cost basis (the owner rule and slots are in `eventstore` and `parser`) |
 | `usage` | 2 | aggregation for `usage`, `sessions`, `show`, `export` |
 | `harness` | 3 | claude-session snapshots and the query-time join |
 | `digest` | 4 | numbering, selection, budget, redaction, sanitizing, fencing, manifest |
