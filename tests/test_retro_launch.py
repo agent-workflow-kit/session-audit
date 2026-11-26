@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from session_audit import retrolaunch
+
 from .fake_claude_session import (
     FakeClaudeSession,
     error_doc,
@@ -303,6 +304,7 @@ def test_an_exec_that_ends_in_the_launch_phase_is_session_not_started(
         lambda: step('{"csession_id": "cs-aaaaaaab", "csession_id": "x"}', unvalidated=True),
         lambda: step("NaN", unvalidated=True),
         lambda: step("[" * 100_000, unvalidated=True),
+        lambda: step("x" * 2_000_000, unvalidated=True),  # past the output cap: a failed call
         lambda: step(exec_doc(CSID, "done"), exit=18, unvalidated=True),  # they disagree
     ],
     ids=[
@@ -317,6 +319,7 @@ def test_an_exec_that_ends_in_the_launch_phase_is_session_not_started(
         "duplicate-key",
         "nan",
         "deep",
+        "huge",
         "exit-disagrees",
     ],
 )
@@ -663,8 +666,9 @@ def test_a_session_id_another_retro_already_recorded_is_never_forgotten_here(
     session_run(cs)
     conn = connect(corpus.home)
     conn.execute(
-        "INSERT INTO retro_sessions (csession_id, retro_id, csession_dir, private_dir, project_dir, "
-        "cleanup_state, created_at) VALUES (?, 'ra-zzzzzzzz', '/x', '/y', 'p', 'pending', 1)",
+        "INSERT INTO retro_sessions (csession_id, retro_id, csession_dir, private_dir, "
+        "project_dir, cleanup_state, created_at) "
+        "VALUES (?, 'ra-zzzzzzzz', '/x', '/y', 'p', 'pending', 1)",
         (CSID,),
     )
     conn.commit()
