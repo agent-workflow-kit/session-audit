@@ -168,6 +168,7 @@ def test_the_umask_is_restored_when_threads_change_it_together() -> None:
     def work(mask: int) -> None:
         for _ in range(3000):
             with gw.umask(mask):
+                time.sleep(0)  # yield so an unlocked umask would interleave
                 if os.umask(mask) != mask:  # set to the same value: reads what is current
                     errors.append("another thread's umask leaked in")
                     return

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -109,7 +110,12 @@ def race(tmp_path: Path, directory: str, target: str, mode: str, round_no: int) 
         results = []
         for proc in procs:  # one line each, read while the racers are still alive
             assert proc.stdout is not None
-            results.append(proc.stdout.readline().strip())
+            line: list[str] = []
+            reader = threading.Thread(target=lambda p=proc, o=line: o.append(p.stdout.readline()))  # type: ignore[union-attr]
+            reader.start()
+            reader.join(30)
+            assert not reader.is_alive(), "a racer printed no result within 30s"
+            results.append(line[0].strip())
         Path(str(gate) + ".release").write_text("go", encoding="utf-8")
         for proc in procs:
             _, err = proc.communicate(timeout=60)
