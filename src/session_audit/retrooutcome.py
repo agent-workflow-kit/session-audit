@@ -36,8 +36,8 @@ __all__ = [
     "Mapped",
     "Outcome",
     "Started",
-    "is_document",
     "launch_failed_id",
+    "names_a_malformed_id",
     "map_exec",
     "map_start",
     "parse_forget",
@@ -138,13 +138,15 @@ def parse_start(text: str) -> Started:
     return Started(csid, directory, _integer(_need(document, "run"), 1), tuple(argv))
 
 
-def is_document(text: str) -> bool:
-    """True when ``text`` is one strict JSON object (whatever its fields hold)."""
+def names_a_malformed_id(text: str) -> bool:
+    """True when ``text`` is one strict JSON object whose ``csession_id`` is a string that does
+    not match the claude-session grammar: the document names an id of its own, so no other token
+    of the output (an ``argv`` element, say) is taken for it."""
     try:
-        _object(strict_loads(text))
+        csid = _object(strict_loads(text)).get("csession_id")
     except Invalid:
         return False
-    return True
+    return isinstance(csid, str) and not is_csession_id(csid)
 
 
 def launch_failed_id(text: str) -> tuple[str, str, int | None] | None:
@@ -181,7 +183,8 @@ def validated_session(
     stopped unless this returns a value: the id has the claude-session grammar, the directory is
     exactly ``sessions_root/<id>`` (ASCII, no ``..``, so it lies under the root), when it exists it
     is a real directory (not a link) of this user, and the project directory name of
-    ``<dir>/work`` (from the path as written, not resolved) matches ``^[A-Za-z0-9-]{1,200}$``."""
+    ``<dir>/work`` (the root resolved, as Claude Code encodes it) matches
+    ``^[A-Za-z0-9-]{1,200}$``."""
     if not is_csession_id(csid) or not isinstance(csession_dir, str):
         return None
     if not csession_dir.isascii() or "\x00" in csession_dir or ".." in csession_dir.split("/"):
@@ -197,7 +200,10 @@ def validated_session(
     else:
         if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             return None  # a symlink, a file or somebody else's directory is not a session
-    project = re.sub(r"[^A-Za-z0-9]", "-", csession_dir + "/work")  # as written, not resolved
+    # Claude Code encodes the real path: only ancestors of the root can be links (the session
+    # directory itself was checked above), so resolve the root and append the rest.
+    real_dir = os.path.join(os.path.realpath(sessions_root), csid)
+    project = re.sub(r"[^A-Za-z0-9]", "-", real_dir + "/work")
     if not _PROJECT_DIR.fullmatch(project):
         return None
     return csid, csession_dir, project

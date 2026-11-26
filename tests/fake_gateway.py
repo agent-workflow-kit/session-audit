@@ -344,6 +344,7 @@ class FakeGateway:
         append: bool = False,
         mode: int = 0o600,
         read_only: bool = False,
+        exclusive: bool = False,
     ) -> BinaryIO:
         raise NotImplementedError("state directory access is tested against real directories")
 

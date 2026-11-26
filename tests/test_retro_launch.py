@@ -702,6 +702,20 @@ def test_a_start_argv_that_is_not_the_adopting_exec_is_refused_but_the_session_i
     assert keys(cs) == ["start", "forget"]  # nothing of argv is ever run
 
 
+def test_a_start_document_that_does_not_parse_but_holds_one_id_is_recorded_and_forgotten(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs)
+    document = start_doc(CSID)
+    document["argv"] = "not a list"  # a valid id, a document parse_start refuses
+    cs.script("start", step(document, exit=0, unvalidated=True))
+    error_of(launch(capsys, gw), 12, "claude_session_error")
+    assert keys(cs) == ["start", "forget"]  # recorded, so cleaned up; never exec'd
+    [session] = rows(corpus.home, "retro_sessions")
+    assert session["csession_id"] == CSID and session["forgotten_at"] is not None
+
+
 def test_the_adopting_exec_is_built_by_the_tool_from_the_validated_session(
     corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -519,16 +519,30 @@ def test_a_symlinked_session_directory_is_refused(tmp_path: Path) -> None:
     assert validated_session(CSID, f"{root}/{CSID}", str(root)) is None
 
 
-def test_a_real_session_directory_names_its_project_from_the_unresolved_path(
+def test_a_session_directory_under_a_linked_root_names_its_project_from_the_real_root(
     tmp_path: Path,
 ) -> None:
     real = tmp_path / "real"
     (real / CSID).mkdir(parents=True)
     link = tmp_path / "link"
-    link.symlink_to(real)  # the root itself is reached through a link: kept as written
+    link.symlink_to(real)  # the root itself is reached through a link: the real path is encoded
     got = validated_session(CSID, f"{link}/{CSID}", str(link))
     assert got is not None
-    assert got[2] == re.sub(r"[^A-Za-z0-9]", "-", f"{link}/{CSID}/work")
+    assert got[2] == re.sub(r"[^A-Za-z0-9]", "-", f"{real}/{CSID}/work")
+
+
+def test_a_symlinked_ancestor_of_the_root_is_resolved_in_the_project_name(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    (real / "sessions" / CSID).mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real)  # an ancestor of the root is a link: Claude Code encodes the real path
+    root = f"{link}/sessions"
+    got = validated_session(CSID, f"{root}/{CSID}", root)
+    assert got is not None
+    assert got[1] == f"{root}/{CSID}"  # the directory stays as written
+    assert got[2] == re.sub(r"[^A-Za-z0-9]", "-", f"{real}/sessions/{CSID}/work")
 
 
 def test_a_project_directory_name_over_200_characters_is_refused() -> None:

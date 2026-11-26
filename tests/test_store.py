@@ -980,3 +980,32 @@ def test_reopen_does_not_drop_the_locks_either(tmp_path: Path) -> None:
     finally:
         first.close()
         other.close()
+
+
+def test_losing_the_creation_race_never_opens_the_existing_database(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    db_path = f"{directory}/state.db"
+
+    class Racing(ClockedGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.opened_existing: list[str] = []
+            self._hid = False
+
+        def lstat(self, path):  # type: ignore[no-untyped-def]
+            if os.fspath(path) == db_path and not self._hid:
+                self._hid = True  # another thread has not created it yet, as far as we can see
+                raise FileNotFoundError(path)
+            return super().lstat(path)
+
+        def open_private(self, path, **kwargs):  # type: ignore[no-untyped-def]
+            existed = os.path.exists(path)
+            handle = super().open_private(path, **kwargs)  # an exclusive create raises instead
+            if existed:
+                self.opened_existing.append(os.fspath(path))
+            return handle
+
+    gateway = Racing()
+    open_store(gateway, directory).close()
+    assert gateway.opened_existing == []  # an open and close would drop the other thread's locks

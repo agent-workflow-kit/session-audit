@@ -52,10 +52,10 @@ from .retrooutcome import (
     Mapped,
     Outcome,
     Started,
-    is_document,
     launch_failed_id,
     map_exec,
     map_start,
+    names_a_malformed_id,
     parse_outcome,
     parse_start,
     parse_status,
@@ -153,6 +153,7 @@ class Launcher:
         )
         if fenced.section_hashes != self.prepared.hashes:
             raise errors.CliError("internal", "the digest sections changed after the key")
+        retrofiles.check_digest_hash(fenced)
         self.hook = self._pre_retro(fenced)
         row.lease.raise_if_lost()
         if self.hook.decision is hooks.Decision.VETO:
@@ -256,9 +257,8 @@ class Launcher:
             try:
                 started = parse_start(result.stdout)
             except Invalid:
-                started = None
-                if is_document(result.stdout):
-                    # A document whose id or directory is malformed names nothing to clean up.
+                started = None  # the one id token of the output may still be cleaned up below
+                if names_a_malformed_id(result.stdout):
                     self.ctx.note("session-audit: warning: claude-session printed no usable id")
                     return None, error
         elif result.exit_is(12):

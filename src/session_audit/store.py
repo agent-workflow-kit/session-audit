@@ -269,7 +269,9 @@ def _check_db_file(
         if not create:
             return False
         try:
-            gateway.open_private(db_path, create=True).close()
+            gateway.open_private(db_path, create=True, exclusive=True).close()
+        except FileExistsError:
+            pass  # another thread or process created it first: never open (and close) it here
         except PermissionError:
             raise unwritable("state.db is not writable") from None
         info = gateway.lstat(db_path)

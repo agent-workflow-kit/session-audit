@@ -193,15 +193,21 @@ def _remove_made(gateway: Gateway, made: list[str]) -> None:
             handle.close()
 
 
+def check_digest_hash(fenced: FencedDigest) -> None:
+    """``digest_sha256`` and the manifest's equal the SHA-256 of the digest bytes (``CliError``
+    ``internal`` otherwise); checked before the retro is marked running."""
+    sha = hashlib.sha256(fenced.digest_bytes).hexdigest()
+    if sha != fenced.digest_sha256 or fenced.manifest.get("digest_sha256") != sha:
+        raise CliError("internal", "the digest hash does not match its manifest")
+
+
 def write_run_files(
     gateway: Gateway, state: str, retro_id: str, run_token: str, fenced: FencedDigest
 ) -> RunFiles:
     """Step 15's files. ``digest_sha256`` of the manifest equals the SHA-256 of the written digest
     bytes (checked here, an internal error otherwise). Raises ``FilesError`` after removing what
     this call created."""
-    sha = hashlib.sha256(fenced.digest_bytes).hexdigest()
-    if sha != fenced.digest_sha256 or fenced.manifest.get("digest_sha256") != sha:
-        raise CliError("internal", "the digest hash does not match its manifest")
+    check_digest_hash(fenced)
     made: list[str] = []
     try:
         for parent in (DIGESTS, PROMPTS, OUTCOMES):

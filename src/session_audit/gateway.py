@@ -313,12 +313,14 @@ class Gateway(Protocol):
         append: bool = False,
         mode: int = 0o600,
         read_only: bool = False,
+        exclusive: bool = False,
     ) -> BinaryIO:
         """Open a regular file read-write (read-only with ``read_only``, which excludes ``create``
         and ``append``), unbuffered, never following a final symlink and never blocking on a FIFO.
         With ``create`` a missing file is created with exactly ``mode`` whatever the umask; an
-        existing one is opened as it is. With ``append`` every write goes to the end. The caller
-        checks what it opened (``os.fstat`` on the handle)."""
+        existing one is opened as it is, unless ``exclusive`` (with ``create``), which raises
+        ``FileExistsError`` instead of opening it. With ``append`` every write goes to the end. The
+        caller checks what it opened (``os.fstat`` on the handle)."""
         ...
 
     def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
@@ -791,6 +793,7 @@ class SystemGateway:
         append: bool = False,
         mode: int = 0o600,
         read_only: bool = False,
+        exclusive: bool = False,
     ) -> BinaryIO:
         if read_only and (create or append):
             raise ValueError("a read-only open cannot create or append")
@@ -805,7 +808,8 @@ class SystemGateway:
                 fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, mode)
                 created = True
             except FileExistsError:
-                pass
+                if exclusive:
+                    raise
         try:
             if fd < 0:
                 fd = os.open(path, flags)
