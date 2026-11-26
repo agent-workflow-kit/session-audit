@@ -26,7 +26,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `config` | 0 | YAML with drop-ins, Pydantic validation, ownership checks, price table |
 | `gateway` | 0 | the only process, filesystem-outside-store, clock and crontab access |
 | `textsafe` | 0 | sanitizer, fix_surrogates, untrusted neutralizer, display helpers |
-| `store` | 0, 2 | SQLite schema and migrations, leases, queries, file modes |
+| `store` | 0, 2, 5 | SQLite schema and migrations, leases, queries, file modes, the in-memory copy of a dry run (#24) |
 | `reader` | 1 | discovery, safe open, incremental lines, change detection, budgets |
 | `parse` | 1 | tolerant line parsing into events by the transcript field map |
 | `derive` | 2 | query-time session values, slot buckets, cost basis (the owner rule and slots are in `eventstore` and `parser`) |
@@ -34,7 +34,9 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `harness` | 3 | claude-session snapshots and the query-time join |
 | `redact` | 4 | redaction patterns (package data), literal masks, encoded-value check, the cut and `digest_text` |
 | `digest` | 4 | items, numbering, selection, budget, redaction and sanitizing, the stored-offset read (#21); fencing, section hashes, manifest (#22, `fencing.py`) |
-| `retro` | 5 | order of checks, key, preflight, plan check, launch, outcome mapping, collect and cleanup, recovery |
+| `retro` | 5 | order of checks, key, launch, outcome mapping, collect and cleanup, recovery (#23: steps 1 to 10; #26 onward: the rest) |
+| `plugins` | 5 | the skill preflight (#24): skill name, bundled plugin as a package resource, credential locations, the descriptor walk of configured plugin directories |
+| `launchplan` | 5 | the `start` flags, the launch plan check against the pinned plan schema's fields, `project_dir_name` (#24) |
 | `hooks` | 5 | hook execution, process groups, payloads |
 | `artifact` | 6 | closed-shape validation and evidence checks |
 | `cron` | 7 | managed block read, write, dry run |

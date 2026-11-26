@@ -395,3 +395,55 @@ def test_a_hostile_status_needs_unvalidated_to_be_scripted(tmp_path: Path) -> No
     with pytest.raises(ValidationError):
         fake.script("status", step(bad))
     fake.script("status", step(bad, unvalidated=True))
+
+
+# --- the start --dry-run plan (issue #24) --------------------------------------------------------
+
+
+def test_the_default_plan_and_its_refusing_and_failing_forms_validate_against_the_pinned_schema(
+    tmp_path: Path,
+) -> None:
+    from .fake_claude_session import failing_plan, plan_doc, refusing_plan
+
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("start --dry-run", step(plan_doc()))
+    assert json.loads(call(fake, "start", "--json", "--dry-run").stdout)["dry_run"] is True
+    fake.script("start --dry-run", step(refusing_plan("live"), exit=20))
+    refused = call(fake, "start", "--json", "--dry-run")
+    assert refused.returncode == 20 and json.loads(refused.stdout)["would_refuse"] == "live"
+    fake.script("start --dry-run", step(failing_plan("unsafe_plugin_dir"), exit=12))
+    failed = call(fake, "start", "--json", "--dry-run")
+    assert (
+        failed.returncode == 12 and json.loads(failed.stdout)["would_fail"] == "unsafe_plugin_dir"
+    )
+    fake.assert_outputs_valid()
+
+
+def test_a_plan_that_breaks_the_pinned_schema_is_refused_when_scripted(tmp_path: Path) -> None:
+    from .fake_claude_session import plan_doc
+
+    fake = FakeClaudeSession(tmp_path)
+    for changes in (
+        {"profile.mcp": "maybe"},
+        {"origins.sandbox": "elsewhere"},
+        {"would_fail": "not_a_launch_reason"},
+        {"tools": "Read"},
+    ):
+        with pytest.raises(ValidationError):
+            fake.script("start --dry-run", step(plan_doc(changes)))
+    with pytest.raises(AssertionError, match="exit 3 is not one of"):
+        fake.script("start --dry-run", step(plan_doc(), exit=3))
+
+
+def test_the_fake_takes_the_real_launch_flags_of_a_retro(tmp_path: Path) -> None:
+    from .fake_claude_session import plan_doc
+
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("start --dry-run", step(plan_doc()))
+    result = call(
+        fake, "start", "--kind", "audit", "--reads-third-party", "--no-implicit-done",
+        "--setting-sources", "", "--env-allowlist-only", "", "--tools", "Read", "Write",
+        "--timeout", "1200s", "--max-turns", "12", "--label", "a=b", "--dry-run", "--json",
+    )  # fmt: skip
+    assert result.ok
+    assert call(fake, "start", "--bogus-flag", "--dry-run", "--json").returncode == 2

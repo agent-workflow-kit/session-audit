@@ -164,7 +164,8 @@ def test_the_bundled_plugin_passes_with_group_writable_modes_and_another_owner(
         path.chmod(0o775 if path.is_dir() else 0o664)
     gateway = Counting(uid=os.geteuid() + 1)  # nothing is owned by "me": the bundle is not checked
     choice = run(gateway, "session-audit:audit", home, bundled=str(bundled))
-    assert choice == plugins.PluginChoice(str(bundled.resolve()), (str(bundled.resolve()),))
+    real = str(bundled.resolve())
+    assert choice == plugins.PluginChoice(real, (real,), real)
 
 
 def test_a_configured_directory_with_the_same_modes_is_refused(home: Path) -> None:
