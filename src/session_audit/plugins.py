@@ -29,6 +29,8 @@ entry, in this order:
 No match anywhere is exit 12 ``skill_not_found``. The directories for ``--plugin-dir`` are the
 bundled one (always, when it exists) and the one that matched.
 
+``validate``'s ``plugin`` check runs this function for ``retro.skill`` (TODO(#33)).
+
 Every file system access goes through ``DirHandle`` descriptors of the gateway. Credential
 locations are compared by path components, never by string prefix.
 """

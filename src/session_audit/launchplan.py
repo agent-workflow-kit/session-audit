@@ -69,7 +69,7 @@ PLAN_OUTPUT_LIMIT = 4 * 1024 * 1024
 PLACEHOLDER_RETRO_ID = "ra-aaaaaaaa"  # the plan check runs before any row (and id) exists
 PLACEHOLDER_FILES = ("prompt.md", "digest.md", "manifest.json")
 PROJECT_DIR_MAX = 200
-PROFILE_RELATIVE = "profiles/audit-retro.yaml"  # in the bundled plugin (#30 adds the file)
+PROFILE_RELATIVE = "profiles/audit-retro.yaml"  # in the bundled plugin; TODO(#30): the file
 _END_REASON = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _RETRYABLE_END_REASONS = frozenset({"launch_interrupted", "never_adopted"})
 
