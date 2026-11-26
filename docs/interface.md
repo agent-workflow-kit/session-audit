@@ -622,7 +622,7 @@ Redaction is best effort and documented as such. The retro session is confined (
 **Key.** The key is computed over the digested sessions, never over the scope or the digest bytes (copy):
 
 ```text
-DIGEST_FORMAT = 2                                  # bumped by the tool in every release that changes the digest rendering or the bundled skill
+DIGEST_FORMAT = 3                                  # bumped by the tool in every release that changes the digest rendering or the bundled skill
 def retro_key(kept_sessions, skill, model):
     # kept_sessions: the sessions that are digested (after every skip), each with its section_sha256
     parts = sorted((s.session_id, s.section_sha256) for s in kept_sessions)
@@ -983,11 +983,11 @@ row_binds_its_own_paths(rs) = csession_id and retro_id match their grammars, pro
 
 ## Slot contract
 
-The slot is `audit`; the default skill is `session-audit:audit`, bundled in `plugin/`. The skill is written in the implementation plan's skill issue. The bundled plugin is `plugin/` in the repo, installed as package data `session_audit/plugin` (wheel force-include); `plugin/.claude-plugin/plugin.json` is `{"name": "session-audit"}`, so the plugin name does not depend on the installed directory name. A test must check that the built wheel contains `session_audit/plugin/.claude-plugin/plugin.json` (a hidden directory) and that the installed plugin's name is `session-audit`.
+The slot is `audit`; the default skill is `session-audit:audit`, bundled in `plugin/`. The bundled plugin is `plugin/` in the repo, installed as package data `session_audit/plugin` (wheel force-include); `plugin/.claude-plugin/plugin.json` is `{"name": "session-audit"}`, so the plugin name does not depend on the installed directory name. A test must check that the built wheel contains `session_audit/plugin/.claude-plugin/plugin.json` (a hidden directory) and that the installed plugin's name is `session-audit`.
 
 The bundled permission profile is `plugin/profiles/audit-retro.yaml`, a claude-session profile file (claude-session interface, Permission profiles). claude-session generates the `Read` of `$CSESSION_DIR`, the `Write`/`Edit` of `artifacts/` and `work/`, the `claude-session report` Bash allow rules and permission mode `dontAsk` (anything not allowed is denied). The file adds only `permissions.deny`: `Agent`, `Task`, `WebFetch`, `WebSearch`, `NotebookEdit`, `mcp__*`, `Bash(memoctl:*)`, `Bash(agent-spawn:*)`, `Bash(forgectl:*)`, `Bash(ticketctl:*)`, `Bash(notice-route:*)`, `Bash(awkit:*)`, `Bash(session-audit:*)`, and `sandbox.network.allowedDomains: []`.
 
-The marker is the single line of `plugin/skills/audit/references/marker.txt` (pattern `^[a-z0-9-]{16,64}$`), changed in every release that changes the skill. The tool reads it from `<bundled_plugin_dir>/skills/audit/references/marker.txt` in its installed package; the skill reads it with the Read tool. A custom skill's marker is `retro.skill_marker`. The marker proves the skill's reference file was read; it is not an injection defense (an injected session can copy it).
+The marker is the single line of `plugin/skills/audit/references/marker.txt` (pattern `^[a-z0-9-]{16,64}$`), changed in every release that changes the skill. The marker is `audit-` plus the first 24 hex characters of the SHA-256 of `SKILL.md`, so it changes whenever the skill text does, and every skill change also bumps `DIGEST_FORMAT` (the retro key depends on it): `tests/skill_pin.json` maps each `DIGEST_FORMAT` to the SHA-256 of the skill text it shipped with, and a test fails for a skill that differs from the entry of the current format. A changed skill needs a new marker, a bumped `DIGEST_FORMAT` and a new pin entry (older entries are never edited). The tool reads it from `<bundled_plugin_dir>/skills/audit/references/marker.txt` in its installed package; the skill reads it with the Read tool. A custom skill's marker is `retro.skill_marker`. The marker proves the skill's reference file was read; it is not an injection defense (an injected session can copy it).
 
 **Inputs** under `$CSESSION_DIR/inputs/<run>/`:
 

@@ -55,7 +55,9 @@ __all__ = [
 # across Python versions (U+2FFC: a marker on 3.12, kept on 3.13). UNICODE_VERSION names the
 # database in use so a consumer can record or compare it; it is NOT part of the retro key.
 # 2 (issue #22): an opening ``<untrusted`` tag in text is neutralized too, like ``</untrusted``.
-DIGEST_FORMAT = 2
+# 3 (issue #30): the bundled audit skill (plugin/skills/audit/SKILL.md) exists. tests/skill_pin.json
+# pins the skill text of each format: a changed skill needs a new format and a new marker.
+DIGEST_FORMAT = 3
 UNICODE_VERSION = unicodedata.unidata_version
 
 WORK_BOUND = 65_536

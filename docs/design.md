@@ -224,7 +224,7 @@ Linux and WSL are tested; macOS is expected to work and is checked locally. See 
 
 - ~~The exact secret-shaped patterns~~ Settled in issue #20, see Redaction patterns below.
 - Whether `usage --by` needs more than two dimensions (not for 0.x).
-- The skill that the bundled plugin ships is written in the implementation plan's skill issue.
+- ~~The skill that the bundled plugin ships~~ Written in issue #30. Its marker is derived from the text of `SKILL.md` and `DIGEST_FORMAT` is bumped with every skill change (Slot contract); the skill's path to its own `references/marker.txt` and the literal session directory rely on the skill loader's base directory and claude-session's standard instructions, to be verified live.
 - The measured size of the events table on a real corpus, and an index or rollup if it misses the target.
 
 ## Redaction patterns

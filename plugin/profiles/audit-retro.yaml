@@ -1,0 +1,20 @@
+# The retro session's permission profile (claude-session, Permission profiles).
+# It only adds denies; claude-session generates every allow rule and the permission mode.
+permissions:
+  deny:
+    - Agent
+    - Task
+    - WebFetch
+    - WebSearch
+    - NotebookEdit
+    - "mcp__*"
+    - "Bash(memoctl:*)"
+    - "Bash(agent-spawn:*)"
+    - "Bash(forgectl:*)"
+    - "Bash(ticketctl:*)"
+    - "Bash(notice-route:*)"
+    - "Bash(awkit:*)"
+    - "Bash(session-audit:*)"
+sandbox:
+  network:
+    allowedDomains: []

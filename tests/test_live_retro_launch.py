@@ -10,8 +10,8 @@ under its state directory or a hidden home entry, but its own per-session direct
 a retro whose ``--cwd session-dir`` lives under the default ``~/.local/state`` (and under an
 ``XDG_STATE_HOME``) must not end ``unsafe_cwd``, ``unsafe_path`` or ``session_dir_unsafe``.
 
-Until the bundled profile exists (#30) the plan check ends ``invalid_permission_profile``: the
-tests then skip with that reason (it is not the fact under test)."""
+The bundled profile (``plugin/profiles/audit-retro.yaml``) is part of the plan check, so a profile
+claude-session refuses fails these tests."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -75,19 +74,12 @@ def home_and_env(
     return home, env
 
 
-def not_started_for_the_profile(document: dict[str, Any]) -> bool:
-    details = document.get("error", {}).get("details", {})
-    return details.get("end_reason") == "invalid_permission_profile"
-
-
 def test_the_plan_check_accepts_a_session_directory_under_the_state_directory(
     home_and_env: tuple[Path, dict[str, str]],
 ) -> None:
     _home, env = home_and_env
     result = session_audit(env, "retro", "run", "--dry-run", "--json", "--project", "/work")
     document = json.loads(result.stdout)
-    if result.returncode != 0 and not_started_for_the_profile(document):
-        pytest.skip("the bundled profile arrives with #30")
     assert result.returncode == 0, result.stderr
     assert document["dry_run"] is True
     assert "--cwd" in document["launch_flags"]
@@ -108,10 +100,8 @@ def test_a_real_launch_is_not_refused_for_its_working_directory(
     document = json.loads(result.stdout)
     if "error" in document:
         details = document["error"]["details"]
-        if not_started_for_the_profile(document):
-            pytest.skip("the bundled profile arrives with #30")
         assert details.get("end_reason") not in REFUSED_CWD, details
-    # Whatever the retro ends as (the artifact check exists; the skill arrives with #30), the
+    # Whatever the retro ends as (the artifact check and the bundled skill exist), the
     # session was started from its own directory under the state directory, was recorded, and was
     # forgotten again.
     assert result.returncode in (0, 12, 13, 14, 15, 16, 17, 18, 22), result.stderr
