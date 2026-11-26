@@ -347,3 +347,47 @@ def test_concurrent_calls_each_get_their_own_step(tmp_path: Path) -> None:
         results = list(pool.map(lambda _: call(fake, "list", "--json"), range(6)))
     assert sorted(r.stdout for r in results) == [str(n) for n in range(6)]
     assert len(fake.calls()) == 6
+
+
+def test_status_and_list_builders_are_valid_and_status_is_scripted_per_id(tmp_path: Path) -> None:
+    from .fake_claude_session import list_item, status_doc, version_step
+
+    uuid = "11111111-1111-4111-8111-111111111111"
+    fake = FakeClaudeSession(tmp_path)
+    fake.script("--version", version_step("0.45.3"))
+    fake.script("list", step(list_doc([list_item("cs-aaaaaaab"), list_item("cs-aaaaaaac")])))
+    fake.script("status cs-aaaaaaab", step(status_doc("cs-aaaaaaab", claude_session_ids=[uuid])))
+    fake.script(
+        "status",
+        step(error_doc("not_found", "no such session"), exit=10),
+    )
+    assert call(fake, "--version").stdout == "claude-session 0.45.3\n"
+    listed = json.loads(call(fake, "list", "--json").stdout)
+    assert [s["csession_id"] for s in listed["sessions"]] == ["cs-aaaaaaab", "cs-aaaaaaac"]
+    known = call(fake, "status", "cs-aaaaaaab", "--json")
+    assert json.loads(known.stdout)["claude_session_ids"][0]["claude_session_id"] == uuid
+    unknown = call(fake, "status", "cs-aaaaaaac", "--json")
+    assert unknown.exit_is(10)
+    fake.assert_outputs_valid()
+
+
+def test_a_live_status_document_is_valid(tmp_path: Path) -> None:
+    from .fake_claude_session import status_doc
+
+    fake = FakeClaudeSession(tmp_path)
+    fake.script(
+        "status",
+        step(status_doc(outcome=None, end_reason=None, cost_usd=None, num_turns=None)),
+    )
+    assert call(fake, "status", "cs-aaaaaaab", "--json").ok
+    fake.assert_outputs_valid()
+
+
+def test_a_hostile_status_needs_unvalidated_to_be_scripted(tmp_path: Path) -> None:
+    from .fake_claude_session import status_doc
+
+    fake = FakeClaudeSession(tmp_path)
+    bad = status_doc(labels=["Not A Label"])
+    with pytest.raises(ValidationError):
+        fake.script("status", step(bad))
+    fake.script("status", step(bad, unvalidated=True))

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from session_audit.cli import main
+from session_audit.gateway import CallResult, CallStatus
 
 from .eventhelp import message, raw
 from .storehelp import ClockedGateway
@@ -36,9 +37,11 @@ class TickGateway(ClockedGateway):
             self.clock.advance(self.tick)
         return now
 
-    def run(self, *args: Any, **kwargs: Any) -> Any:
-        self.runs.append(args)
-        raise AssertionError("ingest must not start a process in these tests")
+    def run(self, argv: Any, **kwargs: Any) -> Any:
+        """Every program is missing here (claude-session included): a real ingest finds no
+        harness and goes on; a test asserts ``runs`` to see what was asked."""
+        self.runs.append(list(argv))
+        return CallResult(CallStatus.SPAWN_FAILED, detail="FileNotFoundError: scripted missing")
 
 
 class Corpus:
