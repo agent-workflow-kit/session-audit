@@ -119,6 +119,24 @@ Reads new transcript bytes into the store and, when claude-session is installed,
 
 `--json` output: `schemas/cli/ingest.json` (the key list is in the schema). Ingest counts files (`seen`, `new`, `changed`, `unchanged`, `unsafe`, `excluded`, `vanished`, `rewritten`, `remaining`), lines (`parsed`, `errors`, `oversized`, `unknown`), sessions, harness and `warnings` (free strings, untrusted because they can name transcript paths). An `already_running` result has every count zero and `complete: false`; `files_deferred` is true only for a `--session` capture whose file reads were left to the lease holder.
 
+How the counts are taken (copy):
+
+```text
+files.seen        every file whose name is a transcript name and that --since did not leave out
+files.new         a file with no stored row, read
+files.changed     a stored file read on from its offset (its size is not equal to its offset, or a reread was pending)
+files.rewritten   a stored file read again from the start (changed identity, shorter, head or tail hash differs,
+                  lower rules_version, --rebuild); with --rebuild --dry-run, the files that would be
+files.unchanged   size equals the stored offset, the hashes match and the rules are current (nothing is written for it);
+                  a pruned session's file that has not changed since the prune is counted here too
+files.remaining   files not finished when a budget ended the run (not reached, or stopped partway); files whose
+                  listing already equals their stored offset are not counted
+lines.parsed      complete lines read in this run; errors and unknown are the error lines and the unknown-type lines among them
+sessions.new      sessions whose first file was read in this run; sessions.updated: sessions with a file read that already existed
+```
+
+`meta.last_ingest_at` is set by every ingest that finishes (exit 0, not a dry run); `meta.last_complete_ingest_at` by one that is also `complete` and has no `--path` and no `--since`. The failure counters follow Hooks (`ingest_failing`); both are epoch milliseconds. A dry run opens the store read-only (it creates none, applies no migration, takes no lease, appends no log line). `--rebuild` sets the stored `rules_version` of every listed file to 0 before reading, so a run stopped by its budget is finished by the next plain run (lower versions first) and rows of files that are gone are never touched. A `root_unusable` warning names the root (sanitized) and the reason; `scan_capped` and `dirs_unreadable` are fixed tokens.
+
 ### `sessions`
 
 `session-audit sessions [--since WHEN] [--until WHEN] [--project PATH] [--label K=V]... [--kind K] [--outcome O] [--entrypoint interactive|headless] [--model M] [--sort start|tokens|cost|active] [--limit N] [--json]`

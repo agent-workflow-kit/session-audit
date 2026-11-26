@@ -207,7 +207,10 @@ def test_a_held_lease_reports_already_running_and_writes_nothing(
     validate(doc, "session-audit/cli/ingest.json")
     assert doc["already_running"] is True and doc["complete"] is False
     assert all(v == 0 for v in doc["files"].values())
-    assert all(v == 0 for v in doc["lines"].values()) and doc["sessions"] == {"new": 0, "updated": 0}
+    assert all(v == 0 for v in doc["lines"].values()) and doc["sessions"] == {
+        "new": 0,
+        "updated": 0,
+    }
     assert doc["warnings"] == []
     assert scalar(_private_environment, "SELECT count(*) FROM events") == 0
     assert not (state_dir_of(_private_environment) / "log.jsonl").exists()
@@ -347,7 +350,9 @@ def test_dry_run_leaves_a_pending_migration_pending(
     corpus.write_main(S1, messages("a", 1))
     ingest(capsys, gw)
     conn = connect(_private_environment)
-    conn.execute("DELETE FROM schema_migrations WHERE number = (SELECT max(number) FROM schema_migrations)")
+    conn.execute(
+        "DELETE FROM schema_migrations WHERE number = (SELECT max(number) FROM schema_migrations)"
+    )
     conn.commit()
     conn.close()
     before = snapshot(_private_environment)
@@ -648,10 +653,10 @@ def test_ingest_failing_is_due_at_the_threshold_and_quiet_for_24_hours() -> None
 
 
 def test_ids_at_or_above_2_to_the_63_compare_signed() -> None:
+    import sqlite3
+
     from session_audit.commands.ingest import _probably_unchanged
     from session_audit.reader import Candidate
-
-    import sqlite3
 
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -665,3 +670,53 @@ def test_ids_at_or_above_2_to_the_63_compare_signed() -> None:
     assert _probably_unchanged(conn, cand, 2, False) is False
     assert _probably_unchanged(conn, cand, 1, True) is False
     _ = os
+
+
+# --- live facts on a synthetic corpus ---------------------------------------------------------
+
+
+def test_a_compaction_boundary_is_one_compaction_and_a_resumed_session_stays_one_session(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    from .eventhelp import compaction
+
+    # A resumed session appends to the same file; lines may carry another sessionId (never used
+    # to join), and one boundary line marks the compaction.
+    corpus.write_main(S1, [message("m1", 5, t=1), compaction("cmp-1", t=2)])
+    ingest(capsys, gw)
+    corpus.append_main(S1, [message("m2", 6, t=3, session=S3), message("m3", 7, t=4)])
+    doc = ingest(capsys, gw).doc
+    assert doc["files"]["changed"] == 1
+    assert scalar(_private_environment, "SELECT count(*) FROM sessions") == 1
+    assert (
+        scalar(
+            _private_environment,
+            "SELECT count(*) FROM events WHERE kind = 'compaction' AND counted = 1",
+        )
+        == 1
+    )
+    assert scalar(_private_environment, "SELECT count(DISTINCT session_id) FROM events") == 1
+    assert scalar(_private_environment, "SELECT session_id FROM events LIMIT 1") == S1
+
+
+def test_store_size_on_a_scaled_down_synthetic_corpus_stays_bounded(
+    gw: TickGateway, tmp_path: Path, _private_environment: Path
+) -> None:
+    # The full measurement is tests/measure_store_size.py (design.md, Live verification); this is
+    # the regression guard: the store holds a few hundred bytes per event, never the lines.
+    from .measure_store_size import write_corpus
+
+    corpus = Corpus(_private_environment)
+    corpus_bytes = write_corpus(corpus.root, 4, 500)
+    gw.clock.advance(0)
+    from session_audit.cli import main
+
+    assert main(["ingest", "--json", "--budget", "10m"], gateway=gw, stdin_is_tty=False) == 0
+    conn = connect(_private_environment)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    events = conn.execute("SELECT count(*) FROM events").fetchone()[0]
+    conn.close()
+    size = (state_dir_of(_private_environment) / "state.db").stat().st_size
+    assert events == 2400
+    assert size / events < 600
+    assert size < 3 * corpus_bytes
