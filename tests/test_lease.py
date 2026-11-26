@@ -361,9 +361,10 @@ def test_ingest_stale_renewal_does_not_extend_the_new_holders_lease(tmp_path: Pa
     value = store.conn.execute("SELECT value FROM meta WHERE key = 'ingest_lease'").fetchone()[0]
     gateway.clock.advance(10)
     assert stale.renew() is False
-    assert store.conn.execute("SELECT value FROM meta WHERE key = 'ingest_lease'").fetchone()[
-        0
-    ] == value
+    assert (
+        store.conn.execute("SELECT value FROM meta WHERE key = 'ingest_lease'").fetchone()[0]
+        == value
+    )
     with pytest.raises(CliError), store.transaction() as conn:
         stale.check_still_holder(conn)
 
@@ -383,7 +384,9 @@ def test_a_pid_prefix_is_not_the_same_holder(tmp_path: Path) -> None:
 def test_a_garbled_ingest_value_is_a_free_lease(tmp_path: Path, garbage: str) -> None:
     _, store = make(tmp_path)
     with store.transaction() as conn:
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ingest_lease', ?)", (garbage,))
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('ingest_lease', ?)", (garbage,)
+        )
     seen = observe(store, IngestTarget())
     assert seen == LeaseState()
     assert acquire(store, IngestTarget()) is not None

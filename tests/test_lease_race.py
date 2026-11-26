@@ -83,7 +83,16 @@ def race(tmp_path: Path, directory: str, target: str, mode: str, round_no: int) 
             readies.append(ready)
             procs.append(
                 subprocess.Popen(
-                    [sys.executable, "-I", str(script), directory, target, mode, str(ready), str(gate)],
+                    [
+                        sys.executable,
+                        "-I",
+                        str(script),
+                        directory,
+                        target,
+                        mode,
+                        str(ready),
+                        str(gate),
+                    ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
