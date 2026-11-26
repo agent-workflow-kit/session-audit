@@ -46,7 +46,7 @@ NAME_CAP = 128  # model, tool, agent id, session id, entrypoint, version
 PATH_CAP = 4096  # cwd
 ID_CAP = 4096  # a dedupe id longer than this is treated as missing (it is hashed, never stored)
 TEXT_CAP = 65_536  # one digest text (the digest cuts it further)
-ARG_CAP = 4096  # one tool argument summary
+ARG_CAP = TEXT_CAP  # one tool argument summary: never below the largest digest.arg_chars (65536)
 MAX_BLOCKS = 1000  # content blocks per line; more is an error line
 MAX_DIGITS = 64  # an integer literal longer than this is "huge"
 SLOT_SECONDS = 900
@@ -483,7 +483,8 @@ class _Line:
     ) -> None:
         """The digest items of a user line: one tool_error item per error result, a denial (or,
         for ``user-rejected``, a rejection) item, an interruption item, else a prompt. Their text
-        is the result's (or the message's) text; successful tool output is never an item."""
+        is the result's (a denial's or rejection's: the first error result's, else empty) or the
+        message's text; successful tool output is never an item."""
         for index, block in results:
             if block.get("is_error") is True:
                 self.item(
@@ -492,9 +493,11 @@ class _Line:
                     block=index,
                     tool_use_id=_ident(block.get("tool_use_id")),
                 )
-        text = self.message.get("content")
-        if results:
-            text = results[0][1].get("content")
+        text = None  # the first error result's text; a successful result's is never used
+        for _, block in results:
+            if block.get("is_error") is True:
+                text = block.get("content")
+                break
         first = _ident(results[0][1].get("tool_use_id")) if results else None
         if obj.get("toolDenialKind") == "user-rejected":
             self.item(DigestKind.REJECTION, _content_text(text) or "", tool_use_id=first)

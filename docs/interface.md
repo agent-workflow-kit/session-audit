@@ -515,6 +515,8 @@ digest.md, UTF-8, LF line ends:
     dropped: session_cap=<n> total_cap=<n>
     </untrusted id="NONCE">
 time: UTC, second precision, "Z"; a null time is "-"
+header values: project capped at 512 code points; session id, each model, tool name and agent type at 128;
+    "-" for an empty project or an empty models list
 section_sha256 is computed over the section lines between the two fence lines (Section hash)
 ```
 
@@ -544,7 +546,7 @@ turns: items before the first prompt form turn 0; each prompt item starts a turn
 | `Skill` | the skill name |
 | any other (including `mcp__*`, `WebSearch`) | the tool name only |
 
-Item details (conservative readings the implementation fixes): a `tool_error` item exists for every error `tool_result` block and takes that block's text; a `denial` item takes the first `tool_result` block's text, else the line's text; a denial line with `toolDenialKind: user-rejected` gives a `rejection` item instead of a `denial` item; an `interruption` item takes the line's text; a denial, rejection or interruption line is never also a prompt; a `compaction` item has no text. A `tool_call` item reads as the tool name, then its summary (every summary is cut to `digest.arg_chars`). The assistant text blocks of one message id are joined while no item of another message intervenes between them. An agent whose parent call is not in the main file, or that has none, has a `subagent` item with time `-` placed after every other item. A turn is the prompts before an item by line offset; a turn costs the tokens of its counted messages and a turn of cost 0 is never one of the three most expensive. The `tokens` metrics are the main agent's (Counting rules 8), the other counters include agents.
+Item details (conservative readings the implementation fixes): a `tool_error` item exists for every error `tool_result` block and takes that block's text; a `denial` or `rejection` item takes the text of the first error `tool_result` block (`is_error` JSON true), empty when there is none (a successful result's output is never used); a denial line with `toolDenialKind: user-rejected` gives a `rejection` item instead of a `denial` item; an `interruption` item takes the line's text; a denial, rejection or interruption line is never also a prompt; a `compaction` item has no text. A `tool_call` item reads as the tool name, then its summary (every summary is cut to `digest.arg_chars`). The assistant text blocks of one message id are joined while no item of another message intervenes between them. An agent whose parent call is not in the main file, or that has none, has a `subagent` item with time `-` placed after every other item; several agents of one parent call all sit at that call's time. Sessions with more than 1,000 agents get `subagent` items only for the first 1,000 (by tokens descending, then agent id, as in `sessions show`); the `agents` metric still counts all. A turn is the prompts before an item by line offset; a turn costs the tokens of its counted messages and a turn of cost 0 is never one of the three most expensive. The `tokens` metrics are the main agent's (Counting rules 8), the other counters include agents.
 
 **Budget.** A total cap (`digest.max_bytes`, default 200 KB) and a per-session cap (`digest.session_max_bytes`) apply. Per-session header bytes count toward both caps; a session whose header alone exceeds the per-session cap keeps only its header. Items are kept in this priority order (copy):
 
@@ -553,8 +555,8 @@ priority(item) = 0 if kind in {tool_error, denial, interruption, rejection}
                = 1 if item lies in one of the session's 3 most expensive turns
                = 2 otherwise
 turn and turn cost: as defined under Items
-per session: sort items by (priority, newest first); keep while session bytes + rendered size <= digest.session_max_bytes
-total: sort every kept item of every session by (priority, newest first, ref); keep while total + size <= digest.max_bytes
+per session: sort items by (priority, newest first); an agent with no parent call time counts as newest; keep while session bytes + rendered size <= digest.session_max_bytes
+total: sort every kept item of every session by (priority, newest first, ref); an agent with no parent call time counts as newest; keep while total + size <= digest.max_bytes
 render each session's kept items in time order; coverage counts the drops per cap
 ```
 
@@ -752,6 +754,11 @@ digest read: each file is opened with the Ingest rules and read only up to its s
 one read snapshot: the metrics, turn costs, offsets and hashes of every kept session are read in one read transaction
 skip reasons: live (newest mtime of the session's main and subagent files is within retro.quiet_after),
     transcript_missing (no file of the session is on disk), transcript_changed, empty (no item)
+order of the checks: no stored main file, or one Discovery.open refuses (vanished, symlink, hard link, not
+    regular, excluded, pruned, or a stored path that is not a transcript name) -> transcript_missing; a main file
+    whose reread is in progress, or whose identity or hashes differ -> transcript_changed; then live; then empty
+detection: the head and tail hash checks see changes at the head and tail of the file only; a same-size in-place
+    edit of the middle is not detected (the metrics come from the store, the item text from the file)
 --dry-run: reads to the current end of each file in memory (same bytes a real run would ingest), writes nothing
 ```
 

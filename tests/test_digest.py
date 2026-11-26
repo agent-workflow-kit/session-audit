@@ -100,7 +100,7 @@ def test_the_layout_of_one_session_is_exact(
     assert (out.unicode_version, out.digest_format) == (digest.redact.UNICODE_VERSION, 1)
 
 
-def test_the_digest_is_exactly_the_bytes_it_counts(
+def test_the_rendered_size_equals_the_counted_parts_and_is_utf8(
     corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write(corpus, S1, [prompt("é" * 40, 1), say("m1", "x", 2), compact(3)])
@@ -110,6 +110,10 @@ def test_the_digest_is_exactly_the_bytes_it_counts(
     assert "é" in data.decode("utf-8")  # not ASCII-folded: bytes are counted as UTF-8
     cov = out.coverage(len(data))
     assert cov["digest_bytes"] == len(data)
+    counted = digest._preamble_bytes(out.totals) + sum(
+        s.size + digest._fence_bytes() for s in out.sections
+    )
+    assert len(data) == counted  # the budget counts exactly what is rendered
 
 
 # --- items ---------------------------------------------------------------------------------------
@@ -139,14 +143,15 @@ def test_every_item_kind_in_time_order_and_numbered_before_any_drop(
         ("s1.i001", "prompt", "p one"),
         ("s1.i002", "assistant", "a1"),
         ("s1.i003", "tool_call", "Read /etc/hosts"),
-        ("s1.i004", "denial", "denied by rule"),
-        ("s1.i005", "interruption", "[Request interrupted by user]"),
-        ("s1.i006", "compaction", ""),
-        ("s1.i007", "prompt", "p two"),
-        ("s1.i008", "tool_error", "bad"),
-        ("s1.i009", "rejection", "bad"),
+        ("s1.i004", "tool_error", "denied by rule"),
+        ("s1.i005", "denial", "denied by rule"),
+        ("s1.i006", "interruption", "[Request interrupted by user]"),
+        ("s1.i007", "compaction", ""),
+        ("s1.i008", "prompt", "p two"),
+        ("s1.i009", "tool_error", "bad"),
+        ("s1.i010", "rejection", "bad"),
     ]
-    assert section.items[5].line == "s1.i006 2021-05-06T07:00:06Z compaction"
+    assert section.items[6].line == "s1.i007 2021-05-06T07:00:06Z compaction"
     assert out.items_by_kind["compaction"] == 1 and out.items_by_kind["subagent"] == 0
 
 
@@ -377,6 +382,38 @@ def test_one_subagent_item_per_agent_at_its_parent_calls_time(
         "unknown tool_calls=0 tool_errors=0 tokens=2",
     ]
     assert section.metrics.agents == 3 and "agents=3" in section.header[-1]
+
+
+def test_agents_sharing_one_parent_call_all_sit_at_the_calls_time(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(
+        corpus,
+        S1,
+        [
+            call("m1", "toolu_A", "Task", {"subagent_type": "Explore"}, 5),
+            say("m2", "after", 9),
+        ],
+    )
+    for name, kind in (("ag1", "Explore"), ("ag2", "Plan")):
+        corpus.write_agent(
+            S1,
+            name,
+            [assistant(f"x{name}", [{"type": "text", "text": "x"}], 6, out=1, agentId=name)],
+            project="p1",
+            meta={"agentType": kind, "toolUseId": "toolu_A"},
+            mtime=OLD,
+        )
+    (section,) = build(capsys, gw, corpus).sections
+    got = [(i.ref, i.kind, i.time[-9:]) for i in section.items]
+    assert got == [
+        ("s1.i001", "tool_call", "07:00:05Z"),
+        ("s1.i002", "subagent", "07:00:05Z"),
+        ("s1.i003", "subagent", "07:00:05Z"),
+        ("s1.i004", "assistant", "07:00:09Z"),
+    ]
+    again = build(capsys, gw, corpus, ingest_first=False).sections[0]
+    assert [i.line for i in again.items] == [i.line for i in section.items]  # ids are stable
 
 
 # --- numbering -----------------------------------------------------------------------------------
@@ -629,3 +666,161 @@ def test_a_session_with_no_recorded_turn_has_null_active_seconds_and_totals_sum_
     got = {s.session_id: dict(s.metrics.pairs())["active_seconds"] for s in out.sections}
     assert got == {S1: "1.5", S2: "2.75", S3: "null"}
     assert dict(out.totals.pairs())["active_seconds"] == "4.25"
+
+
+# --- review round 1 ------------------------------------------------------------------------------
+
+
+def test_arg_chars_above_4096_apply_and_a_long_command_is_kept_whole(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(corpus, S1, [call("m1", "tu1", "Bash", {"command": "c" * 6000}, 1)])
+    (section,) = build(capsys, gw, corpus, arg_chars=10000).sections
+    assert section.items[0].text == "Bash " + "c" * 6000
+
+
+def test_a_denial_takes_only_an_error_results_text(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(corpus, S1, [denial("tu1", "SUCCESS-OUTPUT", 1, error=False)])
+    out = build(capsys, gw, corpus)
+    (item,) = out.sections[0].items
+    assert (item.kind, item.text) == ("denial", "")
+    assert "SUCCESS-OUTPUT" not in render(out)
+
+
+def unparented_agent(corpus: Corpus) -> None:
+    corpus.write_agent(
+        S1,
+        "ag1",
+        [assistant("a1", [{"type": "text", "text": "x"}], 6, out=1, agentId="ag1")],
+        project="p1",
+        mtime=OLD,
+    )
+
+
+def test_an_agent_with_no_parent_call_time_is_the_newest_in_both_caps(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(corpus, S1, [prompt("p one", 1), prompt("p two", 2)])
+    unparented_agent(corpus)
+    (everything,) = build(capsys, gw, corpus).sections
+    agent = next(i for i in everything.items if i.kind == "subagent")
+    assert agent.ref == "s1.i003" and agent.time == "-"
+    cap = section_bytes(everything, [agent.ref])
+    (section,) = build(capsys, gw, corpus, ingest_first=False, session_max_bytes=cap).sections
+    assert [i.ref for i in section.items] == [agent.ref]
+    floor = build(capsys, gw, corpus, ingest_first=False, max_bytes=1)
+    fixed = len(floor.render(RETRO_ID, FENCE))
+    size = len((agent.line + "\n").encode())
+    out = build(capsys, gw, corpus, ingest_first=False, max_bytes=fixed + size)
+    assert [i.ref for i in out.sections[0].items] == [agent.ref]
+
+
+def test_no_item_text_is_in_a_repr(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(
+        corpus,
+        S1,
+        [prompt("SECRET-PROMPT", 1, cwd="/work/SECRET-PROJECT"), say("m1", "SECRET-SAY", 2)],
+    )
+    out = build(capsys, gw, corpus)
+    for text in (repr(out), repr(out.sections), repr(out.sections[0].items), f"{out.sections[0]}"):
+        assert "SECRET" not in text
+    raw_item = digest._Raw(digest.DigestKind.PROMPT, 1, 0, 0, None, None, "SECRET-RAW")
+    pending = digest._Pending("m", 1, 0, 0, "SECRET-PENDING")
+    agent = digest._Agent("SECRET-AGENT")
+    for obj in (raw_item, pending, agent):
+        assert "SECRET" not in repr(obj)
+
+
+def three_turns(corpus: Corpus, costs: list[dict[str, int]], first_prompt: bool = True) -> None:
+    lines: list[bytes] = []
+    for n, kw in enumerate(costs):
+        if n or first_prompt:
+            lines.append(prompt(f"turn {n}", 10 * n + 1))
+        lines.append(say(f"a{n}", f"say {n}", 10 * n + 2, **kw))
+    write(corpus, S1, lines)
+
+
+def kept_by_cap(
+    corpus: Corpus,
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    order: list[str],
+) -> list[str]:
+    (everything,) = build(capsys, gw, corpus).sections
+    cap = section_bytes(everything, order)
+    out = build(capsys, gw, corpus, ingest_first=False, session_max_bytes=cap)
+    return [i.ref for i in out.sections[0].items]
+
+
+def test_a_zero_cost_turn_is_never_one_of_the_top_three(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # turn 2 has cost 0 and there are only two positive turns: it is priority 2, not hot
+    three_turns(corpus, [{"inp": 0, "out": 5}, {"inp": 0, "out": 0}, {"inp": 0, "out": 7}])
+    order = ["s1.i006", "s1.i005", "s1.i002", "s1.i001"]  # turns 1 and 3, newest first
+    assert kept_by_cap(corpus, gw, capsys, order) == sorted(order)
+
+
+def test_cache_tokens_decide_the_three_most_expensive_turns(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    three_turns(
+        corpus,
+        [
+            {"inp": 0, "out": 1, "cache_read": 5000},
+            {"inp": 0, "out": 1, "cache_write": 4000},
+            {"inp": 0, "out": 3000},
+            {"inp": 0, "out": 10},
+        ],
+    )
+    order = [f"s1.i{n:03d}" for n in (6, 5, 4, 3, 2, 1)]  # turns 1 to 3; turn 4 is not hot
+    assert kept_by_cap(corpus, gw, capsys, order) == sorted(order)
+
+
+def test_items_before_the_first_prompt_form_a_turn_that_can_be_expensive(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    costs = [{"inp": 0, "out": n} for n in (9000, 1, 2, 3, 4)]
+    three_turns(corpus, costs, first_prompt=False)
+    # i001 is turn 0 (hot); then prompt and say of turns 1..4: i002..i009; hot turns are 0, 3 and 4
+    order = ["s1.i009", "s1.i008", "s1.i007", "s1.i006", "s1.i001"]
+    assert kept_by_cap(corpus, gw, capsys, order) == sorted(order)
+
+
+def test_a_larger_dropped_item_stops_the_total_walk_before_a_smaller_lower_priority_one(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lines = [
+        prompt("s", 1),
+        say("a0", "x", 2, inp=0, out=1),
+        prompt("L" * 300, 11),
+        say("a1", "y", 12, inp=0, out=50),
+        prompt("p3", 21),
+        say("a2", "z", 22, inp=0, out=60),
+        prompt("p4", 31),
+        say("a3", "w", 32, inp=0, out=70),
+    ]
+    write(corpus, S1, lines)
+    (everything,) = build(capsys, gw, corpus).sections
+    floor = build(capsys, gw, corpus, ingest_first=False, max_bytes=1)
+    fixed = len(floor.render(RETRO_ID, FENCE))
+    newer = [i for i in everything.items if i.ref > "s1.i003"]
+    size = sum(len((i.line + "\n").encode()) for i in newer)
+    out = build(capsys, gw, corpus, ingest_first=False, max_bytes=fixed + size + 10)
+    assert [i.ref for i in out.sections[0].items] == [i.ref for i in newer]  # i001, i002 not kept
+
+
+def test_the_total_cap_ties_by_ref_across_sessions_with_equal_times(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(corpus, S1, [result("a", "err", 5, error=True)], project="p1")
+    write(corpus, S2, [result("b", "err", 5, error=True)], project="p2")
+    floor = build(capsys, gw, corpus, max_bytes=1)
+    fixed = len(floor.render(RETRO_ID, FENCE))
+    one = len("s1.i001 2021-05-06T07:00:05Z tool_error err\n")
+    out = build(capsys, gw, corpus, ingest_first=False, max_bytes=fixed + one)
+    assert [i.ref for s in out.sections for i in s.items] == ["s1.i001"]

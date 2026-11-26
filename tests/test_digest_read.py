@@ -201,6 +201,19 @@ def test_a_session_of_a_retro_run_is_excluded_by_its_project_directory(
     assert reasons(build(capsys, gw, corpus, ingest_first=False)) == {S1: "transcript_missing"}
 
 
+def test_a_stored_path_with_a_nul_is_transcript_missing_and_never_raises(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(corpus, S1, [prompt("x", 1)])
+    build(capsys, gw, corpus)
+    conn = connect(corpus.home)
+    bad = os.fsencode(str(corpus.root)) + b"/pr\0oj/" + S1.encode() + b".jsonl"
+    conn.execute("UPDATE files SET path = ?", (bad,))
+    conn.commit()
+    conn.close()
+    assert reasons(build(capsys, gw, corpus, ingest_first=False)) == {S1: "transcript_missing"}
+
+
 def test_a_reread_in_progress_is_transcript_changed(
     corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
 ) -> None:

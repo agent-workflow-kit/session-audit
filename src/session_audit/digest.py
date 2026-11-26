@@ -14,7 +14,7 @@ Flow, all inside ONE read transaction of the store (``sessionquery.read_store``)
 2. for each candidate until ``max_sessions`` are kept: skip it as ``live``,
    ``transcript_missing``, ``transcript_changed`` or ``empty``, else scan its main transcript
    (pass 1) into compact per-item columns (time, line offset, block, rendered size, kind, turn):
-   no text is kept, so memory is 40 or so bytes per item, never per byte of text;
+   no text is kept, so memory is a few hundred bytes per item, never per byte of text;
 3. number the kept sessions (``s<N>`` by ``started_at``, null last, then id) and their items
    (``i<NNN>`` in time order) BEFORE any drop, so an id never depends on the budget;
 4. select by the per-session cap, then by the total cap (priority order, newest first), counting
@@ -52,11 +52,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import chain
-from typing import BinaryIO, NamedTuple, cast
+from typing import BinaryIO, cast
 
 from . import derive, redact
 from .command import Context
 from .derive import AgentValues, SessionValues
+from .grammar import MAX_SESSIONS_RANGE
 from .incremental import IncrementalRead, Line, Progress, Reason, Stop, load_progress
 from .parser import TEXT_CAP, DigestKind, ParseContext, Status, parse_line
 from .reader import Discovery, Opened, Skip, open_discovery, store_excluded, store_pruned_at
@@ -80,7 +81,7 @@ __all__ = [
     "build_digest",
 ]
 
-MAX_SESSIONS = 500  # ``s500``: ``retro.max_sessions`` maximum
+MAX_SESSIONS = MAX_SESSIONS_RANGE[1]  # ``s500``: ``retro.max_sessions`` maximum
 RETRO_ID_LEN = 11  # ``retros.id``
 NONCE_HEX_LEN = 32  # ``secrets.token_hex(16)``, the per-digest nonce of #22
 NAME_CAP = 128  # a tool name, model, agent type or session id in the digest
@@ -267,7 +268,7 @@ class KeptItem:
     ref: str  # s<N>.i<NNN>
     kind: str
     time: str  # UTC second precision with Z, or "-"
-    text: str
+    text: str = field(repr=False)  # conversation text: never in a repr
 
     @property
     def line(self) -> str:
@@ -281,8 +282,8 @@ class SessionSection:
 
     ref: str  # s<N>
     session_id: str
-    header: tuple[str, ...]
-    items: tuple[KeptItem, ...]
+    header: tuple[str, ...] = field(repr=False)  # project is conversation-derived
+    items: tuple[KeptItem, ...] = field(repr=False)
     items_total: int
     dropped_session_cap: int
     dropped_total_cap: int
@@ -415,7 +416,8 @@ class _Bounded:
         return data
 
 
-class _Raw(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class _Raw:
     """One digest item as the scan finds it, before it is rendered."""
 
     kind: DigestKind
@@ -424,7 +426,7 @@ class _Raw(NamedTuple):
     block: int
     tool: str | None
     tool_use_id: str | None
-    text: str
+    text: str = field(repr=False)
 
 
 class _Pending:
@@ -438,6 +440,9 @@ class _Pending:
         self.ts, self.offset, self.block = ts, offset, block
         self.parts = [text]
         self.size = len(text)
+
+    def __repr__(self) -> str:  # never the text parts
+        return f"_Pending(message_id={self.message_id!r}, offset={self.offset})"
 
     def add(self, text: str) -> None:
         if self.size < TEXT_CAP:  # digest_text works on at most this much anyway
@@ -497,6 +502,9 @@ def _render_text(raw: _Raw, caps: _Caps, redactor: redact.Redactor) -> str:
         name = redact.digest_text(raw.tool or "unknown", NAME_CAP, redactor) or "unknown"
         summary = redact.digest_text(raw.text, caps.arg, redactor) if raw.text else ""
         return f"{name} {summary}" if summary else name
+    # todo(#22): digest_text neutralizes only closing ``</untrusted`` tags; an opening fence text
+    # ``<untrusted source=... id=...>`` inside item text is not neutralized. Deferred to the fence
+    # work of #22 (the fence and nonce are its seam), not changed here.
     cap = {
         DigestKind.PROMPT: caps.prompt,
         DigestKind.ASSISTANT: caps.assistant,
@@ -527,10 +535,7 @@ def _body_size(time: str, kind: str, text: str) -> int:
 
 @dataclass
 class _Agent:
-    text: str  # "<type> tool_calls=<n> tool_errors=<n> tokens=<n>", rendered
-    parent_ts: int | None = None
-    parent_offset: int = -1
-    parent_block: int = 0
+    text: str = field(repr=False)  # "<type> tool_calls=<n> tool_errors=<n> tokens=<n>", rendered
 
 
 class _Scan:
@@ -586,6 +591,11 @@ class _Scan:
             return 0
         return 1 if self.turn[seq] in self.hot else 2
 
+    def newest_key(self, seq: int) -> int:
+        """Ascending = newest first, for the total cap. An agent with no parent call time (rank 1)
+        counts as the newest, as it does in the per-session cap."""
+        return -(1 << 62) if self.rank[seq] == 1 else -self.ts[seq]
+
     def time_text(self, seq: int) -> str:
         return _stamp(self.ts[seq] if self.ts[seq] >= 0 else None)
 
@@ -630,7 +640,10 @@ class _Run:
         candidate = self.discovery.candidate_for(path)
         if candidate is None:
             return "transcript_missing"
-        opened = self.discovery.open(candidate)
+        try:
+            opened = self.discovery.open(candidate)
+        except ValueError:  # a name the kernel interface refuses (e.g. an embedded NUL)
+            return "transcript_missing"
         if isinstance(opened, Skip):
             return "transcript_missing"
         try:
@@ -666,7 +679,10 @@ class _Run:
             candidate = self.discovery.candidate_for(bytes(path))
             if candidate is None:
                 continue
-            opened = self.discovery.open(candidate)
+            try:
+                opened = self.discovery.open(candidate)
+            except ValueError:
+                continue
             if isinstance(opened, Skip):
                 continue
             try:
@@ -726,11 +742,10 @@ def _scan_session(run: _Run, session_id: str) -> _Scan | str:
             return "live"
         agents, _ = derive.agent_values(run.conn, session_id)
         scan = _Scan(session_id, int(row[0]), path, 0)
-        parents = {
-            a.parent_tool_call_id[:NAME_CAP]: i
-            for i, a in enumerate(agents)
-            if a.parent_tool_call_id
-        }
+        parents: dict[str, list[int]] = {}
+        for i, a in enumerate(agents):  # agents may share one parent call
+            if a.parent_tool_call_id:
+                parents.setdefault(a.parent_tool_call_id[:NAME_CAP], []).append(i)
         found: dict[int, tuple[int | None, int, int]] = {}
         try:
             for raw in _stored_items(run, opened, previous):
@@ -747,9 +762,8 @@ def _scan_session(run: _Run, session_id: str) -> _Scan | str:
                 if raw.kind is DigestKind.PROMPT:
                     scan.prompts.append(raw.offset)
                 elif raw.kind is DigestKind.TOOL_CALL and raw.tool_use_id is not None:
-                    index = parents.get(raw.tool_use_id[:NAME_CAP])
-                    if index is not None and index not in found:
-                        found[index] = (raw.ts, raw.offset, raw.block)
+                    for index in parents.get(raw.tool_use_id[:NAME_CAP], ()):
+                        found.setdefault(index, (raw.ts, raw.offset, raw.block))
         except (_Changed, OSError):  # a read error is a file that is not what was counted
             return "transcript_changed"
         scan.main_items = len(scan)
@@ -780,7 +794,7 @@ def _add_agents(
         text = _agent_text(run, agent)
         where = found.get(index)
         ts, offset, block = where if where is not None else (None, -1, 0)
-        scan.agents.append(_Agent(text, ts, offset, block))
+        scan.agents.append(_Agent(text))
         scan.add(
             _SUBAGENT,
             ts,
@@ -928,7 +942,14 @@ def _select(kept: list[_Kept], preamble: int, run: _Run) -> bool:
             used += size
             each.chosen.append(seq)
     candidates = [
-        (each.scan.priority(seq), -each.scan.ts[seq], each.number, each.numbers[seq], index, seq)
+        (
+            each.scan.priority(seq),
+            each.scan.newest_key(seq),
+            each.number,
+            each.numbers[seq],
+            index,
+            seq,
+        )
         for index, each in enumerate(kept)
         for seq in each.chosen
     ]

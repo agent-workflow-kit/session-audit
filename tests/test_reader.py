@@ -1044,3 +1044,40 @@ def test_candidate_for_refuses_a_path_outside_every_root(world: World) -> None:
         assert d.candidate_for(other + f"/proj/{U1}.jsonl".encode()) is None
         assert d.candidate_for(b"/elsewhere/proj/" + f"{U1}.jsonl".encode()) is None
         assert d.candidate_for(b"") is None
+
+
+def test_candidate_for_refuses_a_nul_or_an_overlong_project_name(world: World) -> None:
+    base = os.fsencode(world.root) + b"/"
+    with discovery(world) as d:
+        assert d.candidate_for(base + b"pr\0oj/" + f"{U1}.jsonl".encode()) is None
+        assert d.candidate_for(base + b"p" * 256 + b"/" + f"{U1}.jsonl".encode()) is None
+        assert d.candidate_for(base + b"p" * 255 + b"/" + f"{U1}.jsonl".encode()) is not None
+
+
+def test_the_listing_and_classify_accept_exactly_the_same_names(world: World) -> None:
+    sub = f"proj/{U1}/subagents"
+    rels = [f"proj/{U1}.jsonl", f"proj/{U2[:-1]}.jsonl", "proj/not-a-uuid.jsonl"]
+    for name in (
+        "agent-a.jsonl",
+        "agent-.jsonl",
+        "agent-a b.jsonl",
+        f"agent-{'a' * 128}.jsonl",
+        f"agent-{'a' * 129}.jsonl",
+        "agent-a.meta.json",
+        "agent-a.jsonl.bak",
+        "x.jsonl",
+    ):
+        rels += [f"{sub}/{name}", f"{sub}/workflows/wf-1/{name}"]
+    for wf in ("..x", "wf_1.v2", "w f", "w" * 128, "w" * 129):
+        rels.append(f"{sub}/workflows/{wf}/agent-b.jsonl")
+    for rel in rels:
+        world.file(rel, b"x\n")
+    base = os.fsencode(world.root)
+    with discovery(world) as d:
+        listed = {c.path for c in d.candidates()}
+        expected = {
+            base + b"/" + r.encode()
+            for r in rels
+            if reader._classify(tuple(r.encode().split(b"/"))) is not None
+        }
+        assert listed == expected and listed

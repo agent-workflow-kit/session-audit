@@ -45,6 +45,7 @@ DISPLAY_CAP = 4096
 _UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _MAIN_FILE = re.compile(rb"(" + _UUID + rb")\.jsonl")
 _UUID_NAME = re.compile(_UUID)
+_NAME_MAX = 255  # the longest file name component the kernel takes
 _AGENT_FILE = re.compile(rb"agent-([A-Za-z0-9_.-]{1,128})\.jsonl")
 _WORKFLOW_NAME = re.compile(rb"[A-Za-z0-9_.-]{1,128}")
 _DOTS = (b".", b"..")
@@ -216,7 +217,7 @@ def _classify(
 ) -> tuple[Kind, bytes, bytes | None, bytes | None] | None:
     """``(kind, session, agent, workflow)`` of the components below a root when they name a
     transcript by Ingest rules 2 (the same patterns the listing uses), else None."""
-    if not rel[0] or rel[0] in _DOTS:
+    if not rel[0] or rel[0] in _DOTS or b"\0" in rel[0] or len(rel[0]) > _NAME_MAX:
         return None
     if len(rel) == 2:
         main = _MAIN_FILE.fullmatch(rel[1])

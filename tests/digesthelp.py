@@ -58,13 +58,16 @@ def assistant(
     out: int = 10,
     inp: int = 1,
     model: str = "model-a",
+    cache_read: int = 0,
+    cache_write: int = 0,
     **extra: Any,
 ) -> bytes:
-    message: dict[str, Any] = {
-        "model": model,
-        "usage": {"input_tokens": inp, "output_tokens": out},
-        "content": content,
-    }
+    usage: dict[str, Any] = {"input_tokens": inp, "output_tokens": out}
+    if cache_read:
+        usage["cache_read_input_tokens"] = cache_read
+    if cache_write:
+        usage["cache_creation_input_tokens"] = cache_write
+    message: dict[str, Any] = {"model": model, "usage": usage, "content": content}
     if mid is not None:
         message["id"] = mid
     obj: dict[str, Any] = {"type": "assistant", "message": message}
@@ -97,8 +100,8 @@ def result(tid: str, text: str, t: int, *, error: bool = False, **extra: Any) ->
     return raw(obj)
 
 
-def denial(tid: str, text: str, t: int, kind: str = "auto") -> bytes:
-    return result(tid, text, t, toolDenialKind=kind, uuid=f"u-d{t}")
+def denial(tid: str, text: str, t: int, kind: str = "auto", *, error: bool = True) -> bytes:
+    return result(tid, text, t, error=error, toolDenialKind=kind, uuid=f"u-d{t}")
 
 
 def interruption(t: int, text: str = "[Request interrupted by user]") -> bytes:

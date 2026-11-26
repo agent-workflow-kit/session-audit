@@ -597,14 +597,23 @@ def test_assistant_text_items_per_block_with_message_id():
 
 def test_rejection_item_and_denial_event():
     content = [
-        {"type": "tool_result", "tool_use_id": "t", "content": [{"type": "text", "text": "no"}]}
+        {
+            "type": "tool_result",
+            "tool_use_id": "t",
+            "is_error": True,
+            "content": [{"type": "text", "text": "no"}],
+        }
     ]
     r = parse(user(content, toolDenialKind="user-rejected"), DCTX)
-    assert [e.kind for e in r.events] == [Kind.DENIAL]
-    assert [(i.kind, i.text) for i in r.digest] == [(DigestKind.REJECTION, "no")]
+    assert [e.kind for e in r.events] == [Kind.TOOL_ERROR, Kind.DENIAL]
+    assert [(i.kind, i.text) for i in r.digest] == [
+        (DigestKind.TOOL_ERROR, "no"),
+        (DigestKind.REJECTION, "no"),
+    ]
     other = parse(user(content, toolDenialKind="auto"), DCTX)
     assert [(i.kind, i.text, i.tool_use_id) for i in other.digest] == [
-        (DigestKind.DENIAL, "no", "t")
+        (DigestKind.TOOL_ERROR, "no", "t"),
+        (DigestKind.DENIAL, "no", "t"),
     ]
 
 
@@ -626,7 +635,9 @@ def test_tool_call_argument_summaries():
     assert call("Bash", {}) == [""]
     assert call("Bash", "not a dict") == [""]
     assert call("WebFetch", {"url": "http://[bad"}) == [""]
-    assert len(call("Bash", {"command": "c" * 10000})[0]) == ARG_CAP
+    assert len(call("Bash", {"command": "c" * 70000})[0]) == ARG_CAP
+    assert ARG_CAP >= 65536  # never below the largest digest.arg_chars
+    assert len(call("Bash", {"command": "c" * 10000})[0]) == 10000
 
 
 def test_digest_text_cannot_be_stored_or_printed_by_accident():
@@ -896,23 +907,44 @@ def test_tool_error_item_per_error_block_with_the_result_text():
     assert parse(user(content)).digest == ()  # only when the context asks
 
 
-def test_denial_item_takes_the_first_result_text_else_the_message_text():
-    with_result = [{"type": "tool_result", "tool_use_id": "t", "content": "denied here"}]
-    (item,) = parse(user(with_result, toolDenialKind="auto"), DCTX).digest
-    assert (item.kind, item.text, item.tool_use_id) == (DigestKind.DENIAL, "denied here", "t")
+def test_denial_item_takes_the_first_error_result_text_else_nothing():
+    ok = {"type": "tool_result", "tool_use_id": "t0", "content": "success output"}
+    err = {"type": "tool_result", "tool_use_id": "t", "is_error": True, "content": "denied here"}
+    (item, *_) = [
+        i
+        for i in parse(user([ok, err], toolDenialKind="auto"), DCTX).digest
+        if i.kind is DigestKind.DENIAL
+    ]
+    assert item.text == "denied here"
     (item,) = parse(user("plain text", toolDenialKind="auto"), DCTX).digest
-    assert (item.kind, item.text, item.tool_use_id) == (DigestKind.DENIAL, "plain text", None)
+    assert (item.kind, item.text, item.tool_use_id) == (DigestKind.DENIAL, "", None)
     decision = {"decision": "reject"}
     (item,) = parse(user("x", permissionDecision=decision), DCTX).digest
-    assert item.kind is DigestKind.DENIAL
+    assert (item.kind, item.text) == (DigestKind.DENIAL, "")
     (item,) = parse(user(None, toolDenialKind="auto"), DCTX).digest
     assert (item.kind, item.text) == (DigestKind.DENIAL, "")
 
 
+@pytest.mark.parametrize("flag", [None, "true", 1, False])
+@pytest.mark.parametrize("kind", ["auto", "user-rejected"])
+def test_a_denial_never_takes_the_text_of_a_result_that_is_not_an_error(flag, kind):
+    block = {"type": "tool_result", "tool_use_id": "t", "content": "SUCCESS-OUTPUT"}
+    if flag is not None:
+        block["is_error"] = flag
+    items = parse(user([block], toolDenialKind=kind), DCTX).digest
+    assert [i.kind for i in items] == [
+        DigestKind.REJECTION if kind == "user-rejected" else DigestKind.DENIAL
+    ]
+    assert items[0].text == ""
+
+
 def test_a_user_rejected_line_gives_a_rejection_item_and_no_denial_item():
-    content = [{"type": "tool_result", "tool_use_id": "t", "content": "no"}]
+    content = [{"type": "tool_result", "tool_use_id": "t", "is_error": True, "content": "no"}]
     items = parse(user(content, toolDenialKind="user-rejected"), DCTX).digest
-    assert [(i.kind, i.text, i.tool_use_id) for i in items] == [(DigestKind.REJECTION, "no", "t")]
+    assert [(i.kind, i.text, i.tool_use_id) for i in items] == [
+        (DigestKind.TOOL_ERROR, "no", "t"),
+        (DigestKind.REJECTION, "no", "t"),
+    ]
     (item,) = parse(user(None, toolDenialKind="user-rejected"), DCTX).digest
     assert (item.kind, item.text) == (DigestKind.REJECTION, "")
 
