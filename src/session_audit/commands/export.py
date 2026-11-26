@@ -10,9 +10,9 @@ import argparse
 import contextlib
 from collections.abc import Iterator
 
-from .. import aggregate
+from .. import aggregate, errors
 from .. import args as a
-from ..command import Command, Context
+from ..command import Command, Context, stderr_line
 from ..grammar import parse_when
 from ..sessionquery import Filters, derive_day, read_stream
 from ..textsafe import dumps_json
@@ -47,9 +47,19 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         stream = read_stream(ctx, lambda conn: aggregate.session_lines(conn, ctx, filters))
     else:
         stream = read_stream(ctx, lambda conn: usage_stream(conn, ctx, filters))
-    with contextlib.closing(stream):
-        for line in stream:
-            ctx.out.write(dumps_json(line) + "\n")
+    produced = False
+    try:
+        with contextlib.closing(stream):
+            for line in stream:
+                ctx.out.write(dumps_json(line) + "\n")
+                produced = True
+    except errors.CliError as error:
+        if not produced:
+            raise  # nothing was written: the normal error path (envelope under --json)
+        # The stream is truncated: stdout stays pure data lines, the message goes to stderr only.
+        for text in errors.stderr_lines(error):
+            stderr_line(text)
+        return error.exit_code
     return 0
 
 

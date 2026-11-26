@@ -236,16 +236,8 @@ def _signals() -> Iterator[None]:
 
 def _report(error: CliError, *, json_mode: bool, out: Output) -> int:
     """Print the error once: sanitized on stderr, and with ``--json`` as the envelope on stdout."""
-    head = f"{PROG}: error: {error.message}"
-    for key in ("field", "reason"):
-        if key in error.details:
-            head += f" ({error.details[key]})"
-    _stderr(head)
-    matches = error.details.get("matches")
-    if matches:
-        _stderr("  matches: " + ", ".join(matches))
-    if error.hint:
-        _stderr(f"  hint: {error.hint}")
+    for line in errors.stderr_lines(error, prog=PROG):
+        _stderr(line)
     if json_mode:
         out.write(dumps_json(error.envelope()) + "\n")
     return error.exit_code

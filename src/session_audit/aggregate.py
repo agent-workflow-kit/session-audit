@@ -358,16 +358,13 @@ def _chunk(
         meta = by_id[sid]
         n, seconds = row[10], row[11]
         sums = TokenSums(*(int(v or 0) for v in row[5:10])) if kind == "message" else None
-        touched.setdefault(sid, set())
-        if not tool_view:
-            totals.count(kind, n, seconds)
-            if sums is not None:
-                totals.token_sums(sums)
-                total_sums[model] = total_sums.get(model, TokenSums()) + sums
-        elif kind in TOOL_KINDS:
-            totals.count(kind, n, seconds)
         if tool_view and kind not in TOOL_KINDS:
-            continue
+            continue  # a tool view counts only the sessions that have a tool event
+        touched.setdefault(sid, set())
+        totals.count(kind, n, seconds)
+        if sums is not None and not tool_view:
+            totals.token_sums(sums)
+            total_sums[model] = total_sums.get(model, TokenSums()) + sums
         options = [_parts(d, meta, slot, model, tool, kind, bucketer) for d in q.dims]
         for key in itertools.product(*options):
             acc = rows.get(key)

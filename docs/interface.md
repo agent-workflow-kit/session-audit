@@ -56,7 +56,7 @@ Errors go to stderr. With `--json` they are also printed on stdout as `{"error":
 
 **Error envelope** (`schemas/cli/error.json`). `code` is a closed enum mapped to the exit code in the table above: `internal`, `usage`, `config_invalid`, `not_found`, `vetoed`, `failed`, `needs_human`, `session_ended`, `refused`, `ambiguous`, `artifact_invalid`; `schemas/defs.json#/$defs/error` links here. `message` is a fixed string of the tool, never transcript, model or input text. `details` is a closed object that holds only ids, counts and enums, with these keys: `reason`, `retryable` (boolean), `matched` and `limit` (integers), `retro_id`, `id`, `matches`, `field` (the config key, flag or environment variable at fault, never its value), `hook` (`pre-retro`, `post-retro` or `post-attention`), `outcome` (a claude-session outcome token) and `end_reason` (a claude-session token). Required keys: `reason` for `refused` (a Refusal reason), `failed` (the exit 12 reasons), `vetoed` (`hook_vetoed`), `needs_human` (`hook_escalated`, `session_blocked`, `session_needs_input`) and `artifact_invalid` (the validation reasons); `session_ended` (exits 14 to 18) carries `outcome` and `retro_id`, never `reason`; `retryable` for `failed`; `matches` for `ambiguous`; `id` for `not_found`.
 
-With `--json`, a non-zero exit prints only the envelope. This includes exits 11, 13, 14 to 18 and 22 of `retro run`, where a retro exists and `details.retro_id` names it (the retro itself is read with `retro show`). Exits 129, 130 and 143 print no envelope.
+With `--json`, a non-zero exit prints only the envelope. This includes exits 11, 13, 14 to 18 and 22 of `retro run`, where a retro exists and `details.retro_id` names it (the retro itself is read with `retro show`). Exits 129, 130 and 143 print no envelope. `export` after its first line is the other exception: a late store error exits 12 with the message on standard error and no envelope on standard output (see `export`).
 
 ## Refusal reasons
 
@@ -87,7 +87,7 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 | `--include-self-improve` | yes | yes | yes | yes |
 
 - All flags AND together. Repeated `--session` ids are a union among themselves; repeated `--label` pairs AND (a pair matches when the harness snapshot's labels contain exactly that pair).
-- `--since S` and `--until U` select sessions with `ended_at >= S` and `started_at < U` (a session with null times never matches); in `usage` they select events with `S <= ts < U` (an event with null `ts` never matches a time filter). A date `YYYY-MM-DD` is the start of that day in `time_zone`, so `--until 2026-11-20` excludes that day.
+- `--since S` and `--until U` select sessions with `ended_at >= S` and `started_at < U` (a session with null times never matches); in `usage` they are applied only as an event window, `S <= ts < U` on the event's `ts`, never as that session test (an event with null `ts` never matches a time filter), so a session with no event in the window is in no row and not in `totals.sessions`. A date `YYYY-MM-DD` is the start of that day in `time_zone`, so `--until 2026-11-20` excludes that day.
 - `--project P` matches the stored project (the first non-empty `cwd`, see Session object) by path boundary with bound parameters: `project = P or substr(project, 1, len(P) + 1) = P || '/'`, after stripping one trailing `/` from `P`. There is no wildcard and no symlink resolution.
 - `--kind` and `--outcome` match only sessions with a harness snapshot. `--model` is an exact model name among the session's models (1 to 128 characters, no control characters, DEL or surrogates; exit 2 otherwise). `--entrypoint` filters on `interactive` or `headless`.
 - Labels are unauthenticated hints: a label scope is not a confidentiality boundary (see Safety).
@@ -159,7 +159,9 @@ Deterministic analytics over counted events (see Counting rules). Dimensions: `d
 - Dimension `label=<key>`: a session contributes to the row of each value its snapshot has for the key; rows may overlap; `totals` do not.
 - Order: by `key` ascending when the first dimension is `day`, `week` or `month`; otherwise by `tokens.input + output + cache_read + cache_write` descending (null last), then `key` ascending. `--limit` default 100, 1 to 1000 (else exit 2); `truncated` is true when more rows matched. `--sort` does not apply.
 - A row never mixes cost bases silently.
-- A session contributes to a row or to `totals` only through counted events inside the `--since`/`--until` window (a session with none is in no row and not in `totals.sessions`). Under the `tool` dimension a row counts only tool calls, tool errors and denials, and `totals` has the same null fields as the rows. Memory is bounded by the number of distinct groups, never by events. `export sessions` orders by `started_at` ascending (no start last, then session id); `export usage` by `day` ascending (null last), then session id, agent (main first) and model (null last); both write each line as soon as it exists, and a failed write to standard output ends the run with exit 1.
+- A session contributes to a row or to `totals` only through counted events inside the `--since`/`--until` window (a session with none is in no row and not in `totals.sessions`). Under the `tool` dimension a row counts only tool calls, tool errors and denials, a session with no such event in the window is in no row and not in `totals.sessions`, and `totals` has the same null fields as the rows.
+- `reported_usd` is null in rows and in `totals` whenever `--since` or `--until` is given. A row's `reported_usd` is also null when one of its dimensions is `day`, `week`, `month`, `model` or `tool`. `totals.reported_usd` is not affected by the dimensions: it is the all-or-null sum over the sessions counted in `totals.sessions`, and null under the `tool` dimension with the rest of `totals.cost`.
+- Memory is bounded by the number of distinct groups, never by events. The `session` and `label=<key>` dimensions have one group per session (per label value), about 1.4 KB each, so `--by session` over a very large store holds that many rows before `--limit` applies.
 
 ### `show`
 
@@ -213,7 +215,7 @@ Applies the retention rules (see Retention) and runs the housekeeping step of Re
 
 `session-audit export {sessions|usage|retros} [--since WHEN] [--include-self-improve] [--json]`
 
-Prints store rows as JSON lines (one object per line, oldest first, no limit; the output streams). `--since WHEN` keeps sessions with `ended_at >= WHEN` (`export sessions`), usage lines whose `day` is on or after the day of `WHEN` in `time_zone` (`export usage`) and retros with `created_at >= WHEN` (`export retros`). Output holds the same fields as the matching read commands and no text beyond a retro's artifact. `export sessions` lines are the Session object, `export usage` lines the usage row of `show`, and `export retros` lines the full Retro object with its artifact text (`schemas/cli/export-*.json`). The output is always JSON lines; `--json` is accepted and changes nothing.
+Prints store rows as JSON lines (one object per line, oldest first, no limit; the output streams). `--since WHEN` keeps sessions with `ended_at >= WHEN` (`export sessions`), usage lines whose `day` is on or after the day of `WHEN` in `time_zone` (`export usage`) and retros with `created_at >= WHEN` (`export retros`). Output holds the same fields as the matching read commands and no text beyond a retro's artifact. `export sessions` lines are the Session object, `export usage` lines the usage row of `show`, and `export retros` lines the full Retro object with its artifact text (`schemas/cli/export-*.json`). The output is always JSON lines; `--json` is accepted and changes nothing. `export sessions` orders by `started_at` ascending (no start last, then session id); `export usage` by `day` ascending (null last), then session id, agent (main agent first) and model (null last). Every line is written as soon as it exists, and a failed write to standard output (a closed pipe) ends the run with exit 1. A store error before the first line follows the normal error path (exit 12 or 20; with `--json` the envelope of Exit codes). A store error after the first line truncates the stream: the run exits 12, the message goes to standard error only and standard output never gets an envelope, so it holds only data lines (also with `--json`).
 
 ### `validate`
 
@@ -380,6 +382,7 @@ cost_mismatch when reported_usd is not null and differs from estimated_usd (agen
 reported_usd(row or totals) = sum over the contributing sessions
     when every contributing session's reported_usd is not null, no --since/--until is given,
     and no dimension of the row splits a session (day, week, month, model, tool); else null
+    (totals are never split by a dimension: only the time filter and the tool view null them)
 ```
 
 A `cost-state` line is cumulative for the Claude Code process and includes subagents; a file that starts with copied history may report its source's spend, so such a session shows only an estimate.

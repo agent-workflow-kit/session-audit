@@ -116,14 +116,20 @@ def _money(cost: object) -> str:
         return "-"
     reported = cost["reported_usd"]
     shown = "-" if reported is None else f"${reported:.2f}"
-    return f"est ${cost['estimated_usd']:.2f} reported {shown}"
+    unpriced = cost["unknown_tokens"]
+    note = f" +{unpriced} unpriced" if unpriced else ""
+    return f"est ${cost['estimated_usd']:.2f} reported {shown}{note}"
+
+
+def _count(n: object, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 def _line(label: str, row: dict[str, object]) -> str:
     tokens = row["tokens"]
     total = "-" if not isinstance(tokens, dict) else str(sum(tokens.values()))
     return (
-        f"{label}  {row['sessions']} sessions  {total} tokens  {_money(row['cost'])}  "
+        f"{label}  {_count(row['sessions'], 'session')}  {total} tokens  {_money(row['cost'])}  "
         f"calls {row['tool_calls']} errors {row['tool_errors']} denials {row['denials']}"
     )
 
@@ -139,7 +145,7 @@ def print_table(
         label = " / ".join("(none)" if k is None else one_line(k) for k in keys)
         put(ctx, _line(label, row))
     more = " (more matched; raise --limit)" if result.truncated else ""
-    put(ctx, f"{len(result.rows)} rows{more}")
+    put(ctx, f"{_count(len(result.rows), 'row')}{more}")
     put(ctx, _line("total", result.totals))
     put(ctx, f"last ingest: {store['last_ingest_at'] or 'never'}")
 

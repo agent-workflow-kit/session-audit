@@ -141,7 +141,7 @@ def by_key(result: Result) -> dict[tuple[Any, ...], dict[str, Any]]:
     return {tuple(r["key"]): r for r in result.doc["rows"]}
 
 
-# --- no store ---------------------------------------------------------------------------------
+# --- no store -------------------------------------------------------------------------------------
 
 
 def test_no_store_gives_empty_rows_and_zero_totals_and_creates_nothing(
@@ -156,7 +156,7 @@ def test_no_store_gives_empty_rows_and_zero_totals_and_creates_nothing(
     assert not state_dir_of(_private_environment).exists()
 
 
-# --- dimensions -------------------------------------------------------------------------------
+# --- dimensions -----------------------------------------------------------------------------------
 
 
 def test_by_day_buckets_totals_and_golden(
@@ -256,7 +256,7 @@ def test_model_dimension_counts_turns_only_in_the_null_model_row(
     assert rows[("model-a",)]["active_seconds"] is None
 
 
-# --- labels and self-improve ----------------------------------------------------------------
+# --- labels and self-improve ----------------------------------------------------------------------
 
 
 def test_label_rows_overlap_but_totals_do_not(
@@ -310,7 +310,7 @@ def test_kind_dimension_uses_the_snapshot(
     assert rows[("review",)]["sessions"] == 1 and rows[(None,)]["sessions"] == 2
 
 
-# --- time filters and cost ----------------------------------------------------------------------
+# --- time filters and cost ------------------------------------------------------------------------
 
 
 def test_time_filters_select_events_not_sessions(
@@ -399,7 +399,7 @@ def test_estimate_is_rounded_once_from_exact_sums_and_unknown_tokens_are_separat
     assert total["estimated_usd"] == sonnet["estimated_usd"]
 
 
-# --- order, limit, hostile ---------------------------------------------------------------------
+# --- order, limit, hostile ------------------------------------------------------------------------
 
 
 def test_limit_truncates_after_ordering_and_session_limit(
@@ -460,7 +460,7 @@ def test_human_table_lists_rows_totals_and_freshness(
     assert "2026-11-20 / model-a" in out and "total" in out and "last ingest:" in out
 
 
-# --- performance and plan -----------------------------------------------------------------------
+# --- performance and plan -------------------------------------------------------------------------
 
 
 def test_the_event_statements_use_the_session_index(
@@ -622,38 +622,6 @@ def test_a_closed_pipe_ends_the_export_with_exit_1(
     assert pipe.writes <= 3  # it stopped at the first failure, it did not produce the rest
 
 
-def test_export_usage_is_streamed_with_bounded_memory(
-    gw: TickGateway, capsys: pytest.CaptureFixture[str], _private_environment: Path
-) -> None:
-    make_many(_private_environment, 600, 8)  # 4800 events over 40 days, 600 sessions
-    from session_audit.command import Context
-    from session_audit.sessionquery import read_stream
-
-    ctx = Context(gateway=gw, out=Output(lambda: None), json=True)
-    ctx.state_directory = str(state_dir_of(_private_environment))
-    from session_audit import config
-
-    ctx.settings = config.Settings()
-    lines = read_stream(
-        ctx,
-        lambda conn: aggregate.usage_lines(
-            conn, ctx, aggregate.Filters(), ctx.settings.zone(), None, None
-        ),
-    )
-    tracemalloc.start()
-    first = next(lines)
-    after_first = tracemalloc.get_traced_memory()[0]
-    count = 1
-    peak_total = 0
-    for _ in lines:
-        count += 1
-        peak_total = max(peak_total, tracemalloc.get_traced_memory()[0])
-    tracemalloc.stop()
-    assert first["day"] is not None and count == 600
-    # 600 lines of ~1 KB each are 600 KB if held; the stream keeps a few days of groups
-    assert peak_total - after_first < 250_000
-
-
 def test_export_sessions_derives_in_batches_not_all_at_once(
     gw: TickGateway,
     capsys: pytest.CaptureFixture[str],
@@ -709,3 +677,575 @@ def test_a_huge_stored_label_value_is_cut_to_the_schema_cap(
     assert result.code == 0
     (long,) = [k[0] for k in keys(result) if k[0] is not None]
     assert len(long) == 4096  # the schema validated it
+
+
+# --- review round 1 -------------------------------------------------------------------------------
+
+S4 = "44444444-4444-4444-8444-444444444444"
+
+
+def undated(mid: str, *, model: str | None = "model-a", out: int = 4) -> bytes:
+    msg: dict[str, Any] = {"id": mid, "usage": {"output_tokens": out}}
+    if model is not None:
+        msg["model"] = model
+    return raw({"type": "assistant", "message": msg})
+
+
+def test_tool_view_counts_only_sessions_with_tool_events_in_totals(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(corpus, capsys, gw)
+    write_main(corpus, S4, [undated("n1")], project="p4")  # a flagged, message-only session
+    assert ingest(capsys, gw).code == 0
+    plain = usage(capsys, gw, "--by", "tool")
+    assert keys(plain) == [["Bash"]]
+    assert plain.doc["totals"]["sessions"] == 1
+    assert "no_timestamps" not in plain.doc["totals"]["flags"]
+    assert plain.doc["totals"]["flags"] == plain.doc["rows"][0]["flags"]
+    paired = usage(capsys, gw, "--by", "tool,day")
+    assert keys(paired) == [["Bash", "2026-11-20"]]
+    assert paired.doc["totals"]["sessions"] == 1
+    assert "no_timestamps" not in paired.doc["totals"]["flags"]
+    # a window with no tool event: no row, and no session in totals
+    for since in ("2026-11-21", "2026-11-22"):
+        for dims in ("tool", "tool,day"):
+            empty = usage(capsys, gw, "--by", dims, "--since", since)
+            assert empty.doc["rows"] == []
+            assert empty.doc["totals"]["sessions"] == 0
+            assert empty.doc["totals"]["flags"] == []
+            assert empty.doc["totals"]["cost"] is None
+
+
+def test_reported_usd_under_time_filter_and_dimensions(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_main(
+        corpus,
+        S1,
+        [
+            asst("2026-11-20T10:00:00.000Z", "a1", cwd="/p"),
+            cost_line(1.5, "2026-11-20T10:01:00.000Z"),
+        ],
+    )
+    write_main(
+        corpus,
+        S2,
+        [
+            asst("2026-11-21T10:00:00.000Z", "b1", cwd="/p"),
+            cost_line(2.25, "2026-11-21T10:01:00.000Z"),
+        ],
+        project="p2",
+    )
+    assert ingest(capsys, gw).code == 0
+    by_day = usage(capsys, gw, "--by", "day")
+    assert by_day.doc["totals"]["cost"]["reported_usd"] == 3.75  # not affected by the dimension
+    assert all(r["cost"]["reported_usd"] is None for r in by_day.doc["rows"])  # day splits
+    by_model = usage(capsys, gw, "--by", "model")
+    assert by_model.doc["totals"]["cost"]["reported_usd"] == 3.75
+    assert by_model.doc["rows"][0]["cost"]["reported_usd"] is None
+    by_session = usage(capsys, gw, "--by", "session")
+    assert sorted(r["cost"]["reported_usd"] for r in by_session.doc["rows"]) == [1.5, 2.25]
+    for dims in ("day", "session"):
+        windowed = usage(capsys, gw, "--by", dims, "--since", "2026-01-01")
+        assert windowed.doc["totals"]["cost"]["reported_usd"] is None
+        assert all(r["cost"]["reported_usd"] is None for r in windowed.doc["rows"])
+    tool = usage(capsys, gw, "--by", "tool")
+    assert tool.doc["totals"]["cost"] is None
+
+
+# --- ordering -------------------------------------------------------------------------------------
+
+
+def test_export_sessions_order_is_start_then_null_start_last_then_id(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    zero = "00000000-aaaa-4000-8000-000000000000"
+    write_main(corpus, S1, [asst("2026-11-22T10:00:00.000Z", "a1")], project="p1")
+    write_main(corpus, S2, [asst("2026-11-20T10:00:00.000Z", "b1")], project="p2")
+    write_main(corpus, S3, [undated("c1")], project="p3")
+    write_main(corpus, S4, [asst("2026-11-21T10:00:00.000Z", "d1")], project="p4")
+    write_main(corpus, zero, [undated("z1")], project="p5")
+    assert ingest(capsys, gw).code == 0
+    result = run(capsys, gw, "export", "sessions")
+    assert [x["session_id"] for x in result.lines] == [S2, S4, S1, zero, S3]
+    assert [x["started_at"] is None for x in result.lines] == [False] * 3 + [True] * 2
+
+
+def test_export_usage_order_is_day_session_agent_then_model(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sa = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    sb = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    sc = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    sd = "00000000-dddd-4ddd-8ddd-dddddddddddd"
+    write_main(
+        corpus,
+        sb,
+        [asst("2026-11-19T10:00:00.000Z", "b1"), asst("2026-11-20T10:00:00.000Z", "b2")],
+        project="p1",
+    )
+    write_main(
+        corpus,
+        sa,
+        [
+            asst("2026-11-20T10:00:00.000Z", "a1", model="model-b"),
+            asst("2026-11-20T10:01:00.000Z", "a2", model="model-a"),
+            stamped(turn(1000), "2026-11-20T10:02:00.000Z"),
+        ],
+        project="p1",
+    )
+    for agent, model, minute in (("x1", "model-a", 3), ("x0", "model-b", 4)):
+        corpus.write_agent(
+            sa,
+            agent,
+            [asst(f"2026-11-20T10:0{minute}:00.000Z", f"g{agent}", model=model)],
+            project="p1",
+            mtime=MTIME,
+        )
+    write_main(corpus, sc, [undated("c1")], project="p2")
+    write_main(corpus, sd, [undated("d1")], project="p3")
+    assert ingest(capsys, gw).code == 0
+    got = [
+        (x["day"], x["session_id"], x["agent_id"], x["model"])
+        for x in run(capsys, gw, "export", "usage").lines
+    ]
+    assert got == [
+        ("2026-11-19", sb, None, "model-a"),
+        ("2026-11-20", sa, None, "model-a"),
+        ("2026-11-20", sa, None, "model-b"),
+        ("2026-11-20", sa, None, None),
+        ("2026-11-20", sa, "x0", "model-b"),
+        ("2026-11-20", sa, "x1", "model-a"),
+        ("2026-11-20", sb, None, "model-a"),
+        (None, sd, None, "model-a"),
+        (None, sc, None, "model-a"),
+    ]
+
+
+# --- memory ---------------------------------------------------------------------------------------
+
+
+def make_ctx(gw: TickGateway, home: Path) -> Any:
+    from session_audit import config
+    from session_audit.command import Context
+
+    ctx = Context(gateway=gw, out=Output(lambda: None), json=True)
+    ctx.state_directory = str(state_dir_of(home))
+    ctx.settings = config.Settings()
+    return ctx
+
+
+def stream_peak(ctx: Any, factory: Any) -> tuple[int, int, int]:
+    """Peak traced growth (bytes) while a stream is consumed, measured from before the first
+    ``next``; the line count; and how many lines were out before ``mark`` was last reached."""
+    import gc
+
+    from session_audit.sessionquery import read_stream
+
+    lines = read_stream(ctx, factory)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        base = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        count = sum(1 for _ in lines)
+        peak = tracemalloc.get_traced_memory()[1] - base
+    finally:
+        tracemalloc.stop()
+    return peak, count, base
+
+
+def usage_factory(ctx: Any) -> Any:
+    return lambda conn: aggregate.usage_lines(
+        conn, ctx, aggregate.Filters(), ctx.settings.zone(), None, None
+    )
+
+
+def test_export_usage_memory_does_not_grow_with_the_number_of_lines(
+    gw: TickGateway, _private_environment: Path, tmp_path: Path
+) -> None:
+    peaks = {}
+    for sessions in (150, 600):
+        home = _private_environment if sessions == 600 else tmp_path / "small"
+        make_many(home, sessions, 8)  # 8 events a session on one day of 40
+        peak, count, _ = stream_peak(make_ctx(gw, home), usage_factory(make_ctx(gw, home)))
+        assert count == sessions
+        peaks[sessions] = peak
+    # a held list of 600 lines is over 600 KB; only the open days are held
+    assert peaks[600] < 150_000, peaks
+    assert peaks[600] < peaks[150] + 60_000, peaks
+
+
+def test_export_usage_first_line_arrives_before_the_cursor_is_exhausted(
+    gw: TickGateway, _private_environment: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from session_audit.sessionquery import read_stream
+
+    make_many(_private_environment, 600, 8)
+    ctx = make_ctx(gw, _private_environment)
+    seen = {"rows": 0}
+    real = derive.Bucketer.key
+
+    def counting(self: Any, slot: Any, dim: Any) -> Any:
+        if dim == "day" and slot is not None:
+            seen["rows"] += 1
+        return real(self, slot, dim)
+
+    monkeypatch.setattr(derive.Bucketer, "key", counting)
+    lines = read_stream(ctx, usage_factory(ctx))
+    next(lines)
+    at_first = seen["rows"]
+    rest = sum(1 for _ in lines)
+    assert rest == 599
+    assert at_first * 4 < seen["rows"], (at_first, seen["rows"])
+
+
+def test_export_sessions_memory_keeps_only_the_key_list(
+    gw: TickGateway, _private_environment: Path, tmp_path: Path
+) -> None:
+    peaks = {}
+    for sessions in (400, 1600):
+        home = _private_environment if sessions == 1600 else tmp_path / "small"
+        make_many(home, sessions, 1)
+        ctx = make_ctx(gw, home)
+        peak, count, _ = stream_peak(
+            ctx, lambda conn, ctx=ctx: aggregate.session_lines(conn, ctx, aggregate.Filters())
+        )
+        assert count == sessions
+        peaks[sessions] = peak
+    # the 1200 extra sessions add their (start, id) keys, never their session objects
+    assert (peaks[1600] - peaks[400]) / 1200 < 600, peaks
+
+
+# --- the human table ------------------------------------------------------------------------------
+
+
+def table(capsys: pytest.CaptureFixture[str], gw: ClockedGateway, *argv: str) -> list[str]:
+    result = run(capsys, gw, "usage", *argv)
+    assert result.code == 0, result.err
+    return result.out.splitlines()
+
+
+def test_table_tool_view_shows_dashes_for_null_tokens_and_cost(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(corpus, capsys, gw)
+    lines = table(capsys, gw, "--by", "tool")
+    assert lines[:4] == [
+        "by tool",
+        "Bash  1 session  - tokens  -  calls 1 errors 1 denials 0",
+        "1 row",
+        "total  1 session  - tokens  -  calls 1 errors 1 denials 0",
+    ]
+    assert lines[4].startswith("last ingest: 20")
+
+
+def test_table_counts_use_singular_and_plural_and_the_truncated_hint(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(corpus, capsys, gw)
+    lines = table(capsys, gw, "--by", "session", "--limit", "2")
+    assert lines[3] == "2 rows (more matched; raise --limit)"
+    assert lines[4].startswith("total  3 sessions  ")
+    assert table(capsys, gw, "--by", "session")[4] == "3 rows"
+    kind = table(capsys, gw, "--by", "kind")
+    assert kind[1].startswith("(none)  3 sessions  ")
+    assert kind[2] == "1 row"
+    assert table(capsys, gw, "--by", "kind", "--project", "/a/bc")[1].startswith(
+        "(none)  1 session  "
+    )
+
+
+def test_table_money_totals_label_pair_and_null_keys(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    write_main(
+        corpus,
+        S1,
+        [
+            asst("2026-11-20T10:00:00.000Z", "a1", cwd="/p"),
+            cost_line(1.5, "2026-11-20T10:01:00.000Z"),
+        ],
+    )
+    write_main(corpus, S2, [asst("2026-11-21T10:00:00.000Z", "b1", cwd="/q")], project="p2")
+    assert ingest(capsys, gw).code == 0
+    add_run(_private_environment, "cs-aaaaaaaa", [S1], labels=["team=x"])
+    add_run(_private_environment, "cs-bbbbbbbb", [S2], labels=["team=(none)"])
+    project = table(capsys, gw, "--by", "project", "--project", "/p")
+    # 10 output + 1 input + 3 cache read tokens; the model has no price in this fixture
+    assert project[1].startswith(
+        "/p  1 session  14 tokens  est $0.00 reported $1.50 +14 unpriced  "
+    )
+    assert project[3].startswith(
+        "total  1 session  14 tokens  est $0.00 reported $1.50 +14 unpriced  "
+    )
+    labels = table(capsys, gw, "--by", "label=team")
+    assert labels[1].startswith("x  1 session  ") or labels[2].startswith("x  1 session  ")
+    assert len([line for line in labels if line.startswith("(none)  1 session  ")]) == 1
+    pair = table(capsys, gw, "--by", "label=team,project")
+    assert any(line.startswith("x / /p  1 session") for line in pair)
+    only = table(capsys, gw, "--by", "label=team", "--project", "/q")
+    assert only[1].startswith("(none)  1 session")  # the literal value "(none)"
+    assert table(capsys, gw, "--by", "project")[2].startswith(
+        "/q  1 session  14 tokens  est $0.00 reported -"
+    )
+
+
+def test_table_literal_none_label_and_null_key_print_the_same_text_on_two_rows(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    seed(corpus, capsys, gw)
+    add_run(_private_environment, "cs-aaaaaaaa", [S1], labels=["team=(none)"])
+    lines = table(capsys, gw, "--by", "label=team")
+    assert len([x for x in lines if x.startswith("(none)  ")]) == 2
+    assert [r["key"] for r in usage(capsys, gw, "--by", "label=team").doc["rows"]].count(
+        [None]
+    ) == 1
+
+
+def test_table_of_an_empty_store(gw: TickGateway, capsys: pytest.CaptureFixture[str]) -> None:
+    assert table(capsys, gw, "--by", "day") == [
+        "by day",
+        "0 rows",
+        "total  0 sessions  0 tokens  est $0.00 reported -  calls 0 errors 0 denials 0",
+        "last ingest: never",
+    ]
+
+
+def test_table_notes_tokens_of_unpriced_models(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lines = [asst("2026-11-20T10:00:00.000Z", "a1", inp=1, out=1, model="claude-sonnet-4-5")]
+    lines.append(asst("2026-11-20T10:09:00.000Z", "z", out=100, model="no-such-model"))
+    write_main(corpus, S1, lines)
+    assert ingest(capsys, gw).code == 0
+    out = table(capsys, gw, "--by", "model")
+    priced = next(x for x in out if x.startswith("claude-sonnet-4-5  "))
+    odd = next(x for x in out if x.startswith("no-such-model  "))
+    assert "unpriced" not in priced
+    assert " est $0.00 reported - +104 unpriced  " in odd
+    assert next(x for x in out if x.startswith("total  ")).count("+104 unpriced") == 1
+
+
+# --- late store errors ----------------------------------------------------------------------------
+
+EXPORTS = (
+    ("sessions", "session_lines", "session-audit/cli/export-sessions.json"),
+    ("usage", "usage_lines", "session-audit/cli/export-usage.json"),
+)
+
+
+def failing_after(name: str, monkeypatch: pytest.MonkeyPatch, lines: int, calls: list[int]) -> None:
+    """The real stream, cut by a store error after ``lines`` lines (the first call only when
+    ``lines`` is 0, so a retry succeeds)."""
+    real = getattr(aggregate, name)
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        stream = real(*args, **kwargs)
+        if lines and len(calls) > 1:
+            yield from stream
+            return
+        for i, item in enumerate(stream):
+            if i == lines:
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            yield item
+        if lines == 0:
+            return
+
+    monkeypatch.setattr(aggregate, name, wrapper)
+
+
+@pytest.mark.parametrize("json_flag", [[], ["--json"]])
+@pytest.mark.parametrize(("kind", "name", "schema"), EXPORTS)
+def test_a_store_error_after_a_line_truncates_the_stream_with_exit_12_and_stderr_only(
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    name: str,
+    schema: str,
+    json_flag: list[str],
+) -> None:
+    seed(corpus, capsys, gw)
+    calls: list[int] = []
+    failing_after(name, monkeypatch, 2, calls)
+    result = run(capsys, gw, "export", kind, *json_flag)
+    assert result.code == 12
+    assert len(calls) == 1  # no retry after a line was written
+    assert len(result.lines) == 2  # only data lines: no error envelope
+    for line in result.lines:
+        validate(line, schema)
+    assert '"error":' not in result.out
+    assert "session-audit: error:" in result.err and "state.db" in result.err
+
+
+@pytest.mark.parametrize(("kind", "name", "schema"), EXPORTS)
+def test_a_torn_read_before_the_first_line_is_retried_without_duplicate_output(
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    name: str,
+    schema: str,
+) -> None:
+    seed(corpus, capsys, gw)
+    expected = run(capsys, gw, "export", kind)
+    calls: list[int] = []
+    real = getattr(aggregate, name)
+
+    def torn_once(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        yield from real(*args, **kwargs)
+
+    monkeypatch.setattr(aggregate, name, torn_once)
+    result = run(capsys, gw, "export", kind)
+    assert (result.code, len(calls)) == (0, 2)
+    assert result.out == expected.out and result.out != ""
+    for line in result.lines:
+        validate(line, schema)
+
+
+def test_the_error_envelope_still_applies_before_the_first_line(
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed(corpus, capsys, gw)
+
+    def torn(*args: Any, **kwargs: Any) -> Any:
+        raise sqlite3.DatabaseError("database disk image is malformed")
+        yield
+
+    monkeypatch.setattr(aggregate, "session_lines", torn)
+    result = run(capsys, gw, "export", "sessions", "--json")
+    assert result.code == 12
+    assert json.loads(result.out)["error"]["details"]["reason"] == "store_unwritable"
+
+
+# --- unknown model, chunk equivalence, zones ------------------------------------------------------
+
+
+def test_a_message_with_no_model_is_keyed_unknown_under_the_model_dimension(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_main(
+        corpus,
+        S1,
+        [
+            asst("2026-11-20T10:00:00.000Z", "a1", out=11),
+            raw(
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-11-20T10:01:00.000Z",
+                    "message": {"id": "nm", "usage": {"output_tokens": 9}},
+                }
+            ),
+            stamped(turn(2000), "2026-11-20T10:02:00.000Z"),
+        ],
+    )
+    assert ingest(capsys, gw).code == 0
+    rows = by_key(usage(capsys, gw, "--by", "model"))
+    assert rows[("unknown",)]["tokens"]["output"] == 9
+    assert rows[("model-a",)]["tokens"]["output"] == 11
+    assert rows[(None,)]["active_seconds"] == 2.0 and rows[(None,)]["tokens"]["output"] == 0
+
+
+def seed_chunk_corpus(
+    corpus: Corpus, capsys: pytest.CaptureFixture[str], gw: TickGateway, home: Path
+) -> None:
+    ids = [
+        f"{str(i) * 8}-{str(i) * 4}-4{str(i) * 3}-8{str(i) * 3}-{str(i) * 12}" for i in range(1, 8)
+    ]
+    for i, sid in enumerate(ids):
+        day = 20 + i % 3
+        lines = [
+            asst(
+                f"2026-11-{day}T10:0{i}:00.000Z",
+                f"m{i}",
+                out=5 + i,
+                model=("model-a", "model-b", "claude-sonnet-4-5")[i % 3],
+                tools=((f"toolu_{i}", "Bash"),) if i % 2 == 0 else (),
+                cwd=f"/proj{i % 2}",
+            )
+        ]
+        if i % 3 != 2:
+            lines.append(cost_line(0.5 + i, f"2026-11-{day}T10:5{i}:00.000Z"))
+        if i == 5:
+            lines.append(undated(f"u{i}"))  # no_timestamps flag, a null slot
+        write_main(corpus, sid, lines, project=f"p{i}")
+    assert ingest(capsys, gw).code == 0
+    for i, sid in enumerate(ids[:5]):
+        add_run(
+            home,
+            f"cs-{'abcde'[i] * 8}",
+            [sid],
+            labels=[f"team={'xy'[i % 2]}", "team=z"][: 1 + i % 2],
+        )
+
+
+@pytest.mark.parametrize(
+    "dims", ["model", "label=team,model", "tool,project", "session", "day,label=team"]
+)
+def test_small_chunks_give_the_same_output_as_one_big_chunk(
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dims: str,
+) -> None:
+    seed_chunk_corpus(corpus, capsys, gw, _private_environment)
+    big = usage(capsys, gw, "--by", dims)
+    assert big.code == 0 and big.doc["totals"]["sessions"] >= 4
+    for size in (2, 3, 7):
+        monkeypatch.setattr(aggregate, "CHUNK", size)
+        assert usage(capsys, gw, "--by", dims).doc == big.doc, size
+
+
+def test_a_dst_fall_back_day_has_25_hours_in_new_york(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stamps = [
+        ("2026-11-01T03:59:00.000Z", 1),  # 23:59 EDT on Oct 31
+        ("2026-11-01T04:00:00.000Z", 2),  # 00:00 EDT, the first hour of Nov 1
+        ("2026-11-01T05:30:00.000Z", 3),  # 01:30 EDT
+        ("2026-11-01T06:30:00.000Z", 4),  # 01:30 EST, the repeated hour
+        ("2026-11-02T04:59:00.000Z", 5),  # 23:59 EST, the last minute of Nov 1
+        ("2026-11-02T05:00:00.000Z", 6),  # 00:00 EST on Nov 2
+    ]
+    write_main(corpus, S1, [asst(iso, f"d{n}", out=n, inp=0) for iso, n in stamps])
+    assert ingest(capsys, gw).code == 0
+    result = usage(capsys, gw, "--by", "day", "--tz", "America/New_York")
+    assert {k[0]: v["tokens"]["output"] for k, v in by_key(result).items()} == {
+        "2026-10-31": 1,
+        "2026-11-01": 2 + 3 + 4 + 5,
+        "2026-11-02": 6,
+    }
+    utc = usage(capsys, gw, "--by", "day", "--tz", "UTC")
+    assert {k[0]: v["tokens"]["output"] for k, v in by_key(utc).items()} == {
+        "2026-11-01": 1 + 2 + 3 + 4,
+        "2026-11-02": 5 + 6,
+    }
+
+
+def test_a_45_minute_offset_day_changes_at_local_midnight(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stamps = [
+        ("2026-11-20T18:00:00.000Z", 1),  # 23:45 local
+        ("2026-11-20T18:14:59.000Z", 2),  # 23:59 local
+        ("2026-11-20T18:15:00.000Z", 3),  # 00:00 local on the 21st
+    ]
+    write_main(corpus, S1, [asst(iso, f"k{n}", out=n, inp=0) for iso, n in stamps])
+    assert ingest(capsys, gw).code == 0
+    result = usage(capsys, gw, "--by", "day", "--tz", "Asia/Kathmandu")
+    assert {k[0]: v["tokens"]["output"] for k, v in by_key(result).items()} == {
+        "2026-11-20": 3,
+        "2026-11-21": 3,
+    }
