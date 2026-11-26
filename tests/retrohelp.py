@@ -16,7 +16,7 @@ import pytest
 
 from session_audit import cli
 from session_audit.command import Context
-from session_audit.gateway import CallResult, CallStatus
+from session_audit.gateway import CallResult, CallStatus, SystemGateway
 from session_audit.lease import identity
 from session_audit.retroview import (
     encode_artifact,
@@ -26,6 +26,7 @@ from session_audit.retroview import (
 )
 
 from .digesthelp import OLD, make_ctx, prompt, say, write
+from .fake_claude_session import FakeClaudeSession
 from .ingesthelp import Corpus, Run, TickGateway, connect, ingest
 
 KEY_A = "a" * 64
@@ -41,9 +42,14 @@ class RetroGateway(TickGateway):
         super().__init__()
         self.version: str | None = VERSION_OK
         self.sleeps: list[float] = []
+        self.fake: FakeClaudeSession | None = None
 
     def run(self, argv: Any, **kwargs: Any) -> Any:
         self.runs.append(list(argv))
+        if self.fake is not None:
+            # Every claude-session call goes to the scripted fake program (validated documents).
+            forwarded = {**kwargs, "env": self.fake.env()}
+            return SystemGateway.run(self, [str(self.fake.program), *list(argv)[1:]], **forwarded)
         if list(argv)[1:] != ["--version"]:
             raise AssertionError(f"retro run (steps 1 to 10) must not call {list(argv)!r}")
         if self.version is None:
@@ -83,13 +89,16 @@ def retro(
 def ingested(capsys: pytest.CaptureFixture[str], gw: TickGateway) -> None:
     # The harness capture of a plain ingest would call claude-session: make it missing for the run.
     saved = getattr(gw, "version", None)
+    saved_fake = getattr(gw, "fake", None)
     if isinstance(gw, RetroGateway):
         gw.version = None
+        gw.fake = None
     try:
         run = ingest(capsys, gw)
     finally:
         if isinstance(gw, RetroGateway):
             gw.version = saved
+            gw.fake = saved_fake
     assert run.code == 0, run.err
 
 

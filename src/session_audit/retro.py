@@ -7,7 +7,7 @@
    (both ``config_unsafe``), then the store (``store_newer``). The unsafe-config refusal itself is
    ``cli._check_config``, which runs first;
 3. claude-session present and at least MIN_CS (``csversion.check_version``);
-4. ``Steps.skill_preflight`` (TODO(#24));
+4. ``Steps.skill_preflight`` (``plugins.skill_preflight``, wired in ``commands/retro_run``);
 5. ``Steps.housekeeping``, not with ``--dry-run`` (TODO(#27));
 6. the scope (``retroscope.resolve_scope``), 7. the candidates by stored ``ended_at``;
 8. the refresh and the skips: the candidates are digested in growing prefixes of the order until
@@ -17,12 +17,15 @@
 9. the digest of the LAST build is the one used (one read snapshot, one redactor), and the key is
    computed from its section hashes: ``fencing.section_hashes`` needs no nonce, retro id or run
    token, so the key is known here, before any row exists. ``fencing.finish_digest`` (nonce,
-   fence, manifest) runs after step 10, when the retro id exists (TODO(#24), TODO(#26));
+   fence, manifest) runs after step 10, when the retro id exists (TODO(#26));
 10. reuse of a ``done`` retro with the key (no ``--again``), ``already_running`` for a non-final
     retro with the key and a live lease.
 
-Nothing is written before step 13 of the Order of checks (the row insert, #24/#26) except the
-refresh, which is an ingest run. ``Prepared`` is what #24 and #26 continue from.
+Nothing is written before step 13 of the Order of checks (the row insert, #26) except the
+refresh, which is an ingest run. A dry run writes nothing at all: it reads and ingests a private
+in-memory copy of the store (``store.open_memory_copy``, ``Context.memory``) to the current end of
+every file, so its key is the key of a real run over the same bytes. ``Prepared`` is what
+``commands/retro_run`` (steps 11 and 12) and #26 (steps 13 to 16) continue from.
 """
 
 from __future__ import annotations
@@ -43,10 +46,12 @@ from .digest import DigestResult, DigestScope, Skipped, build_digest
 from .fencing import SectionHash, section_hashes
 from .grammar import is_csession_id
 from .lease import LeaseState, is_live
+from .plugins import PluginChoice
 from .retrokey import retro_key
 from .retroscope import Refresher, Resolved, refused, resolve_scope
 from .retroview import load_retro
 from .sessionquery import read_store, snapshot_index
+from .store import open_memory_copy
 
 __all__ = ["KeyState", "NoSteps", "Prepared", "Steps", "lookup_key", "prepare"]
 
@@ -63,9 +68,9 @@ FINAL = ("done", "failed", "escalated", "canceled")
 class Steps(Protocol):
     """The hook points of the steps other issues implement. The defaults do nothing."""
 
-    def skill_preflight(self, ctx: Context, skill: str) -> None:
-        """Order of checks step 4 (TODO(#24)): exit 2 for a malformed skill, 12 for
-        ``skill_not_found`` or ``unsafe_plugin_dir``."""
+    def skill_preflight(self, ctx: Context, skill: str) -> PluginChoice | None:
+        """Order of checks step 4 (``plugins.skill_preflight``): exit 2 for a malformed skill, 12
+        for ``skill_not_found`` or ``unsafe_plugin_dir``. Returns the directories found."""
 
     def housekeeping(self, ctx: Context) -> None:
         """Order of checks step 5 (TODO(#27)): recovery and cleanup retries. Not called with
@@ -73,7 +78,7 @@ class Steps(Protocol):
 
 
 class NoSteps:
-    def skill_preflight(self, ctx: Context, skill: str) -> None:
+    def skill_preflight(self, ctx: Context, skill: str) -> PluginChoice | None:
         return None
 
     def housekeeping(self, ctx: Context) -> None:
@@ -114,6 +119,9 @@ class Prepared:
     reused_retro: str | None  # an id, for the dry-run plan
     running_retro: str | None  # an id, for the dry-run plan
     reuse: dict[str, Any] | None  # set only when the run must print it (not dry, no --again)
+    plugin_dirs: tuple[str, ...] = ()  # the ``--plugin-dir`` values of step 4
+    bundled_plugin: str | None = None  # the bundled plugin directory (the default profile's home)
+    daily_remaining: int = 0  # for the dry-run plan; the binding check is step 13's
 
     @property
     def kept(self) -> int:
@@ -215,6 +223,32 @@ def lookup_key(ctx: Context, conn: sqlite3.Connection, key: str) -> KeyState:
     return KeyState(reused, running, previous, unfit)
 
 
+def daily_remaining(ctx: Context, conn: sqlite3.Connection | None) -> int:
+    """``max(0, limits.retros_per_day - reserved(today))`` (Retro lifecycle, Daily limit):
+    ``reserved(day)`` is the starts recorded for the day (``time_zone``) plus the ``digesting``
+    retros whose lease is live. Read only; the binding check is step 13's (#26)."""
+    limit = ctx.settings.limits.retros_per_day
+    if conn is None:
+        return limit
+    now = ctx.gateway.now()
+    today = now.astimezone(ctx.settings.zone()).strftime("%Y-%m-%d")
+    reserved = conn.execute("SELECT COUNT(*) FROM retro_starts WHERE day = ?", (today,)).fetchone()[
+        0
+    ]
+    stamp = int(now.timestamp() * 1000)
+    for retro_id, *lease in conn.execute(
+        "SELECT id, lease_pid, lease_start, lease_expires_at FROM retros "
+        "WHERE state = 'digesting' AND typeof(id) = 'text' AND id GLOB ? "
+        "AND typeof(lease_pid) = 'integer' AND typeof(lease_start) = 'text' "
+        "AND typeof(lease_expires_at) = 'integer' AND lease_expires_at > ? LIMIT ?",
+        (_ID_GLOB, stamp, LEASE_LOOKUP_LIMIT),
+    ).fetchall():
+        state = _lease_of(tuple(lease))
+        if state is not None and _RETRO_ID.fullmatch(retro_id) and is_live(ctx.gateway, state):
+            reserved += 1
+    return max(0, limit - reserved)
+
+
 # --- steps 8 and 9 -------------------------------------------------------------------------------
 
 
@@ -274,9 +308,30 @@ def prepare(
     settings = ctx.settings.retro
     skill = args.skill or settings.skill
     model = args.model or settings.model
-    steps.skill_preflight(ctx, skill)  # step 4
+    plugins = steps.skill_preflight(ctx, skill)  # step 4
     if not ctx.dry_run:
         steps.housekeeping(ctx)  # step 5
+    else:
+        # A dry run reads and ingests a private in-memory copy of the store (Freshness): to the
+        # current end of every file, writing nothing. It is closed after step 10.
+        ctx.memory = open_memory_copy(ctx.gateway, ctx.state_path())
+    try:
+        return _prepare_rest(ctx, args, env, skill, model, plugins)
+    finally:
+        if ctx.memory is not None:
+            ctx.memory.close()
+            ctx.memory = None
+
+
+def _prepare_rest(
+    ctx: Context,
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+    skill: str,
+    model: str | None,
+    plugins: PluginChoice | None,
+) -> Prepared:
+    settings = ctx.settings.retro
     refresher = Refresher(ctx)
     resolved = resolve_scope(ctx, args, refresher, scope_max=settings.max_sessions)  # 6, 7
     result, unreached = _digest(ctx, resolved, refresher, env, settings.max_sessions)  # 8
@@ -298,6 +353,7 @@ def prepare(
         return found
 
     csessions = read_store(ctx, snapshots)
+    remaining = read_store(ctx, lambda conn: daily_remaining(ctx, conn))
     state = read_store(
         ctx, lambda conn: KeyState(None, None, None) if conn is None else lookup_key(ctx, conn, key)
     )  # 10
@@ -327,4 +383,7 @@ def prepare(
         reused_retro=None if state.reused is None else state.reused["id"],
         running_retro=state.running,
         reuse=reuse,
+        plugin_dirs=() if plugins is None else plugins.dirs,
+        bundled_plugin=None if plugins is None else plugins.bundled,
+        daily_remaining=remaining,
     )

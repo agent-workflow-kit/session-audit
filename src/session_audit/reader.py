@@ -838,7 +838,7 @@ def open_discovery(
 def discover(ctx: Context, paths: Sequence[str] = ()) -> Discovery:
     """``open_discovery`` for a command: the configured roots, the store's exclusion and prune
     rules. The caller closes the result."""
-    store = ctx.store()
+    store = ctx.memory if ctx.memory is not None else ctx.store()
     return open_discovery(
         ctx.gateway,
         ctx.settings.transcript_roots,

@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 from collections.abc import Callable, Generator, Iterator
@@ -37,7 +36,7 @@ from .grammar import (
     parse_label,
     parse_when,
 )
-from .store import open_read_only, state_dir, storage_error
+from .store import open_read_only, storage_error
 from .textsafe import show
 
 SELF_IMPROVE_LABEL = "owner=self-improve"
@@ -70,9 +69,10 @@ def open_reader(ctx: Context) -> Iterator[sqlite3.Connection | None]:
     """A read-only connection inside one read transaction (the command sees one consistent
     state while an ``ingest`` writes), or None when there is no store yet. A store written by a
     newer version raises ``store_newer`` (exit 20)."""
-    from .config import home_dir  # lazy: config imports args, which imports command
-
-    directory = ctx.state_directory or state_dir(os.environ, home_dir(os.environ))
+    if ctx.memory is not None:  # a dry run reads its private copy (see ``Context.memory``)
+        yield ctx.memory.conn
+        return
+    directory = ctx.state_path()
     conn = open_read_only(ctx.gateway, directory)
     if conn is None:
         yield None

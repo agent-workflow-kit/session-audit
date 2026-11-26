@@ -82,9 +82,10 @@ class Refresher:
     def refresh(self, session_ids: Sequence[str]) -> bool:
         """Ingest the files of ``session_ids``. True when the run finished within its budget."""
         wanted = frozenset(session_ids)
-        if not wanted or self.ctx.dry_run:
-            # TODO(#24): a dry run reads each file to its current end in memory (Freshness).
+        if not wanted:
             return True
+        if self.ctx.dry_run:
+            return self._refresh_in_memory(wanted)
         lease = self._acquire()
         if lease is None:
             self.busy = True
@@ -105,6 +106,23 @@ class Refresher:
             self.busy = True
             return False
         return True
+
+    def _refresh_in_memory(self, wanted: frozenset[str]) -> bool:
+        """A dry run: the files are read to their current end into the private copy of the store
+        (``Context.memory``), so the digest and the key are those of a real run over the same
+        bytes. No lease (nothing is shared), nothing is written."""
+        from .commands import ingest  # lazy, as in ``refresh``
+
+        memory = self.ctx.memory
+        if memory is None:
+            raise RuntimeError("a dry run reads through the in-memory copy of the store")
+        if self.deadline is None:
+            self.deadline = run_deadline(self.ctx.gateway, self.ctx.settings.ingest.budget)
+        with discover(self.ctx, ()) as discovery:
+            complete = ingest.run_files_memory(self.ctx, memory, discovery, self.deadline, wanted)
+        if not complete:
+            self.busy = True
+        return complete
 
     def on_disk(self, session_ids: Sequence[str]) -> frozenset[str]:
         """Which of ``session_ids`` have a transcript file under the roots (Discovery's safe
@@ -155,9 +173,8 @@ def resolve_scope(
         prefixes = list(dict.fromkeys(args.session))
         found, unknown = _lookup(ctx, prefixes)
         if unknown:
-            if ctx.dry_run:
-                # TODO(#24): the dry run reads the file in memory; it cannot ingest it.
-                raise errors.CliError("not_found", "session not found", details={"id": unknown[0]})
+            # A dry run finds the file on disk and reads it into its in-memory copy, as a real
+            # run ingests it (``Refresher.refresh``); the second lookup reads that copy.
             ingested = refresher.refresh(unknown)
             again, still = _lookup(ctx, unknown)
             if still:

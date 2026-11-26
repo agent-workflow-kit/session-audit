@@ -95,10 +95,12 @@ HOME_CREDENTIALS = (
 @dataclass(frozen=True)
 class PluginChoice:
     """``found`` is the directory that holds the skill; ``dirs`` are the ``--plugin-dir`` values
-    (the bundled plugin first when it exists, then ``found`` when it is another directory)."""
+    (the bundled plugin first when it exists, then ``found`` when it is another directory);
+    ``bundled`` is the bundled plugin directory (None when there is none)."""
 
     found: str
     dirs: tuple[str, ...]
+    bundled: str | None = None
 
 
 class _Unsafe(Exception):
@@ -395,7 +397,7 @@ def skill_preflight(
                     raise unsafe_plugin_dir() from None
             if _matches(gateway, root, real, plugin, name):
                 dirs = (*bundled_dirs, *(() if real in bundled_dirs else (real,)))
-                return PluginChoice(real, dirs)
+                return PluginChoice(real, dirs, bundled_dirs[0] if bundled_dirs else None)
         finally:
             root.close()
     raise skill_not_found()
