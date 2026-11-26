@@ -123,6 +123,7 @@ def run_housekeeping(ctx: Context, *, digests: bool = True) -> Result:
     run = _Run(ctx, store, result)
     run.recover_all()
     run.retry_cleanups()
+    run.clear_stale_leases()
     run.expire(digests)
     return result
 
@@ -340,6 +341,28 @@ class _Run:
         if state == session.cleanup_state and state in ACTIVE and session.forgotten_at is None:
             self.defer()  # claude-session could not answer: retried next time
         self.result.cleaned += int(state == "done")
+
+    def clear_stale_leases(self) -> None:
+        """A final retro whose holder died before it released keeps a lease that ran out: clear
+        it (one compare-and-set per row on the three stale fields, so a holder that is still
+        alive and renewing is never touched)."""
+        now = int(self.gw.now().timestamp() * 1000)
+        marks = ",".join("?" * len(FINAL_STATES))
+        try:
+            rows = self.store.conn.execute(
+                "SELECT id, lease_pid, lease_start, lease_expires_at FROM retros "
+                f"WHERE state IN ({marks}) AND lease_pid IS NOT NULL AND lease_expires_at <= ? "
+                "LIMIT ?",
+                (*FINAL_STATES, now, _PAGE),
+            ).fetchall()
+            for retro_id, pid, start, expires in rows:
+                observed = lease.LeaseState(pid, start, expires)
+                if not lease.is_live(self.gw, observed):
+                    held = lease.take_over(self.store, lease.RetroTarget(retro_id), observed)
+                    if held is not None:
+                        held.release()
+        except Exception as exc:  # noqa: BLE001 - housekeeping never fails the command
+            note_failure(self.ctx, "lease cleanup", exc)
 
     # -- local files -----------------------------------------------------------------------
 
