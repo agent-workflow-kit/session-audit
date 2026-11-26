@@ -442,7 +442,8 @@ def delete_session_batch(
     another session's file stays counted exactly once (the other copy is promoted). Returns the
     rows deleted and whether the session has no events left."""
     rows = conn.execute(
-        "SELECT id, key, counted FROM events WHERE session_id = ? LIMIT ?", (session_id, limit)
+        "SELECT id, key, counted FROM events WHERE session_id = ? ORDER BY id LIMIT ?",
+        (session_id, limit),
     ).fetchall()
     _delete_rows(conn, rows)
     done = len(rows) < limit or (

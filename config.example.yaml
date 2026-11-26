@@ -49,7 +49,8 @@ cost:
   mismatch_margin: 0.10
 
 retention:
-  # Sessions, agents, events and harness runs (by coalesce(ended_at, last_ingested_at)).
+  # Sessions, agents, events (by the end of the session's counted events, else its files, else
+  # its last ingest) and harness runs (by their own updated_at).
   sessions: 400d
   # Stored retros, with their artifact and digest.
   retros: 180d

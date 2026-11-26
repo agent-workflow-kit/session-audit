@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from session_audit import removal, retention
 from session_audit.cli import main
 from session_audit.errors import CliError
 from session_audit.lease import IngestTarget, acquire
@@ -588,6 +589,78 @@ def test_the_lease_is_free_again_after_the_run(
         store.close()
 
 
+# --- review round 1 ---------------------------------------------------------------------------
+
+
+def letters_id(n: int) -> str:
+    return "ra-" + "".join("abcdefgh"[(n >> (3 * k)) & 7] for k in range(8))
+
+
+def test_a_planted_retro_id_with_a_path_never_leaves_the_digests_directory(
+    gw: TickGateway, capsys: pytest.CaptureFixture[str], home: Path
+) -> None:
+    conn = open_db(home)
+    add_retro(conn, "../victim12", "done", 0)
+    add_digest(home, "ra-aaaaaaaa", mtime=NOW_MS // 1000)  # the digests directory exists
+    victim = state_dir_of(home) / "victim12"
+    victim.mkdir(mode=0o700)
+    (victim / "f").write_text("x", encoding="utf-8")
+    run = prune(capsys, gw)
+    assert run.code == 0, run.err
+    assert (victim / "f").exists()
+    assert run.doc["tables"]["retros"] == 1 and run.doc["tables"]["digests"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM retros").fetchone()[0] == 0
+
+
+def test_deleted_retros_leave_no_bytes_in_the_database_or_its_wal(
+    gw: TickGateway, capsys: pytest.CaptureFixture[str], home: Path
+) -> None:
+    conn = open_db(home)
+    conn.execute("PRAGMA secure_delete=ON")  # the planting itself must leave no stale copy
+    conn.execute("BEGIN")
+    for i in range(300):
+        add_retro(conn, letters_id(i), "done", 0)
+        conn.execute(
+            "UPDATE retros SET scope = ? WHERE id = ?",
+            (f"DISTINCTIVE-SCOPE-{i:04d}" * 8, letters_id(i)),
+        )
+    conn.execute("COMMIT")
+    conn.close()
+    run = prune(capsys, gw)
+    assert run.doc["tables"]["retros"] == 300
+    for name in ("state.db", "state.db-wal"):
+        path = state_dir_of(home) / name
+        if path.exists():
+            assert b"DISTINCTIVE-SCOPE" not in path.read_bytes(), name
+
+
+def add_deep_digest(home: Path, rid: str) -> None:
+    deep = add_digest(home, rid)
+    for _ in range(removal.MAX_DEPTH + 2):
+        deep = deep / "d"
+    deep.mkdir(parents=True)
+
+
+def test_a_retro_whose_digest_cannot_be_removed_stays_and_is_noted_once(
+    gw: TickGateway, capsys: pytest.CaptureFixture[str], home: Path
+) -> None:
+    conn = open_db(home)
+    add_retro(conn, "ra-aaaaaaaa", "done", 0)  # old, final: both its row and its digest expired
+    add_retro(conn, "ra-bbbbbbbb", "done", 0)
+    add_deep_digest(home, "ra-aaaaaaaa")
+    add_digest(home, "ra-bbbbbbbb")
+    planned = prune(capsys, gw, "--dry-run")
+    assert planned.err.count("ra-aaaaaaaa") == 1
+    real = prune(capsys, gw)
+    assert real.err.count("ra-aaaaaaaa") == 1
+    assert real.doc["tables"]["retros"] == 1 and real.doc["tables"]["digests"] == 1
+    assert planned.doc["tables"] == real.doc["tables"]
+    left = {r[0] for r in conn.execute("SELECT id FROM retros")}
+    assert left == {"ra-aaaaaaaa"}
+    assert conn.execute("SELECT COUNT(*) FROM retro_artifacts").fetchone()[0] == 1
+    assert {p.name for p in (state_dir_of(home) / "digests").iterdir()} == {"ra-aaaaaaaa"}
+
+
 # --- ingest after a prune ---------------------------------------------------------------------
 
 
@@ -631,6 +704,136 @@ def test_a_file_whose_mtime_equals_the_prune_time_stays_skipped(
     assert ingest(capsys, gw).doc["files"]["new"] == 0
     os.utime(corpus.main_path(S1), ns=((NOW_MS + 1) * 1_000_000, (NOW_MS + 1) * 1_000_000))
     assert ingest(capsys, gw).doc["files"]["new"] == 1
+
+
+class Crash(BaseException):
+    pass
+
+
+def crash_after_first_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prune stops (as a kill would) after the first event batch of the first session."""
+    real = retention.delete_session_batch
+    calls = {"n": 0}
+
+    def maybe(conn: sqlite3.Connection, session_id: str, limit: int) -> tuple[int, bool]:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise Crash
+        return real(conn, session_id, limit)
+
+    monkeypatch.setattr(retention, "delete_session_batch", maybe)
+    monkeypatch.setattr(retention.session_retention, "__kwdefaults__", {"batch": 2})
+
+
+def half_pruned(
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    corpus: Corpus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S1 is ingested, then its prune is killed after its first batch (marker left)."""
+    corpus.write_main(S1, messages("a", 6), mtime=OLD_MTIME)
+    ingest(capsys, gw)
+    with monkeypatch.context() as patched:
+        crash_after_first_batch(patched)
+        assert prune(capsys, gw).code != 0  # the run ends where a kill would have
+
+
+def test_a_resumed_prune_keeps_the_time_the_session_prune_started(
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    home: Path,
+    corpus: Corpus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    half_pruned(gw, capsys, corpus, monkeypatch)
+    conn = connect(home)
+    assert conn.execute("SELECT value FROM meta WHERE key = 'prune_session'").fetchone()[0] == (
+        f"{S1}|{NOW_MS}"
+    )
+    gw.clock.advance(7200)
+    assert prune(capsys, gw).code == 0
+    assert conn.execute("SELECT pruned_at FROM pruned_sessions").fetchone()[0] == NOW_MS
+    assert conn.execute("SELECT COUNT(*) FROM meta WHERE key = 'prune_session'").fetchone()[0] == 0
+
+
+def test_a_line_appended_to_a_half_pruned_session_is_ingested_after_the_resume(
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    home: Path,
+    corpus: Corpus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    half_pruned(gw, capsys, corpus, monkeypatch)
+    corpus.append_main(S1, messages("z", 1))
+    newer = NOW_MS // 1000 + 3600
+    os.utime(corpus.main_path(S1), (newer, newer))
+    gw.clock.advance(7200)  # the resume runs after the append
+    prune(capsys, gw)
+    run = ingest(capsys, gw)
+    assert run.doc["files"]["new"] == 1 and run.doc["sessions"] == {"new": 1, "updated": 0}
+    keys = connect(home).execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    assert keys == 7  # the file from its start, the appended line included
+
+
+def test_an_unchanged_file_stays_skipped_after_a_resumed_prune(
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    home: Path,
+    corpus: Corpus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    half_pruned(gw, capsys, corpus, monkeypatch)
+    gw.clock.advance(7200)
+    prune(capsys, gw)
+    assert ingest(capsys, gw).doc["files"]["new"] == 0
+
+
+def test_a_resumed_prune_skips_a_file_whose_mtime_equals_the_start_and_takes_a_later_one(
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    home: Path,
+    corpus: Corpus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    half_pruned(gw, capsys, corpus, monkeypatch)
+    gw.clock.advance(7200)
+    prune(capsys, gw)
+    os.utime(corpus.main_path(S1), (NOW_MS // 1000, NOW_MS // 1000))
+    assert ingest(capsys, gw).doc["files"]["new"] == 0
+    os.utime(corpus.main_path(S1), ns=((NOW_MS + 1) * 1_000_000, (NOW_MS + 1) * 1_000_000))
+    assert ingest(capsys, gw).doc["files"]["new"] == 1
+
+
+def usage_totals(capsys: pytest.CaptureFixture[str], gw: TickGateway) -> dict[str, Any]:
+    capsys.readouterr()
+    assert main(["usage", "--by", "model", "--json"], gateway=gw, stdin_is_tty=False) == 0
+    doc = json.loads(capsys.readouterr().out)
+    return {k: v for k, v in doc["totals"].items() if k != "sessions"}  # type: ignore[no-any-return]
+
+
+def test_the_counted_totals_survive_the_prune_of_the_session_that_owned_the_keys(
+    gw: TickGateway, capsys: pytest.CaptureFixture[str], home: Path, corpus: Corpus
+) -> None:
+    corpus.write_main(S1, messages("a", 4), mtime=OLD_MTIME)
+    corpus.write_main(S2, messages("a", 4), project="proj-b", mtime=OLD_MTIME)  # the same keys
+    ingest(capsys, gw)
+    conn = connect(home)
+    conn.isolation_level = None
+    (owner,) = conn.execute("SELECT DISTINCT session_id FROM events WHERE counted = 1").fetchone()
+    other = S2 if owner == S1 else S1
+    conn.execute(  # the other session is young by its file, the owner old by its counted events
+        "UPDATE files SET max_ts = ? WHERE id = (SELECT main_file_id FROM sessions "
+        "WHERE session_id = ?)",
+        (NOW_MS, other),
+    )
+    before = usage_totals(capsys, gw)
+    assert before
+    assert prune(capsys, gw).doc["tables"]["sessions"] == 1
+    assert conn.execute("SELECT DISTINCT session_id FROM events WHERE counted = 1").fetchall() == [
+        (other,)
+    ]
+    assert usage_totals(capsys, gw) == before
 
 
 # --- the checkpoint and what stays on disk ----------------------------------------------------

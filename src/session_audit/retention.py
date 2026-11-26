@@ -9,12 +9,16 @@ the lease the caller holds and checks it in every transaction, as ingest does. O
 pruned in this order (interface.md, Retention), in transactions of at most ``batch`` rows:
 
 1. events (``eventstore.delete_session_batch``: a counted owner that is deleted promotes the best
-   remaining stored copy of its key, so every key keeps one counted row),
+   remaining stored copy of its key, so every key keeps one counted row); a files row that only
+   those events referred to goes in the same transaction as their last event,
 2. agents, with their files rows,
 3. the main file's row, the session row, then ``pruned_sessions(session_id, pruned_at)``, in one
    transaction that also clears the marker.
 
-``meta.prune_session`` names the session being pruned from the first transaction to the last. A
+``meta.prune_session`` (``<session_id>|<start ms>``) names the session being pruned from the first
+transaction to the last, and the time its prune started: ``pruned_at`` is that time, kept across a
+resume, so a line appended to the session's file after the start is ingested again (a bare legacy
+value without ``|`` has no start: the resume time is used). A
 crash between two transactions leaves the session with fewer events (the session row, which the
 rest of the tool needs for every event, is still there) and the marker set; the next prune
 finishes that session first, whatever its age then (the age comes from the events and files, which
@@ -122,12 +126,21 @@ def expired_sessions(conn: sqlite3.Connection, cutoff_ms: int) -> Iterator[str]:
         after = rows[-1][0]
 
 
-def _set_marker(conn: sqlite3.Connection, session_id: str) -> None:
+def _set_marker(conn: sqlite3.Connection, session_id: str, start_ms: int) -> None:
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?, ?) "
         "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        (MARKER, session_id),
+        (MARKER, f"{session_id}|{start_ms}"),
     )
+
+
+def parse_marker(value: object) -> tuple[str, int | None]:
+    """``(session id, start ms)`` of a marker; the start is None for a bare legacy value."""
+    text = str(value)
+    session_id, bar, start = text.rpartition("|")
+    if bar and start.isdigit():
+        return session_id, int(start)
+    return text, None
 
 
 def session_retention(
@@ -156,7 +169,8 @@ def session_retention(
             break
     pending = store.conn.execute("SELECT value FROM meta WHERE key = ?", (MARKER,)).fetchone()
     if pending is not None:
-        _resume(store, lease, str(pending[0]), now_ms, report, batch)
+        resumed, started = parse_marker(pending[0])
+        _resume(store, lease, resumed, started, now_ms, report, batch)
     cutoff = now_ms() - ms(settings.sessions)
     for session_id in expired_sessions(store.conn, cutoff):
         _prune_session(store, lease, session_id, now_ms, report, batch)
@@ -166,6 +180,7 @@ def _resume(
     store: Store,
     lease: Lease,
     session_id: str,
+    started_ms: int | None,
     now_ms: Callable[[], int],
     report: Report,
     batch: int,
@@ -174,7 +189,7 @@ def _resume(
         "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
     ).fetchone()
     if known is not None:
-        _prune_session(store, lease, session_id, now_ms, report, batch)
+        _prune_session(store, lease, session_id, now_ms, report, batch, started_ms=started_ms)
         return
     ensure_margin(store, lease)
     with store.transaction() as conn:  # the last transaction committed, the marker survived
@@ -189,14 +204,19 @@ def _prune_session(
     now_ms: Callable[[], int],
     report: Report,
     batch: int,
+    *,
+    started_ms: int | None = None,
 ) -> None:
     tables = report.tables
+    start = now_ms() if started_ms is None else started_ms
     while True:  # 1. events
         ensure_margin(store, lease)
         with store.transaction() as conn:
             lease.check_still_holder(conn)
-            _set_marker(conn, session_id)
+            _set_marker(conn, session_id, start)
+            event_files = _event_files(conn, session_id, batch)
             count, done = delete_session_batch(conn, session_id, batch)
+            tables["files"] += _drop_unreferenced_files(conn, event_files)
         tables["events"] += count
         if done:
             break
@@ -234,9 +254,35 @@ def _prune_session(
         conn.execute(
             "INSERT INTO pruned_sessions (session_id, pruned_at) VALUES (?, ?) "
             "ON CONFLICT (session_id) DO UPDATE SET pruned_at = excluded.pruned_at",
-            (session_id, now_ms()),
+            (session_id, start),
         )
         conn.execute("DELETE FROM meta WHERE key = ?", (MARKER,))
+
+
+def _event_files(conn: sqlite3.Connection, session_id: str, limit: int) -> list[int]:
+    """The files the next ``limit`` events of the session (in ``delete_session_batch`` order)
+    were read from."""
+    rows = conn.execute(
+        "SELECT DISTINCT file_id FROM events WHERE id IN "
+        "(SELECT id FROM events WHERE session_id = ? ORDER BY id LIMIT ?)",
+        (session_id, limit),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _drop_unreferenced_files(conn: sqlite3.Connection, file_ids: list[int]) -> int:
+    """Delete the files rows that no event, agent or session refers to any more. A row an agent
+    or a main file still names is the business of the later steps (or of another session)."""
+    count = 0
+    for file_id in file_ids:
+        count += conn.execute(
+            "DELETE FROM files WHERE id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM events WHERE file_id = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM agents WHERE file_id = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM sessions WHERE main_file_id = ?)",
+            (file_id, file_id, file_id, file_id),
+        ).rowcount
+    return count
 
 
 def plan_sessions(
@@ -249,12 +295,14 @@ def plan_sessions(
     ).fetchone()[0]
     ids = list(expired_sessions(conn, now_ms - ms(settings.sessions)))
     pending = conn.execute("SELECT value FROM meta WHERE key = ?", (MARKER,)).fetchone()
-    if pending is not None and pending[0] not in ids:
-        known = conn.execute(
-            "SELECT 1 FROM sessions WHERE session_id = ?", (pending[0],)
-        ).fetchone()
-        if known is not None:
-            ids.append(pending[0])
+    if pending is not None:
+        marked = parse_marker(pending[0])[0]
+        known = conn.execute("SELECT 1 FROM sessions WHERE session_id = ?", (marked,)).fetchone()
+        if known is not None and marked not in ids:
+            ids.append(marked)
+    planned = set(ids)
+    file_ids: set[int] = set()
+    event_files: set[int] = set()
     for session_id in ids:
         tables["sessions"] += 1
         tables["events"] += conn.execute(
@@ -263,12 +311,36 @@ def plan_sessions(
         tables["agents"] += conn.execute(
             "SELECT COUNT(*) FROM agents WHERE session_id = ?", (session_id,)
         ).fetchone()[0]
-        tables["files"] += conn.execute(
-            "SELECT (SELECT COUNT(*) FROM files f JOIN agents a ON a.file_id = f.id "
-            " WHERE a.session_id = ?) + (SELECT COUNT(*) FROM files f JOIN sessions s "
-            " ON s.main_file_id = f.id WHERE s.session_id = ?)",
-            (session_id, session_id),
-        ).fetchone()[0]
+        file_ids.update(
+            r[0]
+            for r in conn.execute(
+                "SELECT file_id FROM agents WHERE session_id = ? AND file_id IS NOT NULL "
+                "UNION SELECT main_file_id FROM sessions WHERE session_id = ? "
+                "AND main_file_id IS NOT NULL",
+                (session_id, session_id),
+            )
+        )
+        event_files.update(
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT file_id FROM events WHERE session_id = ?", (session_id,)
+            )
+        )
+    for file_id in event_files - file_ids:
+        if _only_planned_sessions_use(conn, file_id, planned):
+            file_ids.add(file_id)
+    tables["files"] += len(file_ids)
+
+
+def _only_planned_sessions_use(conn: sqlite3.Connection, file_id: int, planned: set[str]) -> bool:
+    for sql in (
+        "SELECT DISTINCT session_id FROM events WHERE file_id = ?",
+        "SELECT DISTINCT session_id FROM agents WHERE file_id = ?",
+        "SELECT DISTINCT session_id FROM sessions WHERE main_file_id = ?",
+    ):
+        if any(r[0] not in planned for r in conn.execute(sql, (file_id,))):
+            return False
+    return True
 
 
 def ingest_is_running(conn: sqlite3.Connection, gateway: Gateway) -> bool:
@@ -287,10 +359,18 @@ def _parse_time(text: str) -> datetime | None:
     return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
 
 
+Transaction = Callable[[], contextlib.AbstractContextManager[sqlite3.Connection]]
+
+
 def harness_runs(
-    conn: sqlite3.Connection, now: datetime, settings: Settings, report: Report, *, apply: bool
+    conn: sqlite3.Connection,
+    transaction: Transaction | None,
+    now: datetime,
+    settings: Settings,
+    report: Report,
 ) -> None:
-    """Remove the runs last updated before the cutoff. ``updated_at`` is claude-session's text; a
+    """Remove the runs last updated before the cutoff, a page of rows per transaction
+    (``transaction`` is None for the planning form). ``updated_at`` is claude-session's text; a
     value that is not an ISO 8601 time is kept (its age is unknown)."""
     cutoff = now - settings.sessions
     after = ""
@@ -303,10 +383,16 @@ def harness_runs(
         if not rows:
             return
         after = rows[-1][0]
-        old = [r[0] for r in rows if (t := _parse_time(r[1])) is not None and t < cutoff]
-        if apply and old:
-            conn.executemany("DELETE FROM harness_runs WHERE csession_id = ?", [(i,) for i in old])
-        report.tables["harness_runs"] += len(old)
+        old = [(r[0], r[1]) for r in rows if (t := _parse_time(r[1])) is not None and t < cutoff]
+        if transaction is None or not old:
+            report.tables["harness_runs"] += len(old)
+            continue
+        with transaction() as tx:  # a row updated since it was read is another run's: it stays
+            for csession_id, updated_at in old:
+                report.tables["harness_runs"] += tx.execute(
+                    "DELETE FROM harness_runs WHERE csession_id = ? AND updated_at = ?",
+                    (csession_id, updated_at),
+                ).rowcount
 
 
 # --- retros and digests -----------------------------------------------------------------------
@@ -335,8 +421,8 @@ def digest_dir(gateway: Gateway, directory: str) -> Iterator[DirHandle | None]:
 
 
 def _digest_exists(handle: DirHandle | None, retro_id: str) -> bool:
-    if handle is None:
-        return False
+    if handle is None or not _RETRO_ID.fullmatch(retro_id):
+        return False  # a row's id is data: only this tool's own names are looked up
     try:
         handle.lstat(retro_id.encode())
     except OSError:
@@ -346,7 +432,7 @@ def _digest_exists(handle: DirHandle | None, retro_id: str) -> bool:
 
 def retros(
     store_conn: sqlite3.Connection,
-    transaction: Callable[[], contextlib.AbstractContextManager[sqlite3.Connection]] | None,
+    transaction: Transaction | None,
     gateway: Gateway,
     directory: str,
     now_ms: int,
@@ -356,12 +442,14 @@ def retros(
     """Remove final retros older than ``retention.retros`` with their artifact and digest
     directory, then the digests older than ``retention.digests``. ``transaction`` is None for the
     planning form. A digest directory that cannot be removed completely keeps its retro for the
-    next prune."""
+    next prune (and is noted once). The rows of a page of retros go in one transaction, after
+    their digests, so no row is deleted on its own and left in a freed page."""
     tables = report.tables
     retro_cutoff = now_ms - ms(settings.retros)
     digest_cutoff = now_ms - ms(settings.digests)
     marks = ",".join("?" * len(FINAL_RETRO_STATES))
-    planned: set[str] = set()
+    apply = transaction is not None
+    skip: set[str] = set()  # retros removed (or planned) and digests that could not be removed
     with digest_dir(gateway, directory) as handle:
         after = ""
         while True:
@@ -373,24 +461,26 @@ def retros(
             if not rows:
                 break
             after = rows[-1][0]
+            page: list[str] = []
             for (retro_id,) in rows:
                 had = _digest_exists(handle, retro_id)
-                if transaction is not None and handle is not None and had:
-                    if not remove_tree(gateway, handle, retro_id.encode()):
+                if handle is not None and had:
+                    if not remove_tree(gateway, handle, retro_id.encode(), apply=apply):
                         report.notes.append(f"digest of {retro_id} could not be removed completely")
+                        skip.add(retro_id)
                         continue
                 tables["digests"] += int(had)
                 tables["retros"] += 1
-                planned.add(retro_id)
-                if transaction is not None:
-                    with transaction() as conn:
-                        conn.execute("DELETE FROM retro_artifacts WHERE retro_id = ?", (retro_id,))
-                        conn.execute("DELETE FROM retros WHERE id = ?", (retro_id,))
+                skip.add(retro_id)
+                page.append(retro_id)
+            if transaction is not None and page:
+                slots = ",".join("?" * len(page))
+                with transaction() as conn:
+                    conn.execute(f"DELETE FROM retro_artifacts WHERE retro_id IN ({slots})", page)
+                    conn.execute(f"DELETE FROM retros WHERE id IN ({slots})", page)
         if handle is None:
             return
-        _expired_digests(
-            store_conn, gateway, handle, digest_cutoff, transaction is not None, planned, report
-        )
+        _expired_digests(store_conn, gateway, handle, digest_cutoff, apply, skip, report)
 
 
 def _expired_digests(
@@ -422,7 +512,7 @@ def _expired_digests(
                 continue
         if created >= cutoff_ms:
             continue
-        if apply and not remove_tree(gateway, handle, raw):
+        if not remove_tree(gateway, handle, raw, apply=apply):
             report.notes.append(f"digest of {name} could not be removed completely")
             continue
         report.tables["digests"] += 1
@@ -505,15 +595,16 @@ class TranscriptRoots:
 
 def retro_sessions(
     conn: sqlite3.Connection,
+    transaction: Transaction | None,
     roots: TranscriptRoots,
     now_ms: int,
     report: Report,
-    *,
-    apply: bool,
 ) -> None:
     """Remove a row whose cleanup is settled and whose project directory is gone from every
     root, or that is older than 400 days. A row with cleanup pending, or whose directory exists,
-    stays (the directory is what excludes the retro's transcripts from ingest)."""
+    stays (the directory is what excludes the retro's transcripts from ingest). The directory
+    lookups happen outside any transaction; a page of rows is then deleted in one short one,
+    each row checked again to be settled (``transaction`` is None for the planning form)."""
     cutoff = now_ms - ms(RETRO_SESSION_MAX_AGE)
     marks = ",".join("?" * len(CLEANUP_SETTLED))
     after = ""
@@ -527,11 +618,16 @@ def retro_sessions(
             return
         after = rows[-1][0]
         old = [r[0] for r in rows if r[2] < cutoff or not roots.holds(r[1])]
-        if apply and old:
-            conn.executemany(
-                "DELETE FROM retro_sessions WHERE csession_id = ?", [(i,) for i in old]
-            )
-        report.tables["retro_sessions"] += len(old)
+        if transaction is None or not old:
+            report.tables["retro_sessions"] += len(old)
+            continue
+        with transaction() as tx:
+            for csession_id in old:
+                report.tables["retro_sessions"] += tx.execute(
+                    f"DELETE FROM retro_sessions WHERE csession_id = ? "
+                    f"AND cleanup_state IN ({marks})",
+                    (csession_id, *CLEANUP_SETTLED),
+                ).rowcount
 
 
 # --- the log ----------------------------------------------------------------------------------

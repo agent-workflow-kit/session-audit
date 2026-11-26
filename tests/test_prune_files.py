@@ -270,3 +270,34 @@ def test_a_directory_with_too_many_entries_is_left_in_place(
     assert remove_tree(ClockedGateway(), parent, b"tree") is False
     assert len(list(tree.iterdir())) == 4
     parent.close()
+
+
+@pytest.mark.parametrize("name", [b"..", b".", b"", b"a/b", b"../x", b"x\x00y"])
+def test_a_name_that_is_not_one_path_component_removes_nothing(tmp_path: Path, name: bytes) -> None:
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "keep").write_text("k", encoding="utf-8")
+    (tmp_path / "parent" / "a").mkdir(parents=True)
+    (tmp_path / "parent" / "a" / "b").write_text("b", encoding="utf-8")
+    parent = handle_of(tmp_path / "parent")
+    assert remove_tree(ClockedGateway(), parent, name) is False
+    assert remove_tree(ClockedGateway(), parent, name, apply=False) is False
+    assert (tmp_path / "x" / "keep").exists()
+    assert (tmp_path / "parent" / "a" / "b").exists()
+    parent.close()
+
+
+def test_a_check_only_walk_removes_nothing_and_gives_the_same_answer(tmp_path: Path) -> None:
+    tree = tmp_path / "parent" / "tree"
+    (tree / "a").mkdir(parents=True)
+    (tree / "a" / "f").write_text("x", encoding="utf-8")
+    parent = handle_of(tmp_path / "parent")
+    assert remove_tree(ClockedGateway(), parent, b"tree", apply=False) is True
+    assert (tree / "a" / "f").exists()
+    assert remove_tree(foreign_gateway(), parent, b"tree", apply=False) is False
+    deep = tree
+    for _ in range(removal.MAX_DEPTH + 2):
+        deep = deep / "d"
+    deep.mkdir(parents=True)
+    assert remove_tree(ClockedGateway(), parent, b"tree", apply=False) is False
+    assert deep.exists()
+    parent.close()

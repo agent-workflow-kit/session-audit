@@ -260,7 +260,9 @@ def test_a_crash_between_batches_leaves_a_consistent_store_and_the_next_run_fini
         with pytest.raises(Crash):
             prune(env, batch=2)
     # the first batch of the first session is committed, nothing else; the session row is there
-    assert rows(env, "SELECT value FROM meta WHERE key = 'prune_session'") == [(SESSION_A,)]
+    assert rows(env, "SELECT value FROM meta WHERE key = 'prune_session'") == [
+        (f"{SESSION_A}|{now_ms(env)}",)
+    ]
     assert rows(env, "SELECT COUNT(*) FROM sessions") == [(3,)]
     assert rows(env, "SELECT COUNT(*) FROM pruned_sessions") == [(0,)]
     assert_consistent(env)
@@ -302,7 +304,19 @@ def test_a_marked_session_is_finished_even_when_it_no_longer_looks_old(env: Env)
         conn.execute("INSERT INTO meta (key, value) VALUES ('prune_session', ?)", (SESSION_A,))
     prune(env)
     assert rows(env, "SELECT COUNT(*) FROM sessions") == [(0,)]
-    assert rows(env, "SELECT session_id FROM pruned_sessions") == [(SESSION_A,)]
+    assert rows(env, "SELECT session_id, pruned_at FROM pruned_sessions") == [
+        (SESSION_A, now_ms(env))  # a bare legacy marker has no start time: the resume time
+    ]
+
+
+def test_a_marker_with_a_start_time_keeps_it_across_the_resume(env: Env) -> None:
+    add_bare_session(env, SESSION_A, now_ms(env))
+    with env.store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('prune_session', ?)", (f"{SESSION_A}|12345",)
+        )
+    prune(env)
+    assert rows(env, "SELECT session_id, pruned_at FROM pruned_sessions") == [(SESSION_A, 12345)]
 
 
 def test_a_marker_whose_session_is_gone_is_cleared(env: Env) -> None:
@@ -359,3 +373,177 @@ def test_old_marks_are_removed_in_bounded_batches(env: Env) -> None:
             [(f"s{i}",) for i in range(11)],
         )
     assert prune(env, batch=4).tables["pruned_sessions"] == 11
+
+
+# --- the files rows only events refer to ------------------------------------------------------
+
+
+def seed_orphan_file(env: Env) -> None:
+    """One session id read from two files: main_file_id points at the second, so the first
+    file's row is reachable only through its events."""
+    env.write("a", [message(f"m{i}", 1, t=i) for i in range(5)])
+    env.ingest("a", session=SESSION_A)
+    env.write("b", [message(f"n{i}", 1, t=10 + i) for i in range(5)])
+    env.ingest("b", session=SESSION_A)
+    assert rows(env, "SELECT COUNT(*) FROM files") == [(2,)]
+    assert rows(env, "SELECT COUNT(*) FROM agents") == [(0,)]
+
+
+def test_a_files_row_only_events_refer_to_goes_with_them(env: Env) -> None:
+    seed_orphan_file(env)
+    env.gateway.clock.advance(500 * 86400)
+    planned = Report()
+    retention.plan_sessions(env.conn, now_ms(env), settings(), planned)
+    report = prune(env, batch=3)
+    assert rows(env, "SELECT COUNT(*) FROM files") == [(0,)]
+    assert report.tables["files"] == 2
+    assert planned.tables == report.tables
+
+
+def test_a_crash_and_resume_leave_no_orphan_files_row(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_orphan_file(env)
+    env.gateway.clock.advance(500 * 86400)
+    crash_after = 0
+    while True:
+        with monkeypatch.context() as patched:
+            crashing(patched, after=crash_after)
+            try:
+                prune(env, batch=3)
+            except Crash:
+                assert_consistent(env)
+                crash_after += 1
+                continue
+        break
+    assert crash_after >= 2
+    assert rows(env, "SELECT COUNT(*) FROM files") == [(0,)]
+
+
+def test_a_files_row_still_used_by_another_session_stays(env: Env) -> None:
+    seed_orphan_file(env)
+    first = rows(env, "SELECT id FROM files ORDER BY id")[0][0]
+    env.gateway.clock.advance(500 * 86400)
+    with env.store.transaction() as conn:  # B is young (its own file) and has an agent on the first
+        conn.execute(
+            "INSERT INTO files (id, path, dev, inode, max_ts) VALUES (99, x'7a', 1, 1, ?)",
+            (now_ms(env),),
+        )
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_dir, main_file_id, first_ingest_at, "
+            "last_ingest_at) VALUES (?, 'p', 99, 0, ?)",
+            (SESSION_B, now_ms(env)),
+        )
+        conn.execute(
+            "INSERT INTO agents (session_id, agent_id, file_id) VALUES (?, 'x', ?)",
+            (SESSION_B, first),
+        )
+    prune(env, batch=3)
+    assert rows(env, "SELECT id FROM files ORDER BY id") == [(first,), (99,)]
+
+
+# --- the planning form with a pending marker; the retro_sessions rule -----------------------------
+
+
+def test_the_dry_run_counts_the_session_a_marker_names_like_the_real_run(env: Env) -> None:
+    env.write("a", [message(f"m{i}", 1, t=i) for i in range(5)])
+    env.ingest("a", session=SESSION_A)  # young by the fake clock: not expired by age
+    with env.store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('prune_session', ?)", (f"{SESSION_A}|1",)
+        )
+    planned = Report()
+    retention.plan_sessions(env.conn, now_ms(env), settings(3650 * DAY), planned)
+    report = prune(env, settings(3650 * DAY))
+    assert planned.tables["sessions"] == report.tables["sessions"] == 1
+    assert planned.tables == report.tables
+
+
+def add_retro_session_row(env: Env, name: str, state: str = "done") -> None:
+    with env.store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO retro_sessions (csession_id, retro_id, csession_dir, project_dir, "
+            "cleanup_state, created_at) VALUES (?, 'ra-aaaaaaaa', '/x', ?, ?, ?)",
+            (name, f"-{name}", state, now_ms(env)),
+        )
+
+
+def test_the_retro_sessions_lookups_run_outside_any_transaction_and_delete_in_pages(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for i in range(5):
+        add_retro_session_row(env, f"cs-{i}")
+    monkeypatch.setattr(retention, "_PAGE", 2)
+    inside: list[bool] = []
+    opened: list[int] = []
+    roots = retention.TranscriptRoots(env.gateway, ())
+
+    def holds(name: str) -> bool:
+        inside.append(env.conn.in_transaction)
+        return False
+
+    monkeypatch.setattr(roots, "holds", holds)
+    real = env.store.transaction
+
+    def counting():  # noqa: ANN202
+        opened.append(1)
+        return real()
+
+    report = Report()
+    retention.retro_sessions(env.conn, counting, roots, now_ms(env), report)
+    assert report.tables["retro_sessions"] == 5
+    assert inside == [False] * 5
+    assert len(opened) == 3  # pages of 2, 2 and 1
+    assert rows(env, "SELECT COUNT(*) FROM retro_sessions") == [(0,)]
+
+
+def test_a_row_whose_cleanup_became_pending_after_the_lookup_stays(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_retro_session_row(env, "cs-a")
+    add_retro_session_row(env, "cs-b")
+    roots = retention.TranscriptRoots(env.gateway, ())
+
+    def holds(name: str) -> bool:
+        with env.store.transaction() as conn:  # another process starts the row's cleanup again
+            conn.execute(
+                "UPDATE retro_sessions SET cleanup_state = 'pending' WHERE project_dir = '-cs-a'"
+            )
+        return False
+
+    monkeypatch.setattr(roots, "holds", holds)
+    report = Report()
+    retention.retro_sessions(env.conn, env.store.transaction, roots, now_ms(env), report)
+    assert rows(env, "SELECT csession_id FROM retro_sessions") == [("cs-a",)]
+    assert report.tables["retro_sessions"] == 1
+
+
+def test_retros_are_deleted_a_page_per_transaction_not_one_by_one(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with env.store.transaction() as conn:
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO retros (id, key, state, created_at) VALUES (?, ?, 'done', 0)",
+                (f"ra-aaaaaaa{'abcde'[i]}", f"{i}" * 64),
+            )
+            conn.execute(
+                "INSERT INTO retro_artifacts (retro_id, artifact) VALUES (?, '{}')",
+                (f"ra-aaaaaaa{'abcde'[i]}",),
+            )
+    monkeypatch.setattr(retention, "_PAGE", 2)
+    opened: list[int] = []
+    real = env.store.transaction
+
+    def counting():  # noqa: ANN202
+        opened.append(1)
+        return real()
+
+    report = Report()
+    retention.retros(
+        env.conn, counting, env.gateway, env.store.directory, now_ms(env), settings(), report
+    )
+    assert report.tables["retros"] == 5
+    assert len(opened) == 3  # pages of 2, 2 and 1
+    assert rows(env, "SELECT COUNT(*) FROM retros") == [(0,)]
+    assert rows(env, "SELECT COUNT(*) FROM retro_artifacts") == [(0,)]

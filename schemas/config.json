@@ -178,7 +178,7 @@
         "sessions": {
           "$ref": "#/$defs/duration_d",
           "default": "400d",
-          "description": "Sessions, agents, events, harness runs (at most 3650 d)."
+          "description": "Sessions, agents, events (by the end of the counted events, else the files, else the last ingest) and harness runs (by their own updated_at); at most 3650 d."
         },
         "retros": {
           "$ref": "#/$defs/duration_d",

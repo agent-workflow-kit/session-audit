@@ -133,10 +133,10 @@ def _plan(ctx: Context, report: Report) -> None:
             report.warnings.append("ingest_busy")
         else:
             plan_sessions(conn, now_ms, settings, report)
-        harness_runs(conn, now, settings, report, apply=False)
+        harness_runs(conn, None, now, settings, report)
         retros(conn, None, ctx.gateway, directory, now_ms, settings, report)
         retro_starts(conn, now, settings, report, apply=False)
-        retro_sessions(conn, roots, now_ms, report, apply=False)
+        retro_sessions(conn, None, roots, now_ms, report)
         log_entries(LogWriter(ctx.gateway, directory), now, settings, report, apply=False)
     finally:
         roots.close()
@@ -161,14 +161,13 @@ def _apply(ctx: Context, store: Store, report: Report) -> None:
             with contextlib.suppress(errors.CliError):
                 lease.release()
     now = gateway.now()
-    with store.transaction() as conn:
-        harness_runs(conn, now, settings, report, apply=True)
+    harness_runs(store.conn, store.transaction, now, settings, report)
     retros(store.conn, store.transaction, gateway, store.directory, now_ms(), settings, report)
     roots = TranscriptRoots(gateway, settings.roots)
     try:
         with store.transaction() as conn:
             retro_starts(conn, now, settings, report, apply=True)
-            retro_sessions(conn, roots, now_ms(), report, apply=True)
+        retro_sessions(store.conn, store.transaction, roots, now_ms(), report)
     finally:
         roots.close()
     log_entries(store.log, now, settings, report, apply=True)
