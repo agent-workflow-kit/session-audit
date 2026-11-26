@@ -614,7 +614,7 @@ def test_no_transaction_starts_near_the_lease_expiry(
     env.ingest("a", chunk_lines=2, file_budget=timedelta(hours=1))
     assert len(margins) >= 30
     assert renewals  # the 60 s margin was reached several times
-    assert min(margins) >= eventstore.LEASE_MARGIN_SECONDS
+    assert min(margins) >= 60.0  # the literal, so a changed constant is caught
 
 
 # --- reread, deletion in batches, crash resume ------------------------------------------------
@@ -645,12 +645,32 @@ def test_a_rewritten_file_is_reread_and_the_owner_is_repaired(env: Env) -> None:
 
 
 def test_a_reread_resets_the_per_file_facts(env: Env) -> None:
+    for i in range(7):  # seven better copies, so a's copy is the eighth and a later one evicts it
+        env.write(f"c{i}", [message("m", 50, t=1)])
+        env.ingest(f"c{i}", session=SESSION_B)
     env.write("a", [raw({"type": "zzz"}), b"junk\n", message("m", 5, t=1)])
     env.ingest("a")
-    assert rows(env, "SELECT parse_errors, unknown_lines FROM files") == [(1, 1)]
-    env.write("a", [message("m", 5, t=1)])
+    env.write("b", [message("m", 90, t=1)])
+    env.ingest("b", session=SESSION_C)  # the ninth copy evicts a's
+    facts = "SELECT parse_errors, unknown_lines, copies_dropped FROM files WHERE path = ?"
+    a_path = bytes(env.path("a"))
+    assert rows(env, facts, a_path) == [(1, 1, 1)]
+    env.write("a", [message("other", 5, t=1)])
     env.ingest("a")
-    assert rows(env, "SELECT parse_errors, unknown_lines, copies_dropped FROM files") == [(0, 0, 0)]
+    assert rows(env, facts, a_path) == [(0, 0, 0)]
+
+
+def test_an_evicted_copy_counts_in_its_own_file_not_the_evictors(env: Env) -> None:
+    for i in range(7):
+        env.write(f"c{i}", [message("m", 50, t=1)])
+        env.ingest(f"c{i}", session=SESSION_B)
+    env.write("a", [message("m", 5, t=1)])
+    env.ingest("a")  # the eighth copy, stored
+    env.write("b", [message("m", 90, t=1)])
+    env.ingest("b", session=SESSION_C)  # better than all: evicts a's copy
+    dropped = "SELECT copies_dropped FROM files WHERE path = ?"
+    assert rows(env, dropped, bytes(env.path("a"))) == [(1,)]
+    assert rows(env, dropped, bytes(env.path("b"))) == [(0,)]
 
 
 def test_the_deletion_runs_in_batches_that_repair_every_owner(env: Env) -> None:
@@ -786,3 +806,95 @@ def test_a_big_file_is_written_and_rebuilt_in_bounded_transactions(env: Env) -> 
     assert rows(
         env, "SELECT count(*) FROM events WHERE counted = 1 AND session_id = ?", SESSION_A
     ) == [(n,)]
+
+
+# --- review round 1 ---------------------------------------------------------------------------
+
+
+def test_the_largest_possible_line_is_never_split_at_the_production_caps(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1,000 error results plus a denial and an interruption are 1,002 events: with 999 pending
+    the look-ahead must close the chunk first (a cap of 2,001 events would otherwise commit)."""
+    sizes: list[int] = []
+    real = eventstore.place_events
+    monkeypatch.setattr(
+        eventstore, "place_events", lambda c, f, p: (sizes.append(len(p)), real(c, f, p))[1]
+    )
+    widest = raw(
+        {
+            "type": "user",
+            "uuid": "u-wide",
+            "timestamp": ts(1),
+            "toolDenialKind": "user-rejected",
+            "interruptedMessageId": "m-x",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": f"t{i}", "is_error": True}
+                    for i in range(1000)
+                ]
+            },
+        }
+    )
+    env.write("a", [message(f"m{i}", 1, t=i % 3000) for i in range(999)] + [widest])
+    env.ingest("a")
+    assert sizes == [999, 1002]
+
+
+def test_a_failed_second_chunk_leaves_the_offset_and_facts_of_the_lines_stored(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The event-cap path commits the state before the line that would pass the cap."""
+    lines = [
+        message("m1", 1, t=1, tools=(("t1", "Bash"),)),  # 2 events
+        b"junk\n",  # a parse error with no events
+        message("m2", 1, t=2, tools=(("t2", "Bash"),)),  # 4 events
+        message("m3", 1, t=50, tools=(("t3", "Bash"),)),  # would make 6 > 5
+    ]
+    env.write("a", lines)
+    real = env.lease.check_still_holder
+    calls = {"n": 0}
+
+    def flaky(conn: sqlite3.Connection) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated crash in the second chunk")
+        real(conn)
+
+    monkeypatch.setattr(env.lease, "check_still_holder", flaky)
+    with pytest.raises(RuntimeError):
+        env.ingest("a", chunk_events=5)
+    monkeypatch.undo()
+    assert env.stored() == 4
+    (offset, errs, max_ts) = rows(env, "SELECT offset, parse_errors, max_ts FROM files")[0]
+    assert offset == len(b"".join(lines[:3]))
+    assert errs == 1
+    assert max_ts == 1620284402000  # t=2, not the t=50 of the line left for the next chunk
+
+
+def test_the_owner_with_more_than_eight_copies_can_depend_on_chunk_boundaries(
+    env: Env, tmp_path: Path
+) -> None:
+    """Pins a documented residual risk (Residual risks, more than 8 copies of a key): a file's
+    first line of a message is dropped when 8 copies are better, and a later line of the same
+    message that is as good then enters as a new copy when it is read in a later chunk."""
+    first, second = message("m", 5, t=30), message("m", 5, t=10)
+
+    def owner(e: Env, chunk_lines: int) -> tuple[int, int, int]:
+        for i in range(8):
+            e.write(f"f{i}", [message("m", 5, t=20)])
+            e.ingest(f"f{i}")
+        e.write("z", [first, second])
+        e.ingest("z", chunk_lines=chunk_lines)
+        (file_path, offset, when) = rows(
+            e, "SELECT file_path, line_offset, ts FROM events WHERE counted = 1"
+        )[0]
+        assert e.stored() == 8 and len(rows(e, "SELECT 1 FROM events WHERE counted = 1")) == 1
+        return (file_path == bytes(e.path("z")), offset, when)
+
+    assert owner(env, chunk_lines=100) == (False, 0, 1620284420000)  # f0 owns; z's copy dropped
+    other = make_env(tmp_path / "y")
+    try:
+        assert owner(other, chunk_lines=1) == (True, len(first), 1620284410000)
+    finally:
+        other.close()

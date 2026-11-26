@@ -48,7 +48,7 @@ from .incremental import (
     Stop,
     save_progress,
 )
-from .parser import Event, FileFacts, Kind, ParseContext, parse_line
+from .parser import MAX_BLOCKS, Event, FileFacts, Kind, ParseContext, parse_line
 from .reader import AgentMeta, Candidate, Opened
 from .store import Store
 from .textsafe import fix_surrogates
@@ -58,7 +58,9 @@ CHUNK_LINES = 10_000
 CHUNK_EVENTS = 2_000
 DELETE_BATCH = 2_000
 LEASE_MARGIN_SECONDS = 60.0  # a transaction never starts with less lease than this left
-MAX_LINE_EVENTS = 1_001  # the most events one line yields (parser: 1,000 blocks plus the message)
+MAX_LINE_EVENTS = (
+    MAX_BLOCKS + 2
+)  # the most events one line yields: every block plus a denial and an interruption
 NAME_CAP = 128
 PATH_CAP = 4096
 
