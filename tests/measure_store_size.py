@@ -1,13 +1,15 @@
 """Store-size and speed measurement of ``ingest`` on a synthetic corpus (design.md, Live
 verification: store size). Not part of the default suite; run it by hand:
 
-    uv run python -m tests.measure_store_size --files 120 --lines 5000 --dir /storage/tmp-audit
+    uv run python -m tests.measure_store_size --files 120 --lines 5000 --dir <scratch-dir>
 
 It writes a corpus under ``<dir>/home/.claude/projects`` (every id and token count synthetic), runs
 the real ``ingest`` command in process with a private HOME, prints one JSON line (files, lines,
 events, corpus bytes, ``state.db`` bytes after a checkpoint, bytes per event, seconds, runs needed
-and the budget) and deletes the directory unless ``--keep`` is given. Nothing outside ``<dir>`` is
-read or written.
+and the budget) and deletes what it created unless ``--keep`` is given. ``<dir>`` must not exist
+or must be empty (anything else is refused, never deleted); only its ``home`` subdirectory is
+removed, then ``<dir>`` itself when that leaves it empty. Nothing outside ``<dir>`` is read or
+written.
 """
 
 from __future__ import annotations
@@ -60,7 +62,8 @@ def write_corpus(root: Path, files: int, lines: int) -> int:
 
 
 def run(files: int, lines: int, directory: Path, budget: str, keep: bool) -> dict[str, object]:
-    shutil.rmtree(directory, ignore_errors=True)
+    if directory.exists() and (not directory.is_dir() or any(directory.iterdir())):
+        raise SystemExit(f"--dir {directory} exists and is not an empty directory; refusing it")
     home = directory / "home"
     projects = home / ".claude" / "projects"
     projects.mkdir(parents=True, mode=0o700)
@@ -120,7 +123,9 @@ def run(files: int, lines: int, directory: Path, budget: str, keep: bool) -> dic
             else:
                 os.environ[key] = value
         if not keep:
-            shutil.rmtree(directory, ignore_errors=True)
+            shutil.rmtree(home, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                directory.rmdir()
 
 
 def cli() -> None:

@@ -254,6 +254,7 @@ def test_the_lease_is_released_after_a_run_and_after_a_failure(
     run = ingest(capsys, gw)
     assert run.code == 1
     assert meta(_private_environment)["ingest_lease"] == ""
+    assert meta(_private_environment)["fail_count"] == 1
 
 
 def test_the_lease_is_released_on_keyboard_interrupt(
@@ -720,3 +721,175 @@ def test_store_size_on_a_scaled_down_synthetic_corpus_stays_bounded(
     assert events == 2400
     assert size / events < 600
     assert size < 3 * corpus_bytes
+
+
+# --- review round 1 ---------------------------------------------------------------------------
+
+S4 = "44444444-4444-4444-8444-444444444444"
+
+
+def test_a_dry_run_holds_no_connection_to_the_store_during_the_scan(
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+
+    from session_audit.commands import ingest as ingest_module
+
+    seed_basic(corpus)
+    ingest(capsys, gw)
+    opened: list[sqlite3.Connection] = []
+    real_open = ingest_module.open_read_only
+    real_scan = ingest_module.scan
+
+    def tracking(*args: object, **kwargs: object) -> sqlite3.Connection | None:
+        conn = real_open(*args, **kwargs)  # type: ignore[arg-type]
+        assert conn is not None
+        opened.append(conn)
+        return conn
+
+    def checking(ctx, args, discovery, conn, *rest, **kwargs):  # type: ignore[no-untyped-def]
+        assert len(opened) == 1 and conn is not opened[0]
+        with pytest.raises(sqlite3.ProgrammingError):  # the file connection is closed
+            opened[0].execute("SELECT 1")
+        return real_scan(ctx, args, discovery, conn, *rest, **kwargs)
+
+    monkeypatch.setattr(ingest_module, "open_read_only", tracking)
+    monkeypatch.setattr(ingest_module, "scan", checking)
+    corpus.append_main(S1, [message("late", 7, t=5)])
+    doc = ingest(capsys, gw, "--dry-run").doc
+    assert doc["files"]["changed"] == 1 and doc["files"]["unchanged"] == 2
+
+
+def test_a_lease_lost_during_the_run_writes_no_log_line_and_counts_one_failure(
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from session_audit.commands import ingest as ingest_module
+
+    seed_basic(corpus)
+    real_scan = ingest_module.scan
+
+    def stealing(*args: object, **kwargs: object) -> object:
+        tally = real_scan(*args, **kwargs)  # type: ignore[arg-type]
+        conn = connect(_private_environment)
+        conn.execute("UPDATE meta SET value = '' WHERE key = 'ingest_lease'")
+        conn.commit()
+        conn.close()
+        return tally
+
+    monkeypatch.setattr(ingest_module, "scan", stealing)
+    run = ingest(capsys, gw)
+    assert run.code == 1
+    assert not (state_dir_of(_private_environment) / "log.jsonl").exists()
+    values = meta(_private_environment)
+    assert values["fail_count"] == 1
+    assert "last_ingest_at" not in values
+
+
+def test_a_budget_stop_with_only_unchanged_files_left_is_complete(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    seed_basic(corpus)
+    ingest(capsys, gw)
+    gw.clock.advance(60)
+    before = meta(_private_environment)["last_complete_ingest_at"]
+    gw.tick = 1.0
+    doc = ingest(capsys, gw, "--budget", "1s").doc
+    assert doc["complete"] is True and doc["files"]["remaining"] == 0
+    assert meta(_private_environment)["last_complete_ingest_at"] > before
+
+
+def test_excluded_and_pruned_files_are_not_remaining_after_a_budget_stop(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    corpus.write_main(S1, messages("a", 2), project="proj-a")
+    ingest(capsys, gw)
+    corpus.write_main(S2, messages("b", 2), project="proj-b")  # excluded
+    corpus.write_main(S3, messages("c", 2), project="proj-c")  # pruned
+    corpus.write_main(S4, messages("d", 2), project="proj-d")  # really remaining
+    conn = connect(_private_environment)
+    conn.execute(
+        "INSERT INTO retro_sessions (csession_id, retro_id, csession_dir, project_dir, created_at)"
+        " VALUES ('cs-aaaaaaaa', 'ra-x', '/x', 'proj-b', 1)"
+    )
+    conn.execute("INSERT INTO pruned_sessions (session_id, pruned_at) VALUES (?, ?)", (S3, 2**50))
+    conn.commit()
+    conn.close()
+    gw.tick = 1.0
+    doc = ingest(capsys, gw, "--budget", "1s").doc
+    assert doc["complete"] is False
+    assert doc["files"]["remaining"] == 1
+
+
+def test_dry_run_counts_equal_live_counts_with_an_unsafe_meta_file(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    agent = corpus.write_agent(
+        S1, "x1", messages("ag", 2), meta={"agentType": "Explore", "toolUseId": "toolu_1"}
+    )
+    corpus.write_main(S1, messages("a", 2))
+    side = agent.with_name("agent-x1.meta.json")
+    side.unlink()
+    side.symlink_to(agent)  # a symlinked meta file is unsafe
+    dry = ingest(capsys, gw, "--dry-run").doc
+    live = ingest(capsys, gw).doc
+    assert live["files"]["unsafe"] >= 1
+    assert dry["files"] == live["files"]
+
+
+def test_since_still_counts_unsafe_entries_it_cannot_attribute_to_a_session(
+    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    corpus.write_main(S1, messages("a", 2), mtime=1_600_000_000)
+    (corpus.root / "linked").symlink_to(tmp_path)
+    doc = ingest(capsys, gw, "--since", "2021-01-01").doc
+    assert doc["files"]["new"] == 0
+    assert doc["files"]["unsafe"] == 1
+
+
+def test_a_root_warning_is_sanitized_once(
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    corpus.write_main(S1, messages("a", 1))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "gone\x01a<b"))
+    [warning] = ingest(capsys, gw).doc["warnings"]
+    assert "gone<U+0001>a<b" in warning
+    assert "<U+003C>" not in warning
+
+
+def test_ingest_failing_due_reads_a_real_meta_row(
+    gw: TickGateway, _private_environment: Path
+) -> None:
+    from session_audit.commands.ingest import ingest_failing_due, record_failure
+
+    store = open_store(gw, str(state_dir_of(_private_environment)))
+    try:
+        now = 1_700_000_000_000
+        for _ in range(3):
+            record_failure(store, now)
+        due = ingest_failing_due(store.conn, 3, now + 1000)
+        assert due is not None and due["consecutive_failures"] == 3
+        assert ingest_failing_due(store.conn, 4, now + 1000) is None
+    finally:
+        store.close()
+
+
+def test_measure_store_size_refuses_a_directory_that_is_not_empty(tmp_path: Path) -> None:
+    from .measure_store_size import run
+
+    keep = tmp_path / "precious"
+    keep.mkdir()
+    (keep / "data.txt").write_text("keep me", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        run(1, 5, keep, "1m", False)
+    assert (keep / "data.txt").read_text(encoding="utf-8") == "keep me"

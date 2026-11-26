@@ -109,7 +109,7 @@ Linked from `ingest`, `sessions`, `usage`, `retro run`, `retro list` and `export
 
 Reads new transcript bytes into the store and, when claude-session is installed, captures harness snapshots. Idempotent. Never recovers retros. The ingest lease is a design guide §4.3 lease on `meta` with the rule in Retro lifecycle, Leases, so a killed ingest never wedges later runs. A second caller exits 0 with `already_running: true`.
 
-- `--since`: a session's files are all considered when any of them (main or subagent) was modified after the time (see Time arguments). Default: every file under the roots.
+- `--since`: a session's files are all considered when any of them (main or subagent) was modified at or after the time (see Time arguments). Default: every file under the roots. An unsafe entry (a symlink, a hard-linked or foreign file) cannot be attributed to a session, so `--since` never leaves it out: it is counted in `files.seen` and `files.unsafe` whatever the time.
 - `--path`: restrict to files under this root (repeatable; resolved by components below a configured root; a path outside every root exits 2 naming `--path`).
 - `--session CSESSION_ID`: takes a claude-session id (other commands take Claude Code session ids). The id must match `^cs-[a-z2-7]{8}$` (else exit 2 naming `--session`, with a hint when the value is a Claude Code session id). Runs `claude-session status --json` (no lease needed) and stores the snapshot (`upsert_harness_run` in Harness enrichment); exit 10 when claude-session reports the id unknown. Then, when the ingest lease is free, it reads the transcript files of the snapshot's Claude session ids; when the lease is held it exits 0 with `files_deferred: true` (the running or next full ingest reads them). `--dry-run` with `--session` exits 2 (a dry run never calls claude-session). This is the target of the hook recipe in Harness enrichment.
 - `--no-harness`: skip claude-session entirely for this run.
@@ -123,6 +123,7 @@ How the counts are taken (copy):
 
 ```text
 files.seen        every file whose name is a transcript name and that --since did not leave out
+                  (unsafe entries are never left out: they belong to no session)
 files.new         a file with no stored row, read
 files.changed     a stored file read on from its offset (its size is not equal to its offset, or a reread was pending)
 files.rewritten   a stored file read again from the start (changed identity, shorter, head or tail hash differs,

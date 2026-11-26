@@ -17,8 +17,9 @@ The flow of a run (``docs/design.md``, Ingest run):
 no log line, no ``meta`` change, no store when there is none yet.
 
 TODO(#19): the claude-session snapshot capture (``harness`` counts, ``--session``, ``--no-harness``
-as a real switch). Until then ``harness`` is reported as not attempted and ``--session`` is an
-unimplemented flag.
+as a real switch, and ``harness.enabled: on`` with claude-session missing as exit 12
+``claude_session_missing``). Until then ``harness`` is reported as not attempted, ``--session`` is
+an unimplemented flag and ``harness.enabled: on`` is not honored.
 TODO(#25): fire the ``post-attention`` hook with ``ingest_failing_due``'s result.
 """
 
@@ -65,13 +66,12 @@ from ..reader import (
     Opened,
     Skip,
     discover,
-    display_path,
     open_discovery,
     store_excluded,
     store_pruned_at,
 )
 from ..store import Store, open_read_only, state_dir
-from ..textsafe import sanitize
+from ..textsafe import fix_surrogates, sanitize
 
 # The ``meta.rules_version`` a fresh store is seeded with (migration 800); a dry run with no
 # store yet reads with it.
@@ -249,7 +249,8 @@ class _Reader:
         raise NotImplementedError
 
     def agent_meta(self, discovery: Discovery, candidate: Candidate) -> AgentMeta | None:
-        return None
+        # Read-only, so a dry run counts an unsafe meta file exactly as a live run does.
+        return discovery.read_meta(candidate)
 
 
 class _Live(_Reader):
@@ -259,9 +260,6 @@ class _Live(_Reader):
         self.store, self.lease, self.rules = store, lease, rules
         self.file_budget, self.deadline = file_budget, deadline
         self.force = False
-
-    def agent_meta(self, discovery: Discovery, candidate: Candidate) -> AgentMeta | None:
-        return discovery.read_meta(candidate)
 
     def read(
         self,
@@ -397,10 +395,12 @@ def scan(
     touched: set[str] = set()
     for index, candidate in enumerate(ordered):
         if gateway.monotonic() >= deadline:
-            tally.complete = False
             for rest in ordered[index:]:
-                if not _probably_unchanged(conn, rest, rules, args.rebuild):
-                    tally.remaining += 1
+                if discovery.settled(rest) or _probably_unchanged(conn, rest, rules, args.rebuild):
+                    continue  # excluded, pruned or nothing left to read: not remaining
+                tally.remaining += 1
+            if tally.remaining:
+                tally.complete = False
             break
         opened = discovery.open(candidate)
         if isinstance(opened, Skip):
@@ -458,7 +458,8 @@ def scan(
 def _discovery_warnings(discovery: Discovery) -> list[str]:
     found: list[str] = []
     for root, why in discovery.unusable_roots:
-        found.append(f"root_unusable: {display_path(os.fsencode(root))} ({why})")
+        # Sanitized once, by build_report; display_path would escape the markers a second time.
+        found.append(f"root_unusable: {fix_surrogates(os.fsdecode(root))} ({why})")
     found.extend(w for w in discovery.warnings if w != "root_unusable")
     return found
 
@@ -587,7 +588,7 @@ def run_dry(ctx: Context, args: argparse.Namespace) -> dict[str, Any]:
 
     directory = ctx.state_directory or state_dir(os.environ, home_dir(os.environ))
     deadline = run_deadline(ctx.gateway, _budget(ctx, args))
-    conn = open_read_only(ctx.gateway, directory)
+    conn = _snapshot(open_read_only(ctx.gateway, directory))
     try:
         view = _View(conn)
         discovery = open_discovery(
@@ -622,6 +623,40 @@ def run_dry(ctx: Context, args: argparse.Namespace) -> dict[str, Any]:
 @dataclass
 class _View:
     conn: Any
+
+
+_SNAPSHOT_TABLES = ("meta", "files", "retro_sessions", "pruned_sessions")
+
+
+def _snapshot(source: sqlite3.Connection | None) -> sqlite3.Connection | None:
+    """Everything a dry run reads from the store (``meta``, ``files``, the retro and prune tables
+    and the ids of ``sessions``), copied in one short read transaction into memory, and the file
+    connection closed. The scan is long and a live ingest may write and checkpoint meanwhile; an
+    ``immutable`` connection kept open across it could read torn pages. None when no store."""
+    if source is None:
+        return None
+    mem = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        source.execute("BEGIN")
+        for table in _SNAPSHOT_TABLES:
+            row = source.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+            ).fetchone()
+            mem.execute(row[0])
+            cursor = source.execute(f"SELECT * FROM {table}")
+            marks = ",".join("?" * len(cursor.description))
+            mem.executemany(f"INSERT INTO {table} VALUES ({marks})", cursor)
+        mem.execute("CREATE TABLE sessions (session_id TEXT PRIMARY KEY)")
+        mem.executemany(
+            "INSERT INTO sessions VALUES (?)", source.execute("SELECT session_id FROM sessions")
+        )
+        source.execute("COMMIT")
+    except BaseException:
+        mem.close()
+        raise
+    finally:
+        source.close()
+    return mem
 
 
 def mark_for_rebuild(store: Store, lease: Lease, ordered: list[Candidate]) -> None:
@@ -691,17 +726,18 @@ def _locked(
     lease.raise_if_lost()
     report = build_report(tally, dry_run=False)
     assert ctx.actor is not None
-    store.log.append(
-        ctx.actor,
-        "ingest",
-        complete=report["complete"],
-        files=report["files"],
-        lines=report["lines"],
-        sessions=report["sessions"],
-    )
     now = _now_ms(ctx)
     with store.transaction() as tx:
+        # The lease first: a lost lease writes neither the log line nor the meta.
         lease.check_still_holder(tx)
+        store.log.append(
+            ctx.actor,
+            "ingest",
+            complete=report["complete"],
+            files=report["files"],
+            lines=report["lines"],
+            sessions=report["sessions"],
+        )
         record_success(
             tx,
             now,
@@ -709,7 +745,8 @@ def _locked(
             complete=tally.complete,
             full=is_full(args),
         )
-    # TODO(#25): fire the post-attention hook when ingest_failing_due(...) returns details.
+    # TODO(#25): fire the post-attention hook when ingest_failing_due(...) returns details
+    # (nothing calls it before then).
     return report
 
 

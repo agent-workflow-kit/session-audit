@@ -533,6 +533,14 @@ class Discovery:
             raise
         return Opened(candidate, file, info)
 
+    def settled(self, candidate: Candidate) -> bool:
+        """True for a listed file ``open`` would skip as excluded or pruned (judged by the listing
+        alone, nothing is counted): it is never part of what a budget stop leaves remaining."""
+        if self._excluded(candidate.project_dir):
+            return True
+        pruned = self._pruned_at(candidate.session_id)
+        return pruned is not None and candidate.mtime_ns // 1_000_000 <= pruned
+
     def _count(self, reason: Skip) -> None:
         if reason is Skip.VANISHED:
             self.stats.vanished += 1
