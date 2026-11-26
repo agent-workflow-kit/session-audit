@@ -30,6 +30,7 @@ from .launchplan import project_dir_name, retryable
 __all__ = [
     "CSID_TOKEN",
     "SIGNAL_EXITS",
+    "VALIDATION_REASONS",
     "Collected",
     "Mapped",
     "Outcome",
@@ -52,6 +53,13 @@ _PROJECT_DIR = re.compile(r"[A-Za-z0-9-]{1,200}", re.ASCII)
 CSID_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])cs-[a-z2-7]{8}(?![A-Za-z0-9_-])", re.ASCII)
 SIGNAL_EXITS = (129, 130, 143)
 _LAUNCH_EXITS = (11, 12, 13)
+VALIDATION_REASONS = (
+    "no_artifact",
+    "artifact_invalid",
+    "identity_mismatch",
+    "marker_mismatch",
+    "no_valid_findings",
+)
 _SESSION_FAILED_OUTCOME = {14: "exited-unreported", 16: "timeout", 17: "lost", 18: "failed"}
 
 
@@ -280,12 +288,25 @@ class Mapped:
     end_reason: str | None = None
     retryable: bool = False
     validate: bool = False
+    error_reason: str | None = None  # ``details.reason`` of the exit 12 when it is not ``reason``
 
     def error(self, retro_id: str) -> errors.CliError | None:
         """The error the command ends with, or None for exit 0 and for a canceled retro (exit
         by signal: no envelope)."""
+        if self.reason == "hook_vetoed":
+            return errors.CliError(
+                "vetoed",
+                "a pre-retro hook vetoed the run",
+                details={"reason": "hook_vetoed", "retro_id": retro_id},
+            )
         if self.state in ("done", "canceled"):
             return None
+        if self.reason in VALIDATION_REASONS:
+            return errors.CliError(
+                "artifact_invalid",
+                "the retro session finished but its artifact is missing or invalid",
+                details={"reason": self.reason, "retro_id": retro_id},
+            )
         if self.state == "escalated":
             return errors.CliError(
                 "needs_human",
@@ -300,17 +321,18 @@ class Mapped:
                 details={"outcome": self.outcome, "retro_id": retro_id},
             )
         details: dict[str, Any] = {
-            "reason": self.reason,
+            "reason": self.error_reason or self.reason,
             "retryable": self.retryable,
             "retro_id": retro_id,
         }
         if self.end_reason is not None:
             details["end_reason"] = self.end_reason
-        message = (
-            "the retro session did not start"
-            if self.reason == "session_not_started"
-            else "a claude-session call failed"
-        )
+        if self.error_reason == "store_unwritable":
+            message = "the retro's files cannot be written"
+        elif self.reason == "session_not_started":
+            message = "the retro session did not start"
+        else:
+            message = "a claude-session call failed"
         return errors.CliError("failed", message, details=details)
 
 

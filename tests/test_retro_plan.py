@@ -331,14 +331,16 @@ def test_daily_remaining_counts_the_starts_of_today_and_the_live_digesting_retro
 # --- step 11: the plan check --------------------------------------------------------------------
 
 
-def test_a_real_run_that_passes_the_plan_check_stops_where_the_launch_will_be(
+def test_a_real_run_that_passes_the_plan_check_goes_on_to_start(
     corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
 ) -> None:
     two(gw, corpus, capsys)
     result = run_retro(capsys, gw, "--project", "/work")
-    assert result.code == 1 and json.loads(result.out)["error"]["code"] == "internal"  # TODO(#26)
-    assert keys(cs) == ["start --dry-run"]  # no start, exec, stop or forget
-    assert retro_rows(corpus.home) == 0
+    # The fake has no step for ``start``: the launch is attempted and ends claude_session_error.
+    assert result.code == 12
+    assert json.loads(result.out)["error"]["details"]["reason"] == "claude_session_error"
+    assert keys(cs) == ["start --dry-run", "start"]  # the plan check, then the real start
+    assert retro_rows(corpus.home) == 1
     assert not (state_dir_of(corpus.home) / "tmp").exists()  # the placeholders are gone
 
 

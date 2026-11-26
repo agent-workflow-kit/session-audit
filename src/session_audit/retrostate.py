@@ -43,7 +43,15 @@ from .grammar import format_timestamp
 from .retroview import encode_resolved_scope, encode_session_map, scope_text
 from .store import Store
 
-__all__ = ["Inserted", "Retro", "Reused", "check_daily_limit", "insert_retro", "new_retro_id"]
+__all__ = [
+    "Inserted",
+    "Retro",
+    "Reused",
+    "check_daily_limit",
+    "insert_retro",
+    "new_retro_id",
+    "scope_object",
+]
 
 FINAL_STATES = ("done", "failed", "escalated", "canceled")
 _RETRO_ID_TRIES = 8
@@ -185,6 +193,20 @@ class Retro:
 @dataclass(frozen=True)
 class Inserted:
     retro: Retro
+
+
+def scope_object(args: Any, prepared: retro.Prepared) -> dict[str, Any]:
+    """The retro scope object of the dry-run plan and of the ``pre-retro`` payload
+    (``defs.json`` ``scope``): the flags as given, sessions resolved to full ids."""
+    return {
+        "sessions": list(prepared.explicit_sessions),
+        "labels": list(dict.fromkeys(args.label or [])),
+        "project": args.project,
+        "since": args.since,
+        "until": args.until,
+        "kind": args.kind,
+        "outcome": args.outcome,
+    }
 
 
 def _flags(args: Any) -> dict[str, Any]:
