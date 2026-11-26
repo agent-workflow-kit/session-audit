@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -79,6 +80,8 @@ def test_pid_zero_and_negative_have_no_start_time() -> None:
         ),
         ("123 (cut) S 1 2 3", None),
         ("garbage", None),
+        ("123 (x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 \u00b2 1", None),
+        ("123 (x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 " + "9" * 5000 + " 1", None),
         ("123 (x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 notdigits 1", None),
     ],
 )
@@ -94,12 +97,91 @@ def test_proc_stat_start_time_is_parsed_from_the_last_parenthesis(
         ("Ss   Tue Nov 25 10:00:00 2026\n", "Tue Nov 25 10:00:00 2026"),
         ("S    Tue Nov  3 01:02:03 2026\n", "Tue Nov 3 01:02:03 2026"),
         ("Z    Tue Nov 25 10:00:00 2026\n", None),
-        ("", None),
-        ("S\n", None),
     ],
 )
 def test_ps_output_is_parsed_for_the_start_time(text: str, expected: str | None) -> None:
     assert gateway._parse_ps_start(text) == expected
+
+
+@pytest.mark.parametrize("text", ["", "S\n", "  \n"])
+def test_ps_output_without_a_start_time_is_an_error_not_dead(text: str) -> None:
+    with pytest.raises(OSError):
+        gateway._parse_ps_start(text)
+
+
+def ps_result(returncode: int, stdout: str = "", stderr: str = "") -> gateway.CallResult:
+    return gateway.CallResult(
+        gateway.CallStatus.EXITED, returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def ps_gateway(result: gateway.CallResult) -> SystemGateway:
+    gw = SystemGateway(proc="/nonexistent-proc")
+    gw.run = lambda *a, **k: result  # type: ignore[method-assign,assignment]
+    return gw
+
+
+def test_ps_exit_1_with_no_output_means_no_such_process() -> None:
+    assert ps_gateway(ps_result(1))._ps_start(42) is None
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        ps_result(1, stderr="ps: permission denied"),
+        ps_result(1, stdout="S Tue Nov 25 10:00:00 2026\n"),
+        ps_result(0, stdout=""),
+        ps_result(0, stdout="garbage-without-time\n"),
+    ],
+)
+def test_ps_failure_with_output_or_unparseable_success_is_an_error(
+    result: gateway.CallResult,
+) -> None:
+    with pytest.raises(OSError):
+        ps_gateway(result)._ps_start(42)
+
+
+def test_ps_zombie_is_not_running() -> None:
+    assert ps_gateway(ps_result(0, stdout="Z Tue Nov 25 10:00:00 2026\n"))._ps_start(42) is None
+
+
+def test_an_unreadable_boot_id_is_an_error_not_a_token_of_another_shape(tmp_path: Path) -> None:
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "77").mkdir()
+    (proc / "77" / "stat").write_text(
+        "77 (x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 1", encoding="utf-8"
+    )
+    with pytest.raises(OSError):
+        gateway._proc_start(str(proc), 77)
+    boot = proc / "sys" / "kernel" / "random"
+    boot.mkdir(parents=True)
+    (boot / "boot_id").write_text("abcdef01-2345\n", encoding="ascii")
+    assert gateway._proc_start(str(proc), 77) == "abcdef01-424242"
+
+
+def test_the_umask_is_restored_when_threads_change_it_together() -> None:
+    gw = SystemGateway()
+    outer = os.umask(0o022)
+    errors: list[str] = []
+
+    def work(mask: int) -> None:
+        for _ in range(3000):
+            with gw.umask(mask):
+                if os.umask(mask) != mask:  # set to the same value: reads what is current
+                    errors.append("another thread's umask leaked in")
+                    return
+
+    threads = [threading.Thread(target=work, args=(m,)) for m in (0o077, 0o000, 0o027)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        assert not errors
+        assert os.umask(0o022) == 0o022
+    finally:
+        os.umask(outer)
 
 
 def test_without_proc_the_start_time_comes_from_ps(tmp_path: Path) -> None:

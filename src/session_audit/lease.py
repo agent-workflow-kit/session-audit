@@ -40,6 +40,7 @@ Signals are not handled here: ``#28`` owns them and calls ``close``/``release`` 
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -202,6 +203,11 @@ class RetroTarget:
             raise lease_lost()
 
 
+# ASCII digits only and a bounded length: str.isdigit() accepts '²' (int() then raises) and int()
+# of a very long digit string raises too; either is a garbled value, not a crash.
+_ASCII_NUMBER = re.compile(r"[0-9]{1,19}")
+
+
 @dataclass(frozen=True)
 class IngestTarget:
     """The ingest lease: one ``meta`` row ``ingest_lease`` holding ``''`` (free) or
@@ -228,7 +234,12 @@ class IngestTarget:
         if not raw:
             return LeaseState(raw=raw)
         parts = raw.split("|")
-        if len(parts) == 3 and parts[0].isdigit() and parts[2].isdigit() and parts[1]:
+        if (
+            len(parts) == 3
+            and _ASCII_NUMBER.fullmatch(parts[0])
+            and _ASCII_NUMBER.fullmatch(parts[2])
+            and parts[1]
+        ):
             return LeaseState(int(parts[0]), parts[1], int(parts[2]), raw=raw)
         # A garbled value is a lease nobody can renew: free to take over (by its exact text).
         return LeaseState(raw=raw)

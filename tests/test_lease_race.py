@@ -41,7 +41,9 @@ CHILD = textwrap.dedent(
     else:
         held = acquire(store, target)
     print("WON" if held is not None else "LOST", flush=True)
-    time.sleep(0.3)  # stay alive, holding, while the other finishes
+    end = time.monotonic() + 30  # stay alive, holding, until the parent releases both
+    while not os.path.exists(gate + ".release") and time.monotonic() < end:
+        time.sleep(0.01)
     """
 )
 
@@ -105,10 +107,13 @@ def race(tmp_path: Path, directory: str, target: str, mode: str, round_no: int) 
         assert all(r.exists() for r in readies), "a racer did not get ready"
         gate.write_text("go", encoding="utf-8")
         results = []
+        for proc in procs:  # one line each, read while the racers are still alive
+            assert proc.stdout is not None
+            results.append(proc.stdout.readline().strip())
+        Path(str(gate) + ".release").write_text("go", encoding="utf-8")
         for proc in procs:
-            out, err = proc.communicate(timeout=60)
+            _, err = proc.communicate(timeout=60)
             assert proc.returncode == 0, err
-            results.append(out.strip())
         return results
     finally:
         for proc in procs:  # only the exact processes started here

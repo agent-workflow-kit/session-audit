@@ -380,7 +380,22 @@ def test_a_pid_prefix_is_not_the_same_holder(tmp_path: Path) -> None:
         assert IngestTarget().clear(conn, holder) is False
 
 
-@pytest.mark.parametrize("garbage", ["x", "1|2", "a|b|c", "1||5", "1|s|-5", "|||", "9|s|1|2"])
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        "x",
+        "1|2",
+        "a|b|c",
+        "1||5",
+        "1|s|-5",
+        "|||",
+        "9|s|1|2",
+        "\u00b2|tok|5",
+        "1|tok|\u00b2",
+        "1|tok|" + "9" * 25,
+        "1|tok|" + "9" * 4000,
+    ],
+)
 def test_a_garbled_ingest_value_is_a_free_lease(tmp_path: Path, garbage: str) -> None:
     _, store = make(tmp_path)
     with store.transaction() as conn:
@@ -539,3 +554,49 @@ def test_the_renewal_transaction_is_short_and_does_not_block_the_holder(tmp_path
 def test_the_defaults_are_the_documented_ones() -> None:
     assert leases.LEASE_SECONDS == 120
     assert leases.RENEW_SECONDS == 30
+
+
+def test_renewal_continues_and_the_store_stays_writable_during_a_slow_call(
+    tmp_path: Path,
+) -> None:
+    """The holder blocks on a slow call on the main thread: the lease expiry still advances and
+    another connection can take the write lock meanwhile."""
+    import time
+
+    gateway, store = make(tmp_path)
+    add_retro(store)
+    held = fast(store, RetroTarget(RETRO))
+    first = columns(store)[2]
+    seen: dict[str, object] = {}
+    done = threading.Event()
+
+    def observer() -> None:
+        other = open_store(ProcGateway(), store.directory)
+        try:
+            end = time.monotonic() + 10
+            while time.monotonic() < end:
+                gateway.clock.advance(5)  # the scripted clock moves; renewals then differ
+                other.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    now = other.conn.execute(
+                        "SELECT lease_expires_at FROM retros WHERE id = ?", (RETRO,)
+                    ).fetchone()[0]
+                finally:
+                    other.conn.execute("ROLLBACK")
+                seen["begin_immediate"] = True
+                if now != first:
+                    seen["expires"] = now
+                    break
+                time.sleep(0.02)
+        finally:
+            other.close()
+            done.set()
+
+    with held:
+        thread = threading.Thread(target=observer)
+        thread.start()
+        assert done.wait(timeout=15), "the slow call was never interrupted"  # the slow call
+        thread.join(timeout=5)
+        assert held.renewing
+    assert seen.get("begin_immediate") is True
+    assert seen.get("expires") not in (None, first)
