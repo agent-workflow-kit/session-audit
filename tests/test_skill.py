@@ -530,6 +530,27 @@ def test_every_plugin_file_is_tracked_and_none_is_ignored(tmp_path: Path) -> Non
         assert ignored.returncode == 1, name
 
 
+RESOLVER_FAILURE = re.compile(
+    r"Failed to (resolve|fetch|download)|error sending request|dns error|"
+    r"Connection refused|No matching distribution",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "skipped"),
+    [
+        ("error: Failed to fetch: https://example.invalid/simple/", True),
+        ("dns error: failed to lookup address", True),
+        ("Connection refused (os error 111)", True),
+        ("error: a network-shaped build bug in the backend", False),
+        ("error: invalid pyproject.toml", False),
+    ],
+)
+def test_the_real_build_skip_matches_only_resolver_failures(stderr: str, skipped: bool) -> None:
+    assert bool(RESOLVER_FAILURE.search(stderr)) is skipped
+
+
 def test_a_real_build_ships_the_plugin_in_the_wheel_and_the_sdist(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     if uv is None:
@@ -544,12 +565,7 @@ def test_a_real_build_ships_the_plugin_in_the_wheel_and_the_sdist(tmp_path: Path
         text=True,
         timeout=420,
     )
-    if built.returncode != 0 and re.search(
-        r"Failed to (resolve|fetch|download)|error sending request|dns error|No solution|"
-        r"Connection refused|network",
-        built.stderr,
-        re.IGNORECASE,
-    ):
+    if built.returncode != 0 and RESOLVER_FAILURE.search(built.stderr):
         pytest.skip("the build backend cannot be resolved offline")
     assert built.returncode == 0, built.stderr[-2000:]
     [wheel] = out.glob("*.whl")
