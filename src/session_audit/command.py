@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -100,6 +101,9 @@ class Context:
     # The signal controller of the run (``interrupt.Signals``, set by ``cli.main``); a command
     # that must end in an orderly way (``retro run``) defers the first signal and polls it.
     interrupts: Signals | None = field(default=None, repr=False)
+    # An event that ends the claude-session calls of the retro's cleanup (``retrocleanup.call``)
+    # when it is set: ``retrolaunch`` sets it around the cleanup to bound it after a signal.
+    call_cancel: threading.Event | None = field(default=None, repr=False)
 
     def state_path(self) -> str:
         """The state directory: ``state_directory`` or the standard location."""

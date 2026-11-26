@@ -716,6 +716,7 @@ def test_the_renewal_thread_runs_while_the_tool_waits_for_start_exec_and_hooks(
     session_run(cs, "blocked")
     seen: list[tuple[str, bool]] = []
     real_run = gw.run
+    real_spawn = gw.spawn
     real_hook = gw.run_hook
 
     def watch_run(argv: Any, **kwargs: Any) -> Any:
@@ -723,6 +724,10 @@ def test_the_renewal_thread_runs_while_the_tool_waits_for_start_exec_and_hooks(
         if current and word in ("start", "exec", "forget"):
             seen.append((word, current[0].lease.renewing))
         return real_run(argv, **kwargs)
+
+    def watch_spawn(argv: Any, **kwargs: Any) -> Any:
+        seen.append(("exec", current[0].lease.renewing))
+        return real_spawn(argv, **kwargs)
 
     def watch_hook(command: str, **kwargs: Any) -> Any:
         seen.append(("hook", current[0].lease.renewing))
@@ -738,6 +743,7 @@ def test_the_renewal_thread_runs_while_the_tool_waits_for_start_exec_and_hooks(
 
     monkeypatch.setattr(retrolaunch, "insert_retro", remember)
     monkeypatch.setattr(gw, "run", watch_run)
+    monkeypatch.setattr(gw, "spawn", watch_spawn)
     monkeypatch.setattr(gw, "run_hook", watch_hook)
     write_config(corpus.home, hook_config(tmp_path, pre_retro="true", post_retro="true"))
     error_of(launch(capsys, gw), 13)

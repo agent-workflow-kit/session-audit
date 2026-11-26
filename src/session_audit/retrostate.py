@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -191,7 +192,13 @@ class Retro:
             self.cost_usd = columns["cost_usd"]
 
     def post_hooks(
-        self, state: str, reason: str | None, *, findings: int = 0, candidates: int = 0
+        self,
+        state: str,
+        reason: str | None,
+        *,
+        findings: int = 0,
+        candidates: int = 0,
+        cancel: threading.Event | None = None,
     ) -> None:
         """``post-retro`` once for the final state (and ``post-attention`` ``retro_failed`` for
         ``failed``), best effort: a failing entry is a stderr warning. Holds no write lock."""
@@ -205,7 +212,9 @@ class Retro:
             candidates=candidates,
             cost_usd=self.cost_usd,
         )
-        for line in hooks.warning_text(hooks.run_hooks(gw, settings, payload), hooks.POST_RETRO):
+        for line in hooks.warning_text(
+            hooks.run_hooks(gw, settings, payload, cancel=cancel), hooks.POST_RETRO
+        ):
             self.ctx.note(f"session-audit: {line}")
         if state == "failed":
             csid = self.csession_id
@@ -216,7 +225,7 @@ class Retro:
                 csession_id=csid if is_csession_id(csid) else None,
             )
             for line in hooks.warning_text(
-                hooks.run_hooks(gw, settings, failure), hooks.POST_ATTENTION
+                hooks.run_hooks(gw, settings, failure, cancel=cancel), hooks.POST_ATTENTION
             ):
                 self.ctx.note(f"session-audit: {line}")
 

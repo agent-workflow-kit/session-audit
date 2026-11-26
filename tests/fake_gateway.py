@@ -95,6 +95,12 @@ class FakeHandle:
     def abandon(self) -> None:
         return None
 
+    def __enter__(self) -> FakeHandle:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
 
 class FakeGateway:
     """Besides the scripted programs and the clock, an in-memory file tree (``add_file``,

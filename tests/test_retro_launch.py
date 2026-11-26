@@ -822,7 +822,7 @@ def _alive(pid: int) -> bool:
     return text.rsplit(")", 1)[1].split()[0] != "Z"
 
 
-def test_the_exec_child_pid_is_recorded_for_the_signal_handling_of_28(
+def test_the_exec_handle_names_the_exact_exec_child(
     corpus: Corpus,
     gw: RetroGateway,
     cs: FakeClaudeSession,
@@ -831,14 +831,15 @@ def test_the_exec_child_pid_is_recorded_for_the_signal_handling_of_28(
 ) -> None:
     prepared_corpus(gw, corpus, capsys)
     session_run(cs, "blocked")
-    seen: list[int] = []
-    original = retrolaunch.Launcher._exec_started
+    seen: list[int | None] = []
+    real_spawn = gw.spawn
 
-    def spy(self: Any, pid: int) -> None:
-        seen.append(pid)
-        original(self, pid)
+    def spy(argv: Any, **kwargs: Any) -> Any:
+        handle = real_spawn(argv, **kwargs)
+        seen.append(handle.pid)
+        return handle
 
-    monkeypatch.setattr(retrolaunch.Launcher, "_exec_started", spy)
+    monkeypatch.setattr(gw, "spawn", spy)
     error_of(launch(capsys, gw), 13)
     [pid] = seen
     assert pid == [c["pid"] for c in cs.calls() if c["key"] == "exec"][0]

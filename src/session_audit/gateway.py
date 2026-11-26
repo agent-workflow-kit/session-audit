@@ -214,6 +214,12 @@ class ProcessHandle(Protocol):
         own timeout and the housekeeping of the recorded session finish it)."""
         ...
 
+    def __enter__(self) -> ProcessHandle: ...
+
+    def __exit__(self, *exc: object) -> None:
+        """``close``: a ``with`` block never leaves a running child behind."""
+        ...
+
 
 class Gateway(Protocol):
     def run(
@@ -558,7 +564,7 @@ class _SystemHandle:
                 if stream is not None:
                     stream.close()
 
-    def __enter__(self) -> _SystemHandle:
+    def __enter__(self) -> ProcessHandle:
         return self
 
     def __exit__(self, *exc: object) -> None:
