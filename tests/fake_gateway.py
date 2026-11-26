@@ -30,6 +30,7 @@ from session_audit.gateway import (
     CallStatus,
     DirHandle,
     FileContent,
+    ProcessHandle,
 )
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
@@ -65,6 +66,40 @@ class FakeEntry:
     nlink: int = 1
     mtime_ns: int = 0
     ino: int = 1
+
+
+class FakeHandle:
+    """A ``ProcessHandle`` of a call that is already over: nothing runs, nothing can be signaled."""
+
+    pid = None
+
+    def __init__(self, result: CallResult) -> None:
+        self._result = result
+        self.signals: list[int] = []
+
+    def wait(self, timeout: float) -> bool:
+        return True
+
+    def signal(self, signum: int) -> bool:
+        return False
+
+    def end_group(self, grace: float | None = None) -> None:
+        return None
+
+    def result(self) -> CallResult:
+        return self._result
+
+    def close(self) -> None:
+        return None
+
+    def abandon(self) -> None:
+        return None
+
+    def __enter__(self) -> FakeHandle:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
 
 
 class FakeGateway:
@@ -113,12 +148,27 @@ class FakeGateway:
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
         kill_grace: float | None = None,
         on_start: Callable[[int], None] | None = None,
+        cancel: threading.Event | None = None,
     ) -> CallResult:
         self.calls.append({"argv": list(argv), "stdin": stdin, "timeout": timeout, "cwd": cwd})
         for prefix, results in self._rules:
             if tuple(argv[: len(prefix)]) == prefix:
                 return results.pop(0) if len(results) > 1 else results[0]
         raise AssertionError(f"unscripted call: {list(argv)}")
+
+    def spawn(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        kill_grace: float | None = None,
+    ) -> ProcessHandle:
+        """Scripted like ``run``: the handle is finished at once with the scripted result."""
+        return FakeHandle(self.run(argv, timeout=timeout, stdin=stdin, cwd=cwd))
 
     def run_hook(
         self,

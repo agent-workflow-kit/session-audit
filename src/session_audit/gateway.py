@@ -21,13 +21,22 @@ The API is defined here once; later modules extend it only when they need a new 
   discarded (the hook keeps running) instead of failing the call. A member that left the group
   with ``setsid`` is out of reach: a documented residual risk.
 
-``run`` takes two optional per-call arguments for the retro's long ``exec`` call (issue #26):
-``kill_grace`` (seconds between the SIGTERM and the SIGKILL of the child's group, instead of the
-gateway's) and ``on_start`` (called with the exact child PID right after the spawn, before the
-call waits: a signal handler of #28 records it there, to signal that one process, and an
-exception it raises ends the child's group and propagates). The child leads its own process group
-(pgid == pid), so the PID is also the group id. todo(#28): the signal matrix (forward once to the
-PID, wait 30 s, ``stop``) is built on these two; the hooks keep using ``run_hook``.
+``run`` takes optional per-call arguments for the retro's long ``exec`` call and the signal
+handling (issue #26, #28): ``kill_grace`` (seconds between the SIGTERM and the SIGKILL of the
+child's group, instead of the gateway's), ``on_start`` (called with the exact child PID right after
+the spawn) and ``cancel`` (an event that ends the call like a timeout when it is set).
+
+``spawn`` starts the same kind of child but does not wait: it returns a ``ProcessHandle`` (pid,
+``wait`` with a timeout, ``signal``, ``end_group``, ``result``). The handle keeps draining the
+child's output (with the caps of ``run``) while it waits, ``signal`` refuses once the child is
+reaped (a pid is never signaled after it could have been reused), and ``close`` ends the group of a
+child that still runs, so no handle outlives its owner. The retro's adopting ``exec`` runs through
+it: the signal handling forwards the received signal once, to the exact child.
+
+Every child, from ``run``, ``run_hook`` or ``spawn``, starts with SIGHUP, SIGINT and SIGTERM at
+their default disposition: a handler is reset by ``exec`` anyway, and an ignored signal (the tool
+was started with ``nohup`` or from a background job) would otherwise be inherited, so a signal sent
+to the child would do nothing. SIGPIPE is reset by ``subprocess`` (``restore_signals``).
 """
 
 from __future__ import annotations
@@ -68,6 +77,7 @@ def _crontab_env() -> dict[str, str]:
 
 
 _POLL_SECONDS = 0.05
+_TERMINAL_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 _READ_CHUNK = 65536
 _DRAIN_CHUNKS = 16
 _GROUP_POLL_SECONDS = 0.02
@@ -166,6 +176,51 @@ class DirHandle(Protocol):
     def close(self) -> None: ...
 
 
+class ProcessHandle(Protocol):
+    """A child the gateway started and did not wait for (``Gateway.spawn``)."""
+
+    @property
+    def pid(self) -> int | None:
+        """The child's pid (also its process group id), None when it never started."""
+        ...
+
+    def wait(self, timeout: float) -> bool:
+        """Serve the child's pipes for at most ``timeout`` real seconds. True once the call is
+        over (the child exited and was reaped, or the deadline or the output cap ended it), False
+        while it still runs."""
+        ...
+
+    def signal(self, signum: int) -> bool:
+        """Send ``signum`` to the child process (not its group). False, and nothing sent, once the
+        child has exited and been reaped: the pid may belong to someone else by then."""
+        ...
+
+    def end_group(self, grace: float | None = None) -> None:
+        """SIGTERM the child's process group, wait ``grace`` seconds (the call's ``kill_grace``
+        by default) and SIGKILL it. After the child was reaped only a group that still has a live
+        member is signaled (its id cannot be reused while a member lives)."""
+        ...
+
+    def result(self) -> CallResult:
+        """The call's result. Ends the group first when the call is not over yet."""
+        ...
+
+    def close(self) -> None:
+        """End the group of a child that still runs and close the pipes. Idempotent."""
+        ...
+
+    def abandon(self) -> None:
+        """Close this side of the pipes and leave the child alone (an exit at once: the child's
+        own timeout and the housekeeping of the recorded session finish it)."""
+        ...
+
+    def __enter__(self) -> ProcessHandle: ...
+
+    def __exit__(self, *exc: object) -> None:
+        """``close``: a ``with`` block never leaves a running child behind."""
+        ...
+
+
 class Gateway(Protocol):
     def run(
         self,
@@ -178,7 +233,25 @@ class Gateway(Protocol):
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
         kill_grace: float | None = None,
         on_start: Callable[[int], None] | None = None,
+        cancel: threading.Event | None = None,
     ) -> CallResult: ...
+
+    def spawn(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        kill_grace: float | None = None,
+    ) -> ProcessHandle:
+        """Start a program like ``run`` and return at once with a handle (see the module text).
+        ``timeout`` is the call's deadline: the handle ends the group (SIGTERM, ``kill_grace``,
+        SIGKILL) and reports ``TIMEOUT`` when it passes. A program that cannot be started gives a
+        handle that is finished at once with ``SPAWN_FAILED``."""
+        ...
 
     def run_hook(
         self,
@@ -334,6 +407,173 @@ class Gateway(Protocol):
         ...
 
 
+class _SystemHandle:
+    """``ProcessHandle`` over a ``subprocess.Popen``: the pump of ``SystemGateway._supervise``
+    (selector, capped drains, stdin feed) driven by ``wait`` instead of one blocking call."""
+
+    def __init__(
+        self,
+        gateway: SystemGateway,
+        popen: subprocess.Popen[bytes] | None,
+        stdin: bytes | None,
+        timeout: float,
+        stdout_limit: int,
+        kill_grace: float | None,
+        failed: CallResult | None,
+    ) -> None:
+        self._gateway = gateway
+        self._popen = popen
+        self._limit = stdout_limit
+        self._grace = kill_grace
+        self._timeout = timeout
+        self._deadline = time.monotonic() + timeout
+        self._out = bytearray()
+        self._err = bytearray()
+        self._pending = stdin if stdin is not None else b""
+        self._result: CallResult | None = failed
+        self._selector: selectors.BaseSelector | None = None
+        self._closed = failed is not None
+        if popen is not None:
+            self._selector = selectors.DefaultSelector()
+            assert popen.stdout is not None and popen.stderr is not None
+            for stream, buffer in ((popen.stdout, self._out), (popen.stderr, self._err)):
+                os.set_blocking(stream.fileno(), False)
+                self._selector.register(stream, selectors.EVENT_READ, (stream, buffer))
+            if stdin is not None:
+                assert popen.stdin is not None
+                os.set_blocking(popen.stdin.fileno(), False)
+                if self._pending:
+                    self._selector.register(popen.stdin, selectors.EVENT_WRITE)
+                else:
+                    popen.stdin.close()
+
+    @property
+    def pid(self) -> int | None:
+        return None if self._popen is None else self._popen.pid
+
+    def wait(self, timeout: float) -> bool:
+        if self._result is not None:
+            return True
+        popen, selector = self._popen, self._selector
+        assert popen is not None and selector is not None
+        end = time.monotonic() + max(0.0, timeout)
+        while True:
+            now = time.monotonic()
+            if now >= self._deadline:
+                self._finish(CallStatus.TIMEOUT)
+                return True
+            step = max(0.0, min(_POLL_SECONDS, end - now, self._deadline - now))
+            for key, _ in selector.select(step):
+                if key.fileobj is popen.stdin:
+                    self._pending = SystemGateway._feed(popen, selector, self._pending)
+                else:
+                    stream, buffer = key.data
+                    SystemGateway._drain(stream, selector, buffer, self._limit)
+            if len(self._out) > self._limit:
+                self._finish(CallStatus.OUTPUT_LIMIT)
+                return True
+            if popen.poll() is not None:
+                # The leader is gone: take what is buffered, then stop reading (a grandchild
+                # holding a pipe open cannot keep this call waiting).
+                for stream in (popen.stdout, popen.stderr):
+                    assert stream is not None
+                    SystemGateway._drain(
+                        stream,
+                        None,
+                        self._out if stream is popen.stdout else self._err,
+                        self._limit,
+                    )
+                if len(self._out) > self._limit:
+                    self._finish(CallStatus.OUTPUT_LIMIT)
+                else:
+                    self._finish(None)
+                return True
+            if time.monotonic() >= end:
+                return False
+
+    def signal(self, signum: int) -> bool:
+        popen = self._popen
+        if popen is None or self._result is not None or popen.poll() is not None:
+            return False  # reaped (or never started): the pid is not ours to signal any more
+        try:
+            os.kill(popen.pid, signum)  # an unreaped child keeps its pid, so this is the child
+        except ProcessLookupError:
+            return False
+        return True
+
+    def end_group(self, grace: float | None = None) -> None:
+        popen = self._popen
+        if popen is None:
+            return
+        if popen.returncode is not None and not _group_alive(popen.pid):
+            return
+        self._gateway._end_group(popen, self._grace if grace is None else grace)
+
+    def result(self) -> CallResult:
+        if self._result is None:
+            self.end_group()
+            self.wait(0)
+            if self._result is None:
+                self._finish(CallStatus.TIMEOUT)
+        assert self._result is not None
+        return self._result
+
+    def close(self) -> None:
+        if self._result is None:
+            popen = self._popen
+            if popen is not None and popen.poll() is None:
+                self.end_group()
+            self._finish(CallStatus.TIMEOUT)
+        self._release()
+
+    def abandon(self) -> None:
+        self._release()
+        if self._result is None:
+            self._result = CallResult(CallStatus.TIMEOUT, detail="abandoned")
+
+    # -- internals -----------------------------------------------------------------------------
+
+    def _finish(self, failure: CallStatus | None) -> None:
+        popen = self._popen
+        assert popen is not None
+        if failure is not None:
+            self._gateway._end_group(popen, self._grace)
+            self._result = CallResult(
+                failure,
+                stdout=_text(self._out[: self._limit]),
+                stderr=_text(self._err[: self._limit]),
+                detail=_detail(failure, self._timeout, self._limit),
+            )
+        else:
+            code = popen.returncode
+            text = _text(self._out[: self._limit]), _text(self._err[: self._limit])
+            if code < 0:
+                self._result = CallResult(
+                    CallStatus.SIGNALED, stdout=text[0], stderr=text[1], signal=-code
+                )
+            else:
+                self._result = CallResult(CallStatus.EXITED, code, text[0], text[1])
+        self._release()
+
+    def _release(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._selector is not None:
+            self._selector.close()
+        popen = self._popen
+        if popen is not None:
+            for stream in (popen.stdin, popen.stdout, popen.stderr):
+                if stream is not None:
+                    stream.close()
+
+    def __enter__(self) -> ProcessHandle:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
 class SystemGateway:
     """The real thing."""
 
@@ -352,6 +592,7 @@ class SystemGateway:
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
         kill_grace: float | None = None,
         on_start: Callable[[int], None] | None = None,
+        cancel: threading.Event | None = None,
     ) -> CallResult:
         return self._run(
             argv,
@@ -362,7 +603,37 @@ class SystemGateway:
             stdout_limit=stdout_limit,
             kill_grace=kill_grace,
             on_start=on_start,
+            cancel=cancel,
         )
+
+    def spawn(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        kill_grace: float | None = None,
+    ) -> ProcessHandle:
+        data = _check_call(argv, timeout, stdin, env, stdout_limit, kill_grace, False)
+        try:
+            popen = subprocess.Popen(
+                list(argv),
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=None if env is None else dict(env),
+                cwd=cwd,
+                process_group=0,
+                close_fds=True,
+                preexec_fn=_spawn_preexec(),
+            )
+        except OSError as exc:
+            failed = CallResult(CallStatus.SPAWN_FAILED, detail=f"{type(exc).__name__}: {exc}")
+            return _SystemHandle(self, None, data, timeout, stdout_limit, kill_grace, failed)
+        return _SystemHandle(self, popen, data, timeout, stdout_limit, kill_grace, None)
 
     def run_hook(
         self,
@@ -404,38 +675,13 @@ class SystemGateway:
         """``run``; with ``escape`` the bytes that are not UTF-8 survive a round trip: output is
         decoded and stdin encoded with ``surrogateescape`` (the crontab, which holds the user's
         own lines and must come back byte for byte)."""
-        if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
-            raise ValueError("argv must be a non-empty list of strings without NUL")
-        if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("timeout must be a finite positive number")
-        if stdout_limit <= 0:
-            raise ValueError("stdout_limit must be positive")
-        if kill_grace is not None and (
-            isinstance(kill_grace, bool)
-            or not isinstance(kill_grace, (int, float))
-            or not math.isfinite(kill_grace)
-            or kill_grace <= 0
-        ):
-            raise ValueError("kill_grace must be a finite positive number")
-        if env is not None:
-            for name, value in env.items():
-                if (
-                    not isinstance(name, str)
-                    or not isinstance(value, str)
-                    or not name
-                    or "=" in name
-                    or "\0" in name
-                    or "\0" in value
-                ):
-                    raise ValueError(
-                        "env must map non-empty names (no '=' or NUL) to strings without NUL"
-                    )
-        # Strict: a lone surrogate is a bug in the caller, refused before anything is started.
-        data = (
-            stdin.encode("utf-8", "surrogateescape" if escape else "strict")
-            if stdin is not None
-            else None
-        )
+        data = _check_call(argv, timeout, stdin, env, stdout_limit, kill_grace, escape)
+        if cancel is not None and cancel.is_set():
+            # Already cancelled (a signal): nothing is spawned, like a call ended by its timeout.
+            return CallResult(
+                CallStatus.TIMEOUT,
+                detail="cancelled before it started",
+            )
         try:
             popen = subprocess.Popen(
                 list(argv),
@@ -446,6 +692,7 @@ class SystemGateway:
                 cwd=cwd,
                 process_group=0,  # the child leads its own process group (pgid == pid)
                 close_fds=True,
+                preexec_fn=_spawn_preexec(),
             )
         except OSError as exc:
             return CallResult(CallStatus.SPAWN_FAILED, detail=f"{type(exc).__name__}: {exc}")
@@ -905,6 +1152,52 @@ def _is_zone(name: str) -> bool:
     return True
 
 
+def _check_call(
+    argv: Sequence[str],
+    timeout: float,
+    stdin: str | None,
+    env: Mapping[str, str] | None,
+    stdout_limit: int,
+    kill_grace: float | None,
+    escape: bool,
+) -> bytes | None:
+    """The argument checks of every call (``ValueError``, before anything is started); returns
+    the encoded stdin."""
+    if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
+        raise ValueError("argv must be a non-empty list of strings without NUL")
+    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a finite positive number")
+    if stdout_limit <= 0:
+        raise ValueError("stdout_limit must be positive")
+    if kill_grace is not None and (
+        isinstance(kill_grace, bool)
+        or not isinstance(kill_grace, (int, float))
+        or not math.isfinite(kill_grace)
+        or kill_grace <= 0
+    ):
+        raise ValueError("kill_grace must be a finite positive number")
+    if env is not None:
+        for name, value in env.items():
+            if (
+                not isinstance(name, str)
+                or not isinstance(value, str)
+                or not name
+                or "=" in name
+                or "\0" in name
+                or "\0" in value
+            ):
+                raise ValueError(
+                    "env must map non-empty names (no '=' or NUL) to strings without NUL"
+                )
+    # Strict: a lone surrogate is a bug in the caller, refused before anything is started.
+    data = (
+        stdin.encode("utf-8", "surrogateescape" if escape else "strict")
+        if stdin is not None
+        else None
+    )
+    return data
+
+
 def _detail(failure: CallStatus, timeout: float, stdout_limit: int) -> str:
     if failure is CallStatus.OUTPUT_LIMIT:
         return f"stdout cap exceeded (cap {stdout_limit} bytes)"
@@ -1005,6 +1298,25 @@ def _parse_ps_start(text: str) -> str | None:
     if parts[0][:1] in ("Z", "X"):
         return None
     return " ".join(parts[1].split())
+
+
+def _reset_terminal_signals() -> None:
+    """``preexec_fn`` of a child (runs after the fork, before the exec): the three terminal signals
+    back to their default. Only signal.signal, no allocation worth the name."""
+    for sig in _TERMINAL_SIGNALS:
+        try:
+            signal.signal(sig, signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
+
+
+def _spawn_preexec() -> Callable[[], None] | None:
+    """The ``preexec_fn`` of a child: the reset of the terminal signals, but only when one of them
+    is ignored in this process (a handler needs no reset: ``exec`` does it). A ``preexec_fn`` is not
+    safe in a process with other threads, so the common case, where it is not needed, avoids it."""
+    if any(signal.getsignal(sig) is signal.SIG_IGN for sig in _TERMINAL_SIGNALS):
+        return _reset_terminal_signals
+    return None
 
 
 def _signal_group(pgid: int, sig: int) -> None:

@@ -314,14 +314,20 @@ def run_hooks(
     payload: HookPayload,
     *,
     flag_decision_ids: Sequence[str] = (),
+    cancel: threading.Event | None = None,
 ) -> HookOutcome:
     """Run the entries configured for ``payload.hook`` and return what they decided. Never raises
-    for what a hook does; the caller must not call it in a dry run or with a write lock held."""
+    for what a hook does; the caller must not call it in a dry run or with a write lock held.
+
+    ``cancel`` (set by the first signal of a retro run, ``interrupt.Signals.watch``) ends the group
+    of the entry that runs (SIGTERM, 5 s, SIGKILL) and every later entry is skipped; the caller
+    reads the signal, not the outcome. A ``pre-retro`` entry ended that way vetoes, which the
+    caller discards because the retro is canceled."""
     hook = payload.hook
     entries = entries_for(settings, hook)
     if hook == PRE_RETRO:
-        return _run_pre(gateway, entries, payload, flag_decision_ids)
-    return _run_post(gateway, entries, payload)
+        return _run_pre(gateway, entries, payload, flag_decision_ids, cancel)
+    return _run_post(gateway, entries, payload, cancel)
 
 
 def _run_pre(
@@ -329,13 +335,14 @@ def _run_pre(
     entries: Sequence[PreHook | PostHook],
     payload: HookPayload,
     flag_ids: Sequence[str],
+    cancel: threading.Event | None = None,
 ) -> HookOutcome:
     ids: list[str] = list(dict.fromkeys(flag_ids))
     results: list[EntryResult] = []
     ignored = 0
     decision = Decision.ALLOW
     for index, entry in enumerate(entries):
-        call = _call(gateway, entry, payload)
+        call = _call(gateway, entry, payload, cancel)
         result = _classify(PRE_RETRO, index, call, False)
         results.append(result)
         if result.status not in ("ok", "escalate"):
@@ -363,11 +370,16 @@ def _run_pre(
 
 
 def _run_post(
-    gateway: Gateway, entries: Sequence[PreHook | PostHook], payload: HookPayload
+    gateway: Gateway,
+    entries: Sequence[PreHook | PostHook],
+    payload: HookPayload,
+    external: threading.Event | None = None,
 ) -> HookOutcome:
     slots: list[EntryResult | None] = [None] * len(entries)
     threads: list[threading.Thread] = []
-    cancel = threading.Event()  # set on an interrupt: every running hook group is ended
+    # set on an interrupt (an exception here, or the caller's event): every running hook group is
+    # ended
+    cancel = external if external is not None else threading.Event()
 
     def work(index: int, entry: PostHook) -> None:
         slots[index] = _classify(

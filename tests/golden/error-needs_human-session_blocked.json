@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "needs_human",
+    "details": {
+      "reason": "session_blocked",
+      "retro_id": "ra-aaaaaaaa"
+    },
+    "message": "the retro session needs a human"
+  }
+}

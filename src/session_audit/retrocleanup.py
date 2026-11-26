@@ -111,11 +111,12 @@ def load_session_row(store: Store, csession_id: str) -> SessionRow | None:
 
 def call(ctx: Context, *argv: str, timeout: float | None = None) -> CallResult:
     """One claude-session call: its own process group, a timeout (``CALL_TIMEOUT``), a capped
-    output."""
+    output; ``ctx.call_cancel``, when set, ends it early (a failed call, never a 0 or a 10)."""
     return ctx.gateway.run(
         [ctx.settings.harness.claude_session_cmd, *argv],
         timeout=CALL_TIMEOUT if timeout is None else timeout,
         stdout_limit=OUTPUT_LIMIT,
+        cancel=ctx.call_cancel,
     )
 
 

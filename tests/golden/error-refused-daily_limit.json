@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "refused",
+    "details": {
+      "limit": 1,
+      "reason": "daily_limit"
+    },
+    "message": "the daily retro limit is reached"
+  }
+}

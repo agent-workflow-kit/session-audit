@@ -56,6 +56,14 @@ class RetroGateway(TickGateway):
             return CallResult(CallStatus.SPAWN_FAILED, detail="FileNotFoundError: scripted")
         return CallResult(CallStatus.EXITED, 0, stdout=self.version)
 
+    def spawn(self, argv: Any, **kwargs: Any) -> Any:
+        """The adopting ``exec`` of a retro run: the same scripted program as ``run``."""
+        self.runs.append(list(argv))
+        if self.fake is None:
+            raise AssertionError(f"retro run must not spawn {list(argv)!r}")
+        forwarded = {**kwargs, "env": self.fake.env()}
+        return SystemGateway.spawn(self, [str(self.fake.program), *list(argv)[1:]], **forwarded)
+
     def sleep(self, seconds: float) -> None:
         if threading.current_thread() is not threading.main_thread():
             time.sleep(0.001)  # a lease renewal thread: neither recorded nor moving the clock

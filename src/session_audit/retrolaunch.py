@@ -22,10 +22,19 @@ What claude-session printed is parsed strictly; anything outside the mapping is
 nor ``stop``. Untrusted text never reaches argv or the environment: the prompt and the inputs are
 files.
 
-Signals are #28's: no handler matrix here. The PID of the exec child is kept in ``exec_pid``
-(``Gateway.run(on_start=...)``) for it. A process that dies or is interrupted leaves the row in the
-state of its last write; ``retrostate`` lists the states ``retrorecovery`` (#27) handles. On an
-exception that is not a final state the lease is released so recovery can take the row at once.
+Signals (#28). ``run_launch`` defers the first SIGHUP, SIGINT or SIGTERM (``interrupt.Signals``)
+from step 13 on: the handler only records it, so a signal never lands inside a transaction, a
+compare-and-set or a ``finally`` block, and the Launcher polls it at its safe points. What happens
+per phase is the table in ``docs/design.md`` (Signals); in short: a signal before the row is an
+exit by signal with nothing stored; during the ``pre-retro`` hook the hook's group is ended, during
+``start`` the call finishes and the recorded session is stopped, during ``exec`` the same signal is
+forwarded once to the exec child (``Gateway.spawn`` handle), then after ``FORWARD_WAIT`` the session
+is stopped by its recorded id; every one of them then collects, ends ``canceled/interrupted``,
+cleans up, fires ``post-retro`` once and exits 128 + the signal. A second signal raises
+``Interrupted`` at once: the lease is released (compare-and-set) and recovery finishes the rest.
+A process that dies or is interrupted leaves the row in the state of its last write;
+``retrostate`` lists the states ``retrorecovery`` (#27) handles. On an exception the lease is
+released so recovery can take the row at once.
 """
 
 from __future__ import annotations
@@ -36,12 +45,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import errors, fencing, hooks, launchplan, retrofiles
+from . import errors, fencing, hooks, launchplan, retro, retrofiles
 from .command import Context
 from .config import home_dir, profile_issues
 from .fencing import FencedDigest
-from .gateway import CallResult, CallStatus
+from .gateway import CallResult, CallStatus, ProcessHandle
 from .harness import Invalid
+from .interrupt import Interrupted, Signals
 from .retro import Prepared
 from .retroartifact import validate_and_store_artifact
 from .retrocleanup import OUTPUT_LIMIT, cleanup, collect, load_session_row, stop_session
@@ -60,13 +70,29 @@ from .retrooutcome import (
     single_csession_id,
     validated_session,
 )
-from .retrostate import FINAL_STATES, Inserted, Retro, Reused, insert_retro, scope_object
+from .retrostate import Inserted, Retro, Reused, insert_retro, scope_object
 
-__all__ = ["EXEC_SLACK", "START_TIMEOUT", "TERM_WAIT", "run_launch"]
+__all__ = [
+    "CLEANUP_BOUND",
+    "END_GRACE",
+    "EXEC_SLACK",
+    "FORWARD_WAIT",
+    "START_TIMEOUT",
+    "STOP_WAIT",
+    "TERM_WAIT",
+    "run_launch",
+]
 
 START_TIMEOUT = 120.0  # ``start`` (Retro launch item 6)
 EXEC_SLACK = 600.0  # the deadline is the exec spawn plus the retro timeout plus 10 minutes
 TERM_WAIT = 30.0  # the exec child gets SIGTERM, then this long, then SIGKILL on its group
+FORWARD_WAIT = 30.0  # after the forwarded signal the exec child has this long, then ``stop``
+STOP_WAIT = 15.0  # after ``stop`` (its 5 s grace and some) the exec child's group is ended
+END_GRACE = 5.0  # the SIGTERM of that group, then this long, then SIGKILL
+EXEC_POLL = 0.1  # how often the wait for exec looks at the signals and the lease
+CLEANUP_BOUND = (
+    30.0  # the cleanup goes on this long after the signal or its start, whichever is later
+)
 OUTCOME_FILE_LIMIT = 1024 * 1024
 
 
@@ -101,19 +127,25 @@ def run_launch(
             hint="Its file and directories must be yours and not group or other writable.",
         )
     store = ctx.store()
-    inserted = insert_retro(ctx, store, args, prepared)
-    if isinstance(inserted, Reused):
-        on_reused(inserted.retro)
-        return 0
-    assert isinstance(inserted, Inserted)
-    with inserted.retro.lease:
+    signals = ctx.interrupts or Signals()
+    with signals.defer():
         try:
-            launcher = Launcher(ctx, args, prepared, launch, plan, inserted.retro)
-            return launcher.run()
-        except BaseException:
-            if inserted.retro.state not in FINAL_STATES:
-                inserted.retro.release()  # housekeeping may take the row at once
+            inserted = insert_retro(ctx, store, args, prepared)
+        except errors.CliError:
+            signals.raise_if_pending()  # a signal in step 13 that stored nothing: exit by signal
             raise
+        if isinstance(inserted, Reused):
+            signals.raise_if_pending()  # interrupted at step 13: nothing is printed
+            on_reused(inserted.retro)
+            return 0
+        assert isinstance(inserted, Inserted)
+        with inserted.retro.lease:
+            try:
+                launcher = Launcher(ctx, args, prepared, launch, plan, inserted.retro)
+                return launcher.run()
+            except BaseException:
+                inserted.retro.release()  # compare-and-set; housekeeping may take the row at once
+                raise
 
 
 class Launcher:
@@ -136,7 +168,7 @@ class Launcher:
         self.state_dir = ctx.state_path()
         self.command = ctx.settings.harness.claude_session_cmd
         self.sessions_root = os.path.dirname(os.path.dirname(plan.cwd))
-        self.exec_pid: int | None = None  # the exact exec child (for the signal handling of #28)
+        self.signals = ctx.interrupts or Signals()
         self.session: _Session | None = None
         self.files: RunFiles | None = None
         self.hook = hooks.HookOutcome()
@@ -145,6 +177,8 @@ class Launcher:
 
     def run(self) -> int:
         row, ctx, gw = self.row, self.ctx, self.gw
+        if self.signals.pending:  # a signal during step 13: the row exists, nothing else does
+            return self._canceled(delete_files=True)
         run_token = gw.token_urlsafe(24)
         fenced = fencing.finish_digest(
             self.prepared.digest, row.id, run_token, gw, self.prepared.csession_ids
@@ -154,6 +188,8 @@ class Launcher:
         retrofiles.check_digest_hash(fenced)
         self.hook = self._pre_retro(fenced)
         row.lease.raise_if_lost()
+        if self.signals.pending:  # the hook was ended by the signal (or the signal came after it)
+            return self._canceled(delete_files=True)
         if self.hook.decision is hooks.Decision.VETO:
             return self._end(Mapped("canceled", "hook_vetoed", 11), delete_files=True)
         if self.hook.decision is hooks.Decision.ESCALATE:
@@ -162,6 +198,8 @@ class Launcher:
         try:
             self.files = retrofiles.write_run_files(gw, self.state_dir, row.id, run_token, fenced)
         except FilesError as exc:
+            if self.signals.pending:  # a signal wins over the error
+                return self._canceled(refund=True, delete_files=False)
             ctx.note("session-audit: error: the retro's files cannot be written")
             return self._end(
                 Mapped(
@@ -176,9 +214,13 @@ class Launcher:
                 delete_files=False,
             )
         row.lease.raise_if_lost()
+        if self.signals.pending:  # canceled before ``start``: the model was never reached
+            return self._canceled(refund=True, delete_files=True)
         return self._launch()
 
     def _pre_retro(self, fenced: FencedDigest) -> hooks.HookOutcome:
+        if self.signals.pending:  # a signal since the top of ``run``: the hook is never started
+            return hooks.HookOutcome()
         payload = hooks.pre_retro_payload(
             self.gw,
             retro_id=self.row.id,
@@ -192,19 +234,22 @@ class Launcher:
             max_turns=self.launch.max_turns,
             timeout_seconds=int(self.launch.timeout.total_seconds()),
         )
-        outcome = hooks.run_hooks(
-            self.gw,
-            self.ctx.settings.hooks,
-            payload,
-            flag_decision_ids=tuple(self.args.decision_id or ()),
-        )
+        # a signal ends the hook's group (SIGTERM, 5 s, KILL); one already pending starts none
+        with self.signals.watch(preset=True) as cancel:
+            outcome = hooks.run_hooks(
+                self.gw,
+                self.ctx.settings.hooks,
+                payload,
+                flag_decision_ids=tuple(self.args.decision_id or ()),
+                cancel=cancel,
+            )
         for line in hooks.warning_text(outcome, hooks.PRE_RETRO):
             self.ctx.note(f"session-audit: {line}")
         return outcome
 
     def _mark_running(self, run_token: str, fenced: FencedDigest) -> None:
         now = self.gw.now()
-        day = now.astimezone(self.ctx.settings.zone()).strftime("%Y-%m-%d")
+        day = retro.day_of(self.ctx, now)
         row = self.row
 
         def starts(conn: Any) -> None:
@@ -239,6 +284,12 @@ class Launcher:
             stdout_limit=OUTPUT_LIMIT,
         )
         started, mapped = self._after_start(result)
+        if self.signals.pending:
+            # The start call finished (it is not interrupted); the session it allocated, when it
+            # is recorded, is stopped by its id, and the retro ends canceled before any exec.
+            if self.session is not None:
+                stop_session(self.ctx, self.session.csession_id)
+            return self._canceled(refund=True, delete_files=self.session is None)
         if mapped is not None:
             return self._end(mapped, refund=True, delete_files=self.session is None)
         assert started is not None
@@ -330,7 +381,7 @@ class Launcher:
         assert self.session is not None and self.files is not None
         csid = self.session.csession_id
         deadline = self.launch.timeout.total_seconds() + EXEC_SLACK
-        result = self.gw.run(
+        handle = self.gw.spawn(
             [
                 self.command,
                 "exec",
@@ -345,19 +396,29 @@ class Launcher:
             timeout=deadline,
             stdout_limit=OUTPUT_LIMIT,
             kill_grace=TERM_WAIT,
-            on_start=self._exec_started,
         )
-        # todo(#28): signal the exec child through a spawn handle that refuses after reap
-        # (on_exit before reap), not a bare pid: exec_pid can hold a reaped pid until this line.
-        self.exec_pid = None
+        try:
+            forwarded = self._await_exec(handle, csid)
+        except Interrupted:
+            handle.abandon()  # a second signal: exit at once, the child is left to recovery
+            raise
+        except BaseException:
+            handle.close()  # the lease was lost or something broke: no child outlives the tool
+            raise
+        result = handle.result()
+        handle.close()
         self.row.lease.raise_if_lost()
         timed_out = result.status is CallStatus.TIMEOUT
         if timed_out:
             stop_session(self.ctx, csid)
         outcome = None if timed_out else self._read_outcome(result, csid, started.run)
-        mapped = map_exec(result, outcome, deadline=timed_out)
+        mapped = map_exec(result, outcome, deadline=timed_out, forwarded=forwarded)
         collected = None
-        if timed_out or (outcome is not None and outcome.phase == "session"):
+        if (
+            timed_out
+            or forwarded is not None
+            or (outcome is not None and outcome.phase == "session")
+        ):
             collected = self._collect(csid)
         columns = self._collected_columns(collected, outcome)
         if (
@@ -370,8 +431,6 @@ class Launcher:
             # whose status does not show an active sandbox is failed; exits 14-18 keep their own
             # rows and the artifact is never read.
             mapped = Mapped("failed", "claude_session_error", 12)
-        if mapped.validate:
-            mapped = self._done(collected, columns)
         # A start is refunded only when the run never reached the model: the outcome says the
         # launch phase ended it and agrees with the process exit (11, 12 or 13). An outcome that
         # did not parse or disagrees proves nothing, so it is not.
@@ -382,10 +441,41 @@ class Launcher:
             and result.returncode == outcome.exit_code
             and outcome.exit_code in (11, 12, 13)
         )
+        if self.signals.pending and mapped.state != "canceled":
+            # The retro ends canceled whatever the child answered (a signal during exec, collect
+            # or before the artifact check); a signal that arrives during the artifact check
+            # itself lets that verdict stand (it is local and bounded, and may have stored the
+            # artifact).
+            return self._canceled(columns=columns, refund=refund)
+        if mapped.validate:
+            done = self._done(collected, columns)
+            if done is None:  # a signal as the validating write began: no artifact check
+                return self._canceled(columns=columns, refund=refund)
+            mapped = done
         return self._end(mapped, columns=columns, refund=refund)
 
-    def _exec_started(self, pid: int) -> None:
-        self.exec_pid = pid
+    def _await_exec(self, handle: ProcessHandle, csid: str) -> int | None:
+        """Wait for the exec child, serving its pipes, and run the signal rules of the Signals
+        section: the first signal is forwarded ONCE to the child (the handle refuses once it is
+        reaped); ``FORWARD_WAIT`` later, when it still runs, the session is stopped by its recorded
+        id; ``STOP_WAIT`` after that its group is ended. Returns the forwarded signal or None."""
+        forwarded: int | None = None
+        sent_at = 0.0
+        stopped_at: float | None = None
+        while not handle.wait(EXEC_POLL):
+            self.row.lease.raise_if_lost()
+            now = self.gw.monotonic()
+            first = self.signals.first
+            if first is not None and forwarded is None:
+                forwarded, sent_at = first, now
+                self.ctx.note("session-audit: interrupted: stopping the retro session")
+                handle.signal(first)
+            elif forwarded is not None and stopped_at is None and now - sent_at >= FORWARD_WAIT:
+                stop_session(self.ctx, csid)
+                stopped_at = self.gw.monotonic()
+            elif stopped_at is not None and now - stopped_at >= STOP_WAIT:
+                handle.end_group(END_GRACE)
+        return forwarded
 
     def _read_outcome(self, result: CallResult, csid: str, run: int) -> Outcome | None:
         """The outcome from stdout, the outcome file when stdout is not a complete outcome."""
@@ -433,12 +523,15 @@ class Launcher:
             }
         return {}
 
-    def _done(self, collected: Collected | None, columns: dict[str, Any]) -> Mapped:
+    def _done(self, collected: Collected | None, columns: dict[str, Any]) -> Mapped | None:
         """A run that ended ``done``: ``status`` must have answered (the sandbox rule already ran
-        in ``_exec``), then the artifact check (#29) on a retro in state ``validating``."""
+        in ``_exec``), then the artifact check (#29) on a retro in state ``validating``. None when
+        a signal is pending right after the validating write: the check never starts."""
         if collected is None:
             return Mapped("failed", "claude_session_error", 12)
         self.row.write("validating", columns=columns)
+        if self.signals.pending:
+            return None
         return validate_and_store_artifact(collected)
 
     # -- the end --------------------------------------------------------------------------
@@ -477,6 +570,8 @@ class Launcher:
                 retrofiles.remove_digest(self.gw, self.state_dir, row.id)
         self._post_hooks(mapped)
         row.release()
+        if self.signals.pending:
+            return self.signals.exit_code()  # exit by signal: no envelope
         error = mapped.error(row.id)
         if error is not None:
             raise error
@@ -489,11 +584,35 @@ class Launcher:
         session = load_session_row(row.store, csid)
         if session is None:
             return
+        # A signal (earlier or during the cleanup) lets it go on until CLEANUP_BOUND seconds after
+        # the signal or the start of the cleanup, whichever is later: a claude-session call in
+        # flight past that is ended and the row stays pending (housekeeping).
+        self.ctx.call_cancel = self.signals.bound(CLEANUP_BOUND)
         try:
             cleanup(self.ctx, row.store, session, row.lease)
         except errors.CliError:
             row.lease.raise_if_lost()  # the lease was taken over: stop
             self.ctx.note("session-audit: warning: the cleanup did not finish")
+        finally:
+            self.ctx.call_cancel = None
 
     def _post_hooks(self, mapped: Mapped) -> None:
-        self.row.post_hooks(mapped.state, mapped.reason)
+        with self.signals.watch() as cancel:  # a first signal here ends the hooks' groups
+            self.row.post_hooks(mapped.state, mapped.reason, cancel=cancel)
+
+    def _canceled(
+        self,
+        *,
+        columns: dict[str, Any] | None = None,
+        refund: bool = False,
+        delete_files: bool = False,
+    ) -> int:
+        """End ``canceled/interrupted`` (exit 128 + the first signal) with ``_end``'s cleanup and
+        ``post-retro``."""
+        self.ctx.note("session-audit: interrupted: the retro is canceled")
+        return self._end(
+            Mapped("canceled", "interrupted", self.signals.exit_code()),
+            columns=columns,
+            refund=refund,
+            delete_files=delete_files,
+        )
