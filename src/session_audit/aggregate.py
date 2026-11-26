@@ -237,11 +237,10 @@ class UsageResult:
     truncated: bool
 
 
-def window_bounds(
-    since: datetime | None, until: datetime | None
-) -> tuple[int | None, int | None]:
+def window_bounds(since: datetime | None, until: datetime | None) -> tuple[int | None, int | None]:
     """Event ``ts`` bounds in epoch milliseconds for ``S <= ts < U``, exactly: an instant with
     microseconds rounds up, so ``ts * 1000 >= us(S)`` and ``ts * 1000 < us(U)`` hold as integers."""
+
     def ms(moment: datetime | None) -> int | None:
         return None if moment is None else -(-_us(moment) // 1000)
 
@@ -249,7 +248,12 @@ def window_bounds(
 
 
 def _parts(
-    dim: str, meta: Meta, slot: int | None, model: str | None, tool: str | None, kind: str,
+    dim: str,
+    meta: Meta,
+    slot: int | None,
+    model: str | None,
+    tool: str | None,
+    kind: str,
     bucketer: derive.Bucketer,
 ) -> Sequence[str | None]:
     if dim in TIME_DIMENSIONS:
@@ -273,7 +277,9 @@ def _order(key: tuple[str | None, ...]) -> tuple[tuple[bool, str], ...]:
     return tuple((part is None, part or "") for part in key)
 
 
-def usage(conn: sqlite3.Connection | None, ctx: Context, filters: Filters, q: UsageQuery) -> UsageResult:
+def usage(
+    conn: sqlite3.Connection | None, ctx: Context, filters: Filters, q: UsageQuery
+) -> UsageResult:
     """Rows, totals and ``truncated`` of one ``usage`` run (``filters`` has no time bounds)."""
     prices = ctx.settings.prices
     bucketer = derive.Bucketer(q.zone)
@@ -302,7 +308,9 @@ def usage(conn: sqlite3.Connection | None, ctx: Context, filters: Filters, q: Us
 
     def row_json(key: tuple[str | None, ...], acc: Acc) -> dict[str, object]:
         doc: dict[str, object] = {"key": list(key)}
-        doc.update(acc.to_json(tool_view=q.tool_view, time_filtered=flat[0], splits_session=flat[1]))
+        doc.update(
+            acc.to_json(tool_view=q.tool_view, time_filtered=flat[0], splits_session=flat[1])
+        )
         return doc
 
     if q.dims[0] in TIME_DIMENSIONS:
@@ -318,7 +326,9 @@ def usage(conn: sqlite3.Connection | None, ctx: Context, filters: Filters, q: Us
     best = heapq.nsmallest(q.limit + 1, rows.items(), key=sort_key)
     truncated = len(best) > q.limit
     out_rows = [row_json(key, acc) for key, acc in best[: q.limit]]
-    totals_doc = totals.to_json(tool_view=q.tool_view, time_filtered=q.time_filtered, splits_session=False)
+    totals_doc = totals.to_json(
+        tool_view=q.tool_view, time_filtered=q.time_filtered, splits_session=False
+    )
     return UsageResult(out_rows, totals_doc, truncated)
 
 
@@ -383,14 +393,17 @@ def _chunk(
 # --- export -------------------------------------------------------------------------------------
 
 
-def session_lines(conn: sqlite3.Connection | None, ctx: Context, filters: Filters) -> Iterator[dict[str, object]]:
+def session_lines(
+    conn: sqlite3.Connection | None, ctx: Context, filters: Filters
+) -> Iterator[dict[str, object]]:
     """``export sessions``: the Session objects, oldest first (``started_at`` ascending, no start
     last, then id). Pass one keeps only (start, id) of each selected session; pass two derives
     the objects in batches in that order, so no list of objects is ever built."""
     if conn is None:
         return
     order = sorted(
-        (v.started_ms is None, v.started_ms or 0, v.session_id) for v, _s in selected(conn, ctx, filters)
+        (v.started_ms is None, v.started_ms or 0, v.session_id)
+        for v, _s in selected(conn, ctx, filters)
     )
     index = snapshot_index(conn)
     for start in range(0, len(order), derive.BATCH):

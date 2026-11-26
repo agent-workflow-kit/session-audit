@@ -10,9 +10,8 @@ import argparse
 import dataclasses
 import sqlite3
 
-from .. import aggregate
+from .. import aggregate, errors
 from .. import args as a
-from .. import errors
 from ..command import Command, Context
 from ..grammar import GrammarError, parse_label_key, parse_time_zone, parse_when
 from ..sessionquery import build_filters, freshness, one_line, put, read_store
@@ -91,7 +90,9 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     query = aggregate.UsageQuery(tuple(args.by), zone, since_ms, until_ms, args.limit)
     session_filters = dataclasses.replace(filters, since=None, until=None)
 
-    def read(conn: sqlite3.Connection | None) -> tuple[aggregate.UsageResult, dict[str, str | None]]:
+    def read(
+        conn: sqlite3.Connection | None,
+    ) -> tuple[aggregate.UsageResult, dict[str, str | None]]:
         return aggregate.usage(conn, ctx, session_filters, query), freshness(conn)
 
     result, store = read_store(ctx, read)

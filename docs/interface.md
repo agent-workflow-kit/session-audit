@@ -91,7 +91,7 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 - `--project P` matches the stored project (the first non-empty `cwd`, see Session object) by path boundary with bound parameters: `project = P or substr(project, 1, len(P) + 1) = P || '/'`, after stripping one trailing `/` from `P`. There is no wildcard and no symlink resolution.
 - `--kind` and `--outcome` match only sessions with a harness snapshot. `--model` is an exact model name among the session's models (1 to 128 characters, no control characters, DEL or surrogates; exit 2 otherwise). `--entrypoint` filters on `interactive` or `headless`.
 - Labels are unauthenticated hints: a label scope is not a confidentiality boundary (see Safety).
-- `--include-self-improve` (taken by `sessions` now; `usage`, `export` and `retro run`'s scope adopt it in their own issues; not `ingest`): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
+- `--include-self-improve` (taken by `sessions`, `usage` and `export`; `retro run`'s scope adopts it in its own issue; not `ingest`; `export retros` ignores it): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
 
 ## Time arguments
 
@@ -148,7 +148,7 @@ Lists stored sessions, newest first by default, filtered as in Session filters. 
 
 ### `usage`
 
-`session-audit usage --by DIM[,DIM] [filters as in Session filters] [--tz ZONE] [--limit N] [--json]`
+`session-audit usage --by DIM[,DIM] [filters as in Session filters] [--include-self-improve] [--tz ZONE] [--limit N] [--json]`
 
 Deterministic analytics over counted events (see Counting rules). Dimensions: `day`, `week`, `month`, `project`, `model`, `kind`, `entrypoint`, `tool`, `session`, `label=<key>`. At most two dimensions, each at most once. `--tz` overrides `time_zone` for day, week and month bucketing; a null slot gives a null `day`, `week` or `month` key. Output: `{"by": [...], "rows": [...], "totals": {...}, "truncated": bool, "store": {...}}` (`schemas/cli/usage.json`). `key` is an array with one entry per dimension in `by` (null when a value is missing), in the same order, never a joined string. `totals` has the row fields without `key`.
 
@@ -159,6 +159,7 @@ Deterministic analytics over counted events (see Counting rules). Dimensions: `d
 - Dimension `label=<key>`: a session contributes to the row of each value its snapshot has for the key; rows may overlap; `totals` do not.
 - Order: by `key` ascending when the first dimension is `day`, `week` or `month`; otherwise by `tokens.input + output + cache_read + cache_write` descending (null last), then `key` ascending. `--limit` default 100, 1 to 1000 (else exit 2); `truncated` is true when more rows matched. `--sort` does not apply.
 - A row never mixes cost bases silently.
+- A session contributes to a row or to `totals` only through counted events inside the `--since`/`--until` window (a session with none is in no row and not in `totals.sessions`). Under the `tool` dimension a row counts only tool calls, tool errors and denials, and `totals` has the same null fields as the rows. Memory is bounded by the number of distinct groups, never by events. `export sessions` orders by `started_at` ascending (no start last, then session id); `export usage` by `day` ascending (null last), then session id, agent (main first) and model (null last); both write each line as soon as it exists, and a failed write to standard output ends the run with exit 1.
 
 ### `show`
 
@@ -210,7 +211,7 @@ Applies the retention rules (see Retention) and runs the housekeeping step of Re
 
 ### `export`
 
-`session-audit export {sessions|usage|retros} [--since WHEN] [--json]`
+`session-audit export {sessions|usage|retros} [--since WHEN] [--include-self-improve] [--json]`
 
 Prints store rows as JSON lines (one object per line, oldest first, no limit; the output streams). `--since WHEN` keeps sessions with `ended_at >= WHEN` (`export sessions`), usage lines whose `day` is on or after the day of `WHEN` in `time_zone` (`export usage`) and retros with `created_at >= WHEN` (`export retros`). Output holds the same fields as the matching read commands and no text beyond a retro's artifact. `export sessions` lines are the Session object, `export usage` lines the usage row of `show`, and `export retros` lines the full Retro object with its artifact text (`schemas/cli/export-*.json`). The output is always JSON lines; `--json` is accepted and changes nothing.
 

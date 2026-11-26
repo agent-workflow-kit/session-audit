@@ -22,7 +22,7 @@ import json
 import os
 import re
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
@@ -514,7 +514,7 @@ def usage_rows(
 
 def read_stream[T](
     ctx: Context, work: Callable[[sqlite3.Connection | None], Iterator[T]]
-) -> Iterator[T]:
+) -> Generator[T]:
     """``read_store`` for a command that streams: the items of ``work`` are yielded as they are
     produced inside one read transaction. A torn read before the first item reopens the store
     and retries once (as ``read_store``); after an item was yielded nothing can be retried

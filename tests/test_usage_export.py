@@ -76,7 +76,8 @@ def stamped(line: bytes, iso: str) -> bytes:
 def seed(corpus: Corpus, capsys: pytest.CaptureFixture[str], gw: TickGateway) -> None:
     """S1 /a/b interactive: two days, two models, a tool call that errors, a turn.
     S2 /a/bc headless: one day. S3 /a/b/c: a later week and month."""
-    write_main(corpus, 
+    write_main(
+        corpus,
         S1,
         [
             asst("2026-11-20T23:50:00.000Z", "a1", model="model-a", cwd="/a/b", entry="cli"),
@@ -87,7 +88,8 @@ def seed(corpus: Corpus, capsys: pytest.CaptureFixture[str], gw: TickGateway) ->
         ],
         project="p1",
     )
-    write_main(corpus, 
+    write_main(
+        corpus,
         S2,
         [
             asst(f"2026-11-22T10:0{i}:00.000Z", f"b{i}", out=50, cwd="/a/bc", entry="sdk-cli")
@@ -95,8 +97,11 @@ def seed(corpus: Corpus, capsys: pytest.CaptureFixture[str], gw: TickGateway) ->
         ],
         project="p2",
     )
-    write_main(corpus, 
-        S3, [asst("2026-12-01T01:00:00.000Z", "c1", out=7, model="model-b", cwd="/a/b/c")], project="p3"
+    write_main(
+        corpus,
+        S3,
+        [asst("2026-12-01T01:00:00.000Z", "c1", out=7, model="model-b", cwd="/a/b/c")],
+        project="p3",
     )
     assert ingest(capsys, gw).code == 0
 
@@ -342,11 +347,21 @@ def cost_line(value: float, iso: str) -> bytes:
 def test_reported_usd_is_all_or_null_and_null_when_a_dimension_splits(
     gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    write_main(corpus, 
-        S1, [asst("2026-11-20T10:00:00.000Z", "a1", cwd="/p"), cost_line(1.5, "2026-11-20T10:01:00.000Z")]
+    write_main(
+        corpus,
+        S1,
+        [
+            asst("2026-11-20T10:00:00.000Z", "a1", cwd="/p"),
+            cost_line(1.5, "2026-11-20T10:01:00.000Z"),
+        ],
     )
-    write_main(corpus, 
-        S2, [asst("2026-11-21T10:00:00.000Z", "b1", cwd="/p"), cost_line(2.25, "2026-11-21T10:01:00.000Z")],
+    write_main(
+        corpus,
+        S2,
+        [
+            asst("2026-11-21T10:00:00.000Z", "b1", cwd="/p"),
+            cost_line(2.25, "2026-11-21T10:01:00.000Z"),
+        ],
         project="p2",
     )
     write_main(corpus, S3, [asst("2026-11-22T10:00:00.000Z", "c1", cwd="/q")], project="p3")
@@ -402,9 +417,17 @@ def test_sessions_with_null_times_have_null_day_rows_sorted_last(
     gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str]
 ) -> None:
     seed(corpus, capsys, gw)
-    write_main(corpus, 
+    write_main(
+        corpus,
         "44444444-4444-4444-8444-444444444444",
-        [raw({"type": "assistant", "message": {"id": "n1", "model": "m", "usage": {"output_tokens": 4}}})],
+        [
+            raw(
+                {
+                    "type": "assistant",
+                    "message": {"id": "n1", "model": "m", "usage": {"output_tokens": 4}},
+                }
+            )
+        ],
         project="p4",
     )
     assert ingest(capsys, gw).code == 0
@@ -412,7 +435,9 @@ def test_sessions_with_null_times_have_null_day_rows_sorted_last(
     assert keys(result)[-1] == [None]
     assert "no_timestamps" in result.doc["rows"][-1]["flags"]
     assert "no_timestamps" in result.doc["totals"]["flags"]
-    assert usage(capsys, gw, "--by", "session", "--since", "2000-01-01").doc["totals"]["sessions"] == 3
+    assert (
+        usage(capsys, gw, "--by", "session", "--since", "2000-01-01").doc["totals"]["sessions"] == 3
+    )
 
 
 def test_hostile_text_is_sanitized_once_in_the_table(
@@ -449,9 +474,7 @@ def test_the_event_statements_use_the_session_index(
                 for window in (False, True):
                     sql = aggregate.usage_sql(model=model, tool=tool, marks=2, window=window)
                     params: list[Any] = [S1, S2] + ([0, 1] if window else [])
-                    plan = " ".join(
-                        r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)
-                    )
+                    plan = " ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params))
                     assert "events_session_counted" in plan, plan
                     assert "SCAN e" not in plan and "SCAN events" not in plan, plan
     finally:
@@ -482,7 +505,8 @@ def make_many(home: Path, sessions: int, per: int) -> None:
                 slot = 1_800_000_000 // 900 + (s % 40) * 96 + e
                 db.execute(
                     "INSERT INTO events (key, file_id, line_offset, kind, ts, slot, session_id, "
-                    "model, output_tokens, counted) VALUES (?, ?, ?, 'message', ?, ?, ?, 'm', 3, 1)",
+                    "model, output_tokens, counted) "
+                    "VALUES (?, ?, ?, 'message', ?, ?, ?, 'm', 3, 1)",
                     (f"{s:08x}{e:08x}".ljust(16, "0"), fid, e, slot * 900_000, slot, sid),
                 )
         db.execute("COMMIT")
@@ -491,7 +515,9 @@ def make_many(home: Path, sessions: int, per: int) -> None:
 
 
 def test_a_large_filter_set_is_chunked_and_agrees_with_one_big_chunk(
-    gw: TickGateway, capsys: pytest.CaptureFixture[str], _private_environment: Path,
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     make_many(_private_environment, 1300, 3)
@@ -560,9 +586,7 @@ def test_export_empty_store_prints_nothing(
     assert not state_dir_of(_private_environment).exists()
 
 
-def test_export_retros_is_still_a_stub(
-    gw: TickGateway, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_export_retros_is_still_a_stub(gw: TickGateway, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(capsys, gw, "export", "retros").code == 1
 
 
@@ -585,7 +609,10 @@ class ClosedPipe:
 
 
 def test_a_closed_pipe_ends_the_export_with_exit_1(
-    gw: TickGateway, corpus: Corpus, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    gw: TickGateway,
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed(corpus, capsys, gw)
     pipe = ClosedPipe(1)
@@ -609,7 +636,9 @@ def test_export_usage_is_streamed_with_bounded_memory(
     ctx.settings = config.Settings()
     lines = read_stream(
         ctx,
-        lambda conn: aggregate.usage_lines(conn, ctx, aggregate.Filters(), ctx.settings.zone(), None, None),
+        lambda conn: aggregate.usage_lines(
+            conn, ctx, aggregate.Filters(), ctx.settings.zone(), None, None
+        ),
     )
     tracemalloc.start()
     first = next(lines)
@@ -626,7 +655,9 @@ def test_export_usage_is_streamed_with_bounded_memory(
 
 
 def test_export_sessions_derives_in_batches_not_all_at_once(
-    gw: TickGateway, capsys: pytest.CaptureFixture[str], _private_environment: Path,
+    gw: TickGateway,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     make_many(_private_environment, 450, 1)
@@ -676,4 +707,5 @@ def test_a_huge_stored_label_value_is_cut_to_the_schema_cap(
     add_run(_private_environment, "cs-aaaaaaaa", [S1], labels=["k=" + "v" * 9000])
     result = usage(capsys, gw, "--by", "label=k")
     assert result.code == 0
-    assert len(result.doc["rows"][0]["key"][0]) == 4096  # the schema validated it
+    (long,) = [k[0] for k in keys(result) if k[0] is not None]
+    assert len(long) == 4096  # the schema validated it
