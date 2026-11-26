@@ -114,7 +114,6 @@ class ArtifactContext:
 
 
 def bundled_marker(gateway: Gateway, plugin_dir: str) -> str:
-    # todo(#30): marker.txt ships with the skill; until then every bundled run ends marker_mismatch
     """The marker line of the bundled skill, or ``""`` when the file is unusable. ``""`` is a
     marker that exists and that no artifact can equal (the schema needs 1 character), so a bundled
     skill whose marker cannot be read fails closed with ``marker_mismatch``."""
