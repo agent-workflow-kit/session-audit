@@ -36,10 +36,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import errors, lease, retro
+from . import errors, hooks, lease, retro
 from .command import Context
 from .gateway import Gateway
-from .grammar import format_timestamp
+from .grammar import format_timestamp, is_csession_id
 from .retroview import encode_resolved_scope, encode_session_map, scope_text
 from .store import Store
 
@@ -103,6 +103,7 @@ class Retro:
         self.state = "digesting"
         self.reason: str | None = None
         self.cost_usd: float | None = None
+        self.actor: str | None = None  # overrides ``ctx.actor`` in the log (recovery: auto:recover)
 
     # -- writes ---------------------------------------------------------------------------
 
@@ -154,7 +155,7 @@ class Retro:
         candidates: int | None = None,
     ) -> None:
         self.store.log.append(
-            self.ctx.actor or "auto:unknown",
+            self.actor or self.ctx.actor or "auto:unknown",
             "retro_state",
             retro_id=self.id,
             state=self.state,
@@ -177,6 +178,36 @@ class Retro:
             self.lease.guarded_update(conn, names, tuple(columns.values()))
         if "cost_usd" in columns:
             self.cost_usd = columns["cost_usd"]
+
+    def post_hooks(
+        self, state: str, reason: str | None, *, findings: int = 0, candidates: int = 0
+    ) -> None:
+        """``post-retro`` once for the final state (and ``post-attention`` ``retro_failed`` for
+        ``failed``), best effort: a failing entry is a stderr warning. Holds no write lock."""
+        gw, settings = self.ctx.gateway, self.ctx.settings.hooks
+        payload = hooks.post_retro_payload(
+            gw,
+            retro_id=self.id,
+            state=state,
+            reason=reason,
+            findings=findings,
+            candidates=candidates,
+            cost_usd=self.cost_usd,
+        )
+        for line in hooks.warning_text(hooks.run_hooks(gw, settings, payload), hooks.POST_RETRO):
+            self.ctx.note(f"session-audit: {line}")
+        if state == "failed":
+            csid = self.csession_id
+            failure = hooks.retro_failed_payload(
+                gw,
+                retro_id=self.id,
+                failure_reason=reason or "",
+                csession_id=csid if is_csession_id(csid) else None,
+            )
+            for line in hooks.warning_text(
+                hooks.run_hooks(gw, settings, failure), hooks.POST_ATTENTION
+            ):
+                self.ctx.note(f"session-audit: {line}")
 
     def release(self) -> None:
         """Stop the renewal and clear the lease (a compare-and-set: a stale holder clears
@@ -287,7 +318,7 @@ def insert_retro(
                 expires,
                 json.dumps(counts, separators=(",", ":")),
                 json.dumps({"findings": 0, "candidates": 0}, separators=(",", ":")),
-                json.dumps(list(prepared.warnings), separators=(",", ":")),
+                json.dumps(_row_warnings(ctx, prepared), separators=(",", ":")),
             ),
         )
     held = lease.Lease(
@@ -305,6 +336,15 @@ def insert_retro(
         row.release()  # the row is not stranded behind a lease nobody renews
         raise
     return Inserted(row)
+
+
+def _row_warnings(ctx: Context, prepared: retro.Prepared) -> list[str]:
+    """The closed tokens a row stores: the preparation's, plus ``transcripts_kept`` when
+    ``retro.remove_run_transcripts`` is false (the retro's own transcripts stay)."""
+    found = list(prepared.warnings)
+    if not ctx.settings.retro.remove_run_transcripts and "transcripts_kept" not in found:
+        found.append("transcripts_kept")
+    return found
 
 
 def _free_id(gateway: Gateway, conn: sqlite3.Connection) -> str:

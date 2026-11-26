@@ -40,8 +40,10 @@ __all__ = [
     "names_a_malformed_id",
     "map_exec",
     "map_start",
+    "RecoveryStatus",
     "parse_forget",
     "parse_outcome",
+    "parse_recovery_status",
     "parse_start",
     "parse_status",
     "single_csession_id",
@@ -285,6 +287,33 @@ def parse_status(text: str, csid: str) -> Collected:
         _optional_token(_need(run, "outcome"), _TOKEN),
         report,
     )
+
+
+@dataclass(frozen=True)
+class RecoveryStatus:
+    """What recovery reads of ``status --json``: whether the run is live and the labels (the
+    owner and retro label check). Nothing else is taken from the document."""
+
+    live: bool
+    labels: tuple[str, ...]
+
+
+def parse_recovery_status(text: str, csid: str) -> RecoveryStatus:
+    """``live`` and ``labels`` of a ``status --json`` document of ``csid``, or ``Invalid``."""
+    document = _object(strict_loads(text))
+    if _need(document, "csession_id") != csid:
+        raise Invalid("not this session")
+    live = _need(document, "live")
+    labels = _need(document, "labels")
+    if not isinstance(live, bool):
+        raise Invalid("live is not a boolean")
+    if (
+        not isinstance(labels, list)
+        or len(labels) > 1024
+        or not all(isinstance(label, str) for label in labels)
+    ):
+        raise Invalid("labels is not a list of strings")
+    return RecoveryStatus(live, tuple(labels))
 
 
 def parse_forget(text: str, csid: str) -> bool:

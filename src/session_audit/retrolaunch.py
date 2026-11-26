@@ -41,11 +41,10 @@ from .command import Context
 from .config import home_dir, profile_issues
 from .fencing import FencedDigest
 from .gateway import CallResult, CallStatus
-from .grammar import is_csession_id
 from .harness import Invalid
 from .retro import Prepared
 from .retroartifact import validate_and_store_artifact
-from .retrocleanup import OUTPUT_LIMIT, call, forget_session, stop_session
+from .retrocleanup import OUTPUT_LIMIT, cleanup, collect, load_session_row, stop_session
 from .retrofiles import FilesError, RunFiles
 from .retrooutcome import (
     Collected,
@@ -58,7 +57,6 @@ from .retrooutcome import (
     names_a_malformed_id,
     parse_outcome,
     parse_start,
-    parse_status,
     single_csession_id,
     validated_session,
 )
@@ -415,13 +413,7 @@ class Launcher:
     def _collect(self, csid: str) -> Collected | None:
         """``status`` of the finished run (Collect and cleanup): None when the call or the
         document fails."""
-        result = call(self.ctx, "status", csid, "--json")
-        if not result.exit_is(0):
-            return None
-        try:
-            return parse_status(result.stdout, csid)
-        except Invalid:
-            return None
+        return collect(self.ctx, csid)
 
     @staticmethod
     def _collected_columns(collected: Collected | None, outcome: Outcome | None) -> dict[str, Any]:
@@ -478,7 +470,7 @@ class Launcher:
             output_ignored=0 if running else self.hook.output_ignored,
         )
         if self.session is not None:
-            forget_session(self.ctx, row.store, row.lease, self.session.csession_id)
+            self._cleanup(self.session.csession_id)
         if delete_files:
             retrofiles.delete_local(self.gw, self.state_dir, row.id)
             if row.digest_sha256 is not None:
@@ -490,28 +482,18 @@ class Launcher:
             raise error
         return mapped.exit_code
 
+    def _cleanup(self, csid: str) -> None:
+        """The step list of ``cleanup`` for the recorded session, under this retro's lease. An
+        exception other than a lost lease leaves the row ``pending`` for housekeeping."""
+        row = self.row
+        session = load_session_row(row.store, csid)
+        if session is None:
+            return
+        try:
+            cleanup(self.ctx, row.store, session, row.lease)
+        except errors.CliError:
+            row.lease.raise_if_lost()  # the lease was taken over: stop
+            self.ctx.note("session-audit: warning: the cleanup did not finish")
+
     def _post_hooks(self, mapped: Mapped) -> None:
-        row, gw, settings = self.row, self.gw, self.ctx.settings.hooks
-        payload = hooks.post_retro_payload(
-            gw,
-            retro_id=row.id,
-            state=mapped.state,
-            reason=mapped.reason,
-            findings=0,
-            candidates=0,
-            cost_usd=row.cost_usd,
-        )
-        for line in hooks.warning_text(hooks.run_hooks(gw, settings, payload), hooks.POST_RETRO):
-            self.ctx.note(f"session-audit: {line}")
-        if mapped.state == "failed":
-            csid = row.csession_id
-            failure = hooks.retro_failed_payload(
-                gw,
-                retro_id=row.id,
-                failure_reason=mapped.reason or "",
-                csession_id=csid if is_csession_id(csid) else None,
-            )
-            for line in hooks.warning_text(
-                hooks.run_hooks(gw, settings, failure), hooks.POST_ATTENTION
-            ):
-                self.ctx.note(f"session-audit: {line}")
+        self.row.post_hooks(mapped.state, mapped.reason)

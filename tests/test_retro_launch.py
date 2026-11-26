@@ -244,7 +244,7 @@ def test_every_session_row_of_the_outcome_mapping(
     assert keys(cs) == ["start", "exec", "status", "forget"]
     cs.assert_outputs_valid()
     [session] = rows(corpus.home, "retro_sessions")
-    assert session["csession_id"] == CSID and session["cleanup_state"] == "pending"
+    assert session["csession_id"] == CSID and session["cleanup_state"] == "done"
     assert session["forgotten_at"] is not None
     assert (session["retro_id"], session["csession_dir"]) == (row["id"], f"/state/sessions/{CSID}")
     assert session["private_dir"] == f"/state/private/{CSID}"
@@ -777,7 +777,8 @@ def test_the_forgotten_time_is_set_only_for_exit_10_or_a_forget_object_naming_th
     error_of(launch(capsys, gw), 13)  # the retro's own outcome does not depend on the cleanup
     [session] = rows(corpus.home, "retro_sessions")
     assert (session["forgotten_at"] is not None) is forgotten
-    assert session["cleanup_state"] == "pending"  # TODO(#27) finishes the cleanup
+    # the step list ran: purged (the fake leaves no directory) is done, an unforgotten one waits
+    assert session["cleanup_state"] == ("done" if forgotten else "pending")
 
 
 # --- the deadline ------------------------------------------------------------------------------
