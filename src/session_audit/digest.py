@@ -79,6 +79,7 @@ __all__ = [
     "SessionSection",
     "Skipped",
     "build_digest",
+    "candidates",
 ]
 
 MAX_SESSIONS = MAX_SESSIONS_RANGE[1]  # ``s500``: ``retro.max_sessions`` maximum
@@ -857,7 +858,7 @@ def _render_kept(run: _Run, scan: _Scan, wanted: set[int]) -> dict[int, str] | N
 # --- the candidates ----------------------------------------------------------------------------
 
 
-def _candidates(
+def candidates(
     db: sqlite3.Connection, ctx: Context, scope: DigestScope
 ) -> list[tuple[int | None, str]]:
     """``(ended_ms, session_id)`` of every session the scope matches: by ``ended_at`` descending,
@@ -1075,8 +1076,8 @@ def _build(
     empty = DigestResult((), (), 0, 0, Metrics(), (), ctx.settings.digest.max_bytes, False)
     if conn is None:
         return empty
-    candidates = _candidates(conn, ctx, scope)
-    if not candidates:
+    found = candidates(conn, ctx, scope)
+    if not found:
         return empty
     view = _View(conn)
     with open_discovery(
@@ -1088,7 +1089,7 @@ def _build(
         run = _Run(ctx, conn, discovery, redactor, scope)
         cache: dict[str, _Scan | str] = {}
         while True:  # each pass adds at least one session to the cache as skipped: it ends
-            result, changed = _attempt(run, candidates, cache)
+            result, changed = _attempt(run, found, cache)
             if result is not None:
                 return result
             assert changed is not None
