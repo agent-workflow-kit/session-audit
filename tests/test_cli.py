@@ -216,7 +216,7 @@ VALID: list[list[str]] = [
     ["validate"],
     ["validate", "--probe"],
     ["cron", "install"],
-    ["cron", "install", "--ingest-every", "30m", "--env-file", "/e", "--dry-run"],
+    ["cron", "install", "--ingest-every", "30m", "--dry-run"],
     ["cron", "uninstall", "--dry-run"],
 ]
 

@@ -1,0 +1,12 @@
+{
+  "block": [
+    "# session-audit managed",
+    "7 */1 * * * PATH='<home>/.local/bin:<tmp>/bin1:<tmp>/bin2:/usr/local/bin:/usr/bin:/bin' session-audit ingest --quiet",
+    "17 3 * * * PATH='<home>/.local/bin:<tmp>/bin1:<tmp>/bin2:/usr/local/bin:/usr/bin:/bin' session-audit prune --quiet",
+    "23 17 * * 5 . '<tmp>/login.env' && PATH='<home>/.local/bin:<tmp>/bin1:<tmp>/bin2:/usr/local/bin:/usr/bin:/bin' session-audit retro run --label 'team=a.b' --project '/work/it'\"'\"'s' --since '7d' --until '1d' --kind 'review' --outcome 'done' --actor auto:schedule --quiet",
+    "# session-audit managed end"
+  ],
+  "command": "install",
+  "dry_run": false,
+  "outcome": "installed"
+}

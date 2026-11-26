@@ -71,7 +71,16 @@ def _check_program(
     allowed_roots: Sequence[Path],
     forbidden_roots: Sequence[Path],
 ) -> None:
-    if Path(program).name not in PROTECTED_PROGRAMS:
+    # By the name given, and, for a path, by the name it resolves to: a symlink under another
+    # name (``ln -s /usr/bin/crontab mycron``) is the real program all the same.
+    names = {Path(program).name}
+    if os.sep in program:
+        names.add(Path(program).resolve().name)
+    else:
+        found = shutil.which(program, path=search)
+        if found is not None:
+            names.add(Path(found).resolve().name)
+    if not names & PROTECTED_PROGRAMS:
         return
     if os.sep in program:
         resolved: str | None = program

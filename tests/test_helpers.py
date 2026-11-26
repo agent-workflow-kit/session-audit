@@ -148,6 +148,43 @@ def test_starting_a_protected_program_by_absolute_path_is_refused(path: str) -> 
         subprocess.Popen([path])
 
 
+def test_a_symlink_under_another_name_to_a_protected_program_is_refused(tmp_path: Path) -> None:
+    # The guard refuses before anything is started, so the real crontab is never run (the link
+    # may even dangle).
+    alias = tmp_path / "harmless-name"
+    os.symlink("/usr/bin/crontab", alias)
+    with pytest.raises(RealToolRefused):
+        guard_argv([str(alias), "-l"], {}, [tmp_path])
+    with pytest.raises(RealToolRefused):
+        subprocess.Popen([str(alias), "-l"])
+    with pytest.raises(RealToolRefused):
+        guard_argv(["sh", "-c", f"'{alias}' -l"], {"PATH": str(tmp_path)}, [tmp_path], [tmp_path])
+
+
+def test_a_bare_name_that_resolves_to_a_protected_program_is_refused(tmp_path: Path) -> None:
+    alias = tmp_path / "harmless-name"
+    os.symlink("/usr/bin/crontab", alias)
+    with pytest.raises(RealToolRefused):
+        guard_argv(["harmless-name", "-l"], {"PATH": str(tmp_path)}, [tmp_path])
+    with pytest.raises(RealToolRefused):
+        guard_argv(
+            ["sh", "-c", "harmless-name -l"], {"PATH": str(tmp_path)}, [tmp_path], [tmp_path]
+        )
+
+
+def test_every_absolute_form_of_the_real_crontab_is_refused_by_the_guard() -> None:
+    for path in (
+        "/usr/bin/crontab",
+        "/bin/crontab",
+        "/usr/bin/../bin/crontab",
+        "//usr/bin/crontab",
+    ):
+        with pytest.raises(RealToolRefused):
+            guard_argv([path, "-l"], {}, [FAKEBIN])
+        with pytest.raises(RealToolRefused):
+            subprocess.Popen([path, "-l"])
+
+
 def test_the_fakes_under_fakebin_and_the_test_directory_are_allowed(tmp_path: Path) -> None:
     fake = tmp_path / "claude"
     fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
