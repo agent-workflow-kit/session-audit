@@ -74,6 +74,7 @@ from .retrostate import Inserted, Retro, Reused, insert_retro, scope_object
 
 __all__ = [
     "CLEANUP_BOUND",
+    "END_GRACE",
     "EXEC_SLACK",
     "FORWARD_WAIT",
     "START_TIMEOUT",
@@ -87,6 +88,7 @@ EXEC_SLACK = 600.0  # the deadline is the exec spawn plus the retro timeout plus
 TERM_WAIT = 30.0  # the exec child gets SIGTERM, then this long, then SIGKILL on its group
 FORWARD_WAIT = 30.0  # after the forwarded signal the exec child has this long, then ``stop``
 STOP_WAIT = 15.0  # after ``stop`` (its 5 s grace and some) the exec child's group is ended
+END_GRACE = 5.0  # the SIGTERM of that group, then this long, then SIGKILL
 EXEC_POLL = 0.1  # how often the wait for exec looks at the signals and the lease
 CLEANUP_BOUND = 30.0  # a signal during the cleanup: it goes on for at most this long
 OUTCOME_FILE_LIMIT = 1024 * 1024
@@ -462,7 +464,7 @@ class Launcher:
                 stop_session(self.ctx, csid)
                 stopped_at = self.gw.monotonic()
             elif stopped_at is not None and now - stopped_at >= STOP_WAIT:
-                handle.end_group(5.0)
+                handle.end_group(END_GRACE)
         return forwarded
 
     def _read_outcome(self, result: CallResult, csid: str, run: int) -> Outcome | None:
