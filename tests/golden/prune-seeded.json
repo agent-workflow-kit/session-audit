@@ -1,0 +1,18 @@
+{
+  "dry_run": true,
+  "recoveries": [],
+  "tables": {
+    "agents": 1,
+    "digests": 2,
+    "events": 9,
+    "files": 3,
+    "harness_runs": 1,
+    "log_entries": 1,
+    "pruned_sessions": 1,
+    "retro_sessions": 1,
+    "retro_starts": 1,
+    "retros": 1,
+    "sessions": 2
+  },
+  "warnings": []
+}

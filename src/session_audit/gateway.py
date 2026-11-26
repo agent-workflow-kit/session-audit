@@ -142,6 +142,14 @@ class DirHandle(Protocol):
         """``fstat`` of the directory itself."""
         ...
 
+    def unlink(self, name: bytes) -> None:
+        """``unlinkat(name)`` of a non-directory (a symlink is removed, never followed)."""
+        ...
+
+    def rmdir(self, name: bytes) -> None:
+        """``unlinkat(name, AT_REMOVEDIR)`` of an empty directory."""
+        ...
+
     def close(self) -> None: ...
 
 
@@ -267,6 +275,11 @@ class Gateway(Protocol):
     def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
         """Take an exclusive ``flock`` on ``handle``, waiting at most ``timeout`` seconds; False
         when it was not obtained. The lock ends when ``handle`` is closed."""
+        ...
+
+    def replace(self, source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        """Atomically rename ``source`` over ``target`` (``os.replace``) and sync the directory,
+        so a crash leaves the old file or the new one, never a mix."""
         ...
 
 
@@ -677,6 +690,14 @@ class SystemGateway:
                     return False
                 time.sleep(_LOCK_POLL_SECONDS)
 
+    def replace(self, source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        os.replace(source, target)
+        fd = os.open(os.path.dirname(os.fspath(target)) or ".", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
 
 class _SystemDir:
     """A directory descriptor of the real file system (see ``DirHandle``)."""
@@ -716,6 +737,12 @@ class _SystemDir:
 
     def stat(self) -> os.stat_result:
         return os.fstat(self._fd)
+
+    def unlink(self, name: bytes) -> None:
+        os.unlink(name, dir_fd=self._fd)
+
+    def rmdir(self, name: bytes) -> None:
+        os.rmdir(name, dir_fd=self._fd)
 
     def close(self) -> None:
         if self._fd >= 0:

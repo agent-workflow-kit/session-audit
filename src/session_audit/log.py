@@ -15,7 +15,10 @@ stays on that one line. ``ts`` is the gateway clock in milliseconds UTC.
 
 from __future__ import annotations
 
+import io
+import json
 import os
+import re
 import stat as statmod
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -30,6 +33,9 @@ from .textsafe import dumps_json
 LOG_NAME = "log.jsonl"
 LOCK_NAME = "log.lock"
 LOCK_TIMEOUT = 5.0
+TMP_NAME = "log.jsonl.tmp"
+MAX_LINE = 1 << 20  # a longer line is never an entry of ours: kept as it is, undated
+_TS = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z")
 
 _RESERVED = frozenset({"ts", "actor", "action"})
 _Count = Annotated[int, Field(strict=True, ge=0)]
@@ -251,3 +257,116 @@ class LogWriter:
             if not written:
                 raise OSError("short write")
             view = view[written:]
+
+    # --- the prune rewrite -----------------------------------------------------------------------
+
+    def count_before(self, cutoff: datetime) -> int:
+        """How many entries a ``prune_before(cutoff)`` would remove (reads only: no lock, nothing
+        written, no file created)."""
+        limit = timestamp_ms(cutoff)
+        try:
+            log = self._gateway.open_private(
+                f"{self._directory}/{LOG_NAME}", create=False, read_only=True
+            )
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            raise _unwritable("log.jsonl cannot be opened") from None
+        try:
+            return sum(1 for _, old in self._lines(log, limit) if old)
+        except OSError:
+            raise _unwritable("log.jsonl cannot be read") from None
+        finally:
+            log.close()
+
+    def prune_before(self, cutoff: datetime) -> int:
+        """Remove the entries older than ``cutoff`` (a ``ts`` below it) and return how many. Under
+        ``log.lock``, so an append waits for the rewrite and never lands in the old file: the kept
+        lines go to ``log.jsonl.tmp`` (mode 0600), which is synced and renamed over the log. A line
+        that is not an entry with a ``ts`` (a torn line, anything undated) is kept byte for byte,
+        so is a last line without its newline, and every entry at or after the cutoff stays. A
+        crash leaves the old log or the new one; a stale temporary file is overwritten."""
+        limit = timestamp_ms(cutoff)
+        try:
+            with self._gateway.umask(0o077):
+                lock = self._open(LOCK_NAME, append=False)
+                try:
+                    if not self._gateway.lock_exclusive(lock, LOCK_TIMEOUT):
+                        raise _unwritable("log.lock is held by another process", retryable=True)
+                    return self._rewrite(limit)
+                finally:
+                    lock.close()
+        except OSError:
+            raise _unwritable("log.jsonl or log.lock cannot be rewritten") from None
+
+    def _rewrite(self, limit: str) -> int:
+        path = f"{self._directory}/{LOG_NAME}"
+        try:
+            log = self._open_existing(LOG_NAME)
+        except FileNotFoundError:
+            return 0
+        try:
+            removed = sum(1 for _, old in self._lines(log, limit) if old)
+            if not removed:
+                return 0  # nothing to remove: no temporary file, the log is untouched
+            log.seek(0)
+            tmp = self._open(TMP_NAME, append=False)
+            try:
+                tmp.truncate(0)
+                for data, old in self._lines(log, limit):
+                    if not old:
+                        self._write_all(tmp, data)
+                os.fsync(tmp.fileno())
+            finally:
+                tmp.close()
+        finally:
+            log.close()
+        self._gateway.replace(f"{self._directory}/{TMP_NAME}", path)
+        return removed
+
+    def _open_existing(self, name: str) -> Any:
+        handle = self._gateway.open_private(f"{self._directory}/{name}", create=False)
+        try:
+            info = os.fstat(handle.fileno())
+            if not statmod.S_ISREG(info.st_mode) or info.st_uid != self._gateway.uid():
+                raise _unwritable(f"{name} is not a regular file of this user")
+        except BaseException:
+            handle.close()
+            raise
+        return handle
+
+    @staticmethod
+    def _lines(handle: Any, limit: str) -> Any:
+        """``(bytes, older)`` for each line of the log, newline included when present. A line is
+        older when it is a JSON object whose ``ts`` is a timestamp below ``limit``; an overlong
+        line is passed on in pieces and is never older."""
+        reader = io.BufferedReader(handle, 1 << 16)
+        try:
+            while True:
+                line = reader.readline(MAX_LINE + 1)
+                if not line:
+                    return
+                if len(line) > MAX_LINE and not line.endswith(b"\n"):
+                    yield line, False
+                    while True:  # the rest of an overlong line
+                        rest = reader.readline(MAX_LINE)
+                        if not rest:
+                            return
+                        yield rest, False
+                        if rest.endswith(b"\n"):
+                            break
+                    continue
+                yield line, LogWriter._older(line, limit)
+        finally:
+            reader.detach()  # the caller owns the handle
+
+    @staticmethod
+    def _older(line: bytes, limit: str) -> bool:
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(doc, dict):
+            return False
+        stamp = doc.get("ts")
+        return isinstance(stamp, str) and _TS.fullmatch(stamp) is not None and stamp < limit

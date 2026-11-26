@@ -17,7 +17,7 @@ Rules kept here:
 
 - No transaction is open while lines are read or parsed. A chunk is parsed first and then written
   in one ``Store.transaction()``; every transaction starts with ``lease.check_still_holder`` and
-  only after ``_ensure_margin`` made sure the lease has at least ``LEASE_MARGIN_SECONDS`` left,
+  only after ``ensure_margin`` made sure the lease has at least ``LEASE_MARGIN_SECONDS`` left,
   so no transaction starts near the expiry. A busy store is the store's retryable exit 12 and is
   never caught here.
 - A key keeps at most ``MAX_COPIES`` (8) stored copies, the best by the owner order (largest
@@ -406,6 +406,16 @@ def _file_ref(conn: sqlite3.Connection, candidate: Candidate) -> FileRef:
 # --- deleting a file's events -----------------------------------------------------------------
 
 
+def _delete_rows(conn: sqlite3.Connection, rows: Sequence[Sequence[object]]) -> None:
+    """Delete the ``(id, key, counted)`` rows and repair the owner of every key a counted row was
+    deleted from: the best of its remaining copies (at most 8 rows) becomes the counted one."""
+    conn.executemany("DELETE FROM events WHERE id = ?", [(r[0],) for r in rows])
+    for key in dict.fromkeys(str(r[1]) for r in rows if r[2]):
+        remaining = _copies(conn, key)
+        if remaining:
+            _settle(conn, remaining, min(remaining, key=_order))
+
+
 def delete_batch(
     conn: sqlite3.Connection, file_id: int, limit: int = DELETE_BATCH
 ) -> tuple[int, bool]:
@@ -416,13 +426,28 @@ def delete_batch(
     rows = conn.execute(
         "SELECT id, key, counted FROM events WHERE file_id = ? LIMIT ?", (file_id, limit)
     ).fetchall()
-    conn.executemany("DELETE FROM events WHERE id = ?", [(r[0],) for r in rows])
-    for key in dict.fromkeys(r[1] for r in rows if r[2]):
-        remaining = _copies(conn, key)
-        if remaining:
-            _settle(conn, remaining, min(remaining, key=_order))
+    _delete_rows(conn, rows)
     done = len(rows) < limit or (
         conn.execute("SELECT 1 FROM events WHERE file_id = ? LIMIT 1", (file_id,)).fetchone()
+        is None
+    )
+    return len(rows), done
+
+
+def delete_session_batch(
+    conn: sqlite3.Connection, session_id: str, limit: int = DELETE_BATCH
+) -> tuple[int, bool]:
+    """``delete_batch`` for every event of a session (the main file's and its agents'): up to
+    ``limit`` rows, owners repaired the same way, so a key counted in this session and stored in
+    another session's file stays counted exactly once (the other copy is promoted). Returns the
+    rows deleted and whether the session has no events left."""
+    rows = conn.execute(
+        "SELECT id, key, counted FROM events WHERE session_id = ? ORDER BY id LIMIT ?",
+        (session_id, limit),
+    ).fetchall()
+    _delete_rows(conn, rows)
+    done = len(rows) < limit or (
+        conn.execute("SELECT 1 FROM events WHERE session_id = ? LIMIT 1", (session_id,)).fetchone()
         is None
     )
     return len(rows), done
@@ -450,7 +475,7 @@ def _now_ms(store: Store) -> int:
     return int(store.gateway.now().timestamp() * 1000)
 
 
-def _ensure_margin(store: Store, lease: WriteGuard) -> None:
+def ensure_margin(store: Store, lease: WriteGuard) -> None:
     """Renew the lease (its own short transaction) when less than the margin is left, and stop
     when it was lost. A write transaction therefore never starts near the expiry."""
     lease.raise_if_lost()
@@ -474,7 +499,7 @@ def delete_old_events(
     run resumes (``rereading`` is still set). A crash anywhere between batches is the same."""
     deleted = 0
     while True:
-        _ensure_margin(store, lease)
+        ensure_margin(store, lease)
         with store.transaction() as conn:
             lease.check_still_holder(conn)
             row = conn.execute("SELECT id FROM files WHERE path = ?", (path,)).fetchone()
@@ -526,7 +551,7 @@ def _write_chunk(
 ) -> None:
     """One chunk in one transaction: the file row with the offset, the identity rows, the events
     with their owners and the per-file facts. Parsing is done: no line is read in here."""
-    _ensure_margin(store, lease)
+    ensure_margin(store, lease)
     now = _now_ms(store)
     with store.transaction() as conn:
         lease.check_still_holder(conn)
@@ -549,7 +574,7 @@ def _reset(
     progress: Progress,
 ) -> None:
     """The start of a full reread: offset 0, per-file facts cleared, ``rereading`` set."""
-    _ensure_margin(store, lease)
+    ensure_margin(store, lease)
     now = _now_ms(store)
     with store.transaction() as conn:
         lease.check_still_holder(conn)

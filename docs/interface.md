@@ -1136,19 +1136,44 @@ There is no `audit.jsonl` (see Deviations).
 `prune` applies these rules (copy):
 
 ```text
-session age = coalesce(ended_at, last_ingested_at)          # ended_at per Counting rules 8
+session age = largest ts of its counted events, else largest max_ts of its files, else last_ingested_at
 prune sessions with age < now - retention.sessions, holding the ingest lease (taken as ingest takes it; when it is
-    held, session retention is skipped with warning ingest_busy and the rest of prune runs); one session per
-    transaction, in this order: events, agents, files rows, session row, then insert pruned_sessions(session_id, pruned_at)
+    held, session retention is skipped with warning ingest_busy and the rest of prune runs); a session is pruned in
+    transactions of at most 2,000 rows, in this order: events, agents, files rows, session row, then insert
+    pruned_sessions(session_id, pruned_at)
 ingest skips a file of a pruned session unless its mtime > pruned_at (then it is read from the start as a new session)
 pruned_sessions rows older than 2 x retention.sessions are removed
-harness_runs rows with updated_at < now - retention.sessions are removed
+harness_runs rows with their own updated_at < now - retention.sessions are removed (not the session age)
 prune retros with created_at < now - retention.retros, only in a final state (with their retro_artifacts row and digest)
 retro_sessions rows are removed when cleanup is done, incomplete or skipped AND (no transcript root holds the row's project_dir
     (lexists, checked at prune) OR created_at < now - 400 days)
 prune digests older than retention.digests; log entries older than retention.log (rewrite under the log lock)
 retro_starts rows older than two days are removed
 again_of may name a deleted retro (it dangles; retro show of that id exits 10)
+```
+
+Details of the rules above (copy):
+
+```text
+session age: the largest ts of the session's counted events (agents included), else the largest max_ts of its files, else last_ingested_at
+the old pruned_sessions rows are part of session retention: they are skipped with it under ingest_busy
+a session is deleted in transactions of at most 2,000 rows; meta.prune_session names it until its last transaction, and a
+    crashed prune finishes that session first at the next run, whatever its age by then; deleting a counted event promotes the
+    best remaining stored copy of its key, so one counted row per key stays; a files row that only events of the session
+    referenced goes with those events (when no other row refers to it)
+pruned_at is the time the session's prune started; meta.prune_session holds "<session_id>|<start ms>" so a resumed prune keeps
+    that time (a legacy value without "|" uses the resume time); a line appended to a half-pruned session's file after the
+    start therefore has an mtime above pruned_at and is ingested again as a new session
+retro_starts: rows with day < (today in time_zone) - 2 days
+harness_runs: updated_at is claude-session's text; a value that is not an ISO 8601 time is kept
+retros and digests: a digest directory that cannot be removed completely (another owner, another device, too deep) keeps its retro
+    for the next prune; digests/<retro_id>/ is looked at only for names of the form ra-xxxxxxxx; the age of a digest is its retro's
+    created_at, or the directory's own time when there is no retro row; a digest of a retro that is not final is never expired
+retro_sessions: project_dir is looked up by name, one path component, below every transcript root (lstat; a symlink counts as
+    present); a root that cannot be examined (other than missing) keeps every row younger than 400 days
+log: entries with ts below the cutoff go; a line that is not a dated entry (a torn line) is kept byte for byte
+order of a real run: sessions (ingest lease), harness_runs, retros and digests, retro_starts, retro_sessions, log rewrite, the prune log
+    entry, wal_checkpoint(TRUNCATE) (a busy checkpoint is exit 12 retryable; it is also attempted when a step failed)
 ```
 
 It reports counts per table. It never touches transcripts, which belong to Claude Code. `retro delete` removes one retro and its files at once. Expired digests are also deleted by every `retro run` housekeeping step.
