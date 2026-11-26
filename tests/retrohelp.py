@@ -7,6 +7,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +45,9 @@ class RetroGateway(TickGateway):
         return CallResult(CallStatus.EXITED, 0, stdout=self.version)
 
     def sleep(self, seconds: float) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            time.sleep(0.001)  # a lease renewal thread: neither recorded nor moving the clock
+            return
         self.sleeps.append(seconds)
         self.clock.advance(seconds)
 
@@ -52,7 +57,7 @@ def seed(corpus: Corpus, session: str, text: str = "hello", project: str = "p1")
     return write(
         corpus,
         session,
-        [prompt(text, 1, cwd=f"/work/{project}"), say(f"m-{session[:4]}", "answer", 2)],
+        [prompt(text, 1, cwd=f"/work/{project}"), say(f"m-{session}", "answer", 2)],
         project=project,
     )
 
@@ -101,8 +106,15 @@ def args_for(**given: Any) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def retro_ctx(gw: TickGateway, corpus: Corpus, *, dry_run: bool = False, **retro_settings: Any) -> Context:
-    ctx = make_ctx(gw, corpus.home, corpus)
+def retro_ctx(
+    gw: TickGateway,
+    corpus: Corpus,
+    *,
+    dry_run: bool = False,
+    retro_settings: dict[str, Any] | None = None,
+    **digest: Any,
+) -> Context:
+    ctx = make_ctx(gw, corpus.home, corpus, **digest)
     ctx.actor = "auto:test"
     ctx.dry_run = dry_run
     ctx.quiet = True
@@ -129,7 +141,14 @@ def add_retro(
     """A stored retro in the layout of ``retroview`` (a ``done`` one by default)."""
     conn = connect(home)
     try:
-        counts = {"sessions": 1, "skipped": 0, "over_cap": 0, "items": 2, "findings": 0, "candidates": 0}
+        counts = {
+            "sessions": 1,
+            "skipped": 0,
+            "over_cap": 0,
+            "items": 2,
+            "findings": 0,
+            "candidates": 0,
+        }
         coverage = {
             "digest_bytes": 10,
             "items_total": 2,
@@ -149,7 +168,14 @@ def add_retro(
             "state": state,
             "reason": reason,
             "scope": json.dumps(
-                {"labels": [], "project": None, "since": None, "until": None, "kind": None, "outcome": None}
+                {
+                    "labels": [],
+                    "project": None,
+                    "since": None,
+                    "until": None,
+                    "kind": None,
+                    "outcome": None,
+                }
             ),
             "resolved_scope": json.dumps({"sessions": [session], "since": None, "until": None}),
             "skill": "session-audit:audit",

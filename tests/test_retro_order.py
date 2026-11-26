@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from session_audit import errors
-from session_audit.commands import retro_run
 from session_audit.command import Context
+from session_audit.commands import retro_run
 from session_audit.store import open_store
 
 from .digesthelp import prompt, write
@@ -72,7 +72,7 @@ def expect(result, code: int, reason: str | None = None, field: str | None = Non
         assert details.get("field") == field
 
 
-# --- step 1: flags ---------------------------------------------------------------------------------
+# --- step 1: flags --------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -86,8 +86,15 @@ def expect(result, code: int, reason: str | None = None, field: str | None = Non
         (["--session", "cs-aaaaaaaa"], None, "--session"),
         (["--session", "abc"], None, "--session"),
         (["--session", "CS-AAAAAAAA"], None, "--session"),
-        (["--session", *["11111111"] * 1, *sum((["--session", "11111111"] for _ in range(1000)), [])],
-         None, "--session"),
+        (
+            [
+                "--session",
+                *["11111111"] * 1,
+                *sum((["--session", "11111111"] for _ in range(1000)), []),
+            ],
+            None,
+            "--session",
+        ),
     ],
 )
 def test_step_1_flags_come_before_everything(
@@ -117,7 +124,7 @@ def test_a_claude_session_id_for_session_says_which_id_the_flag_takes(
     assert "Claude Code session id" in result.err
 
 
-# --- step 2: config and store ----------------------------------------------------------------------
+# --- step 2: config and store ---------------------------------------------------------------------
 
 
 def test_step_2_an_unsafe_config_is_config_unsafe_before_claude_session(
@@ -175,7 +182,7 @@ def test_step_2_a_newer_store_is_store_newer_before_claude_session(
     assert steps.calls == [] and gw.runs == []
 
 
-# --- step 3: claude-session ------------------------------------------------------------------------
+# --- step 3: claude-session -----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -210,7 +217,7 @@ def test_step_3_a_newer_claude_session_passes(
     expect(retro(capsys, gw, "--since", "7d"), 20, "empty_scope")  # on to step 6
 
 
-# --- steps 4 and 5: the hook points ------------------------------------------------------------------
+# --- steps 4 and 5: the hook points ---------------------------------------------------------------
 
 
 def test_step_4_the_skill_preflight_runs_after_step_3_and_before_housekeeping(
@@ -238,7 +245,7 @@ def test_step_5_housekeeping_runs_before_a_scope_refusal_and_never_in_a_dry_run(
     assert steps.calls == ["preflight"]
 
 
-# --- step 6: scope ---------------------------------------------------------------------------------
+# --- step 6: scope --------------------------------------------------------------------------------
 
 
 def test_step_6_scope_failures_in_their_exit_codes(
@@ -312,11 +319,13 @@ def test_step_6_an_explicit_list_over_the_cap_is_scope_too_large(
     details = json.loads(result.out)["error"]["details"]
     assert (details["matched"], details["limit"]) == (3, 2)
     # Duplicates and prefixes of the same sessions are one session each.
-    result = retro(capsys, gw, "--session", S1, "--session", S1[:8], "--session", S1.upper(), "--session", S2)
+    result = retro(
+        capsys, gw, "--session", S1, "--session", S1[:8], "--session", S1.upper(), "--session", S2
+    )
     assert result.code == 1  # past step 10, at the seam
 
 
-# --- step 8: nothing kept --------------------------------------------------------------------------
+# --- step 8: nothing kept -------------------------------------------------------------------------
 
 
 def test_step_8_live_sessions_only_and_empty_scope(

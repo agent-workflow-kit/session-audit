@@ -91,7 +91,7 @@ With `--json`, a non-zero exit prints only the envelope. This includes exits 11,
 - `--project P` matches the stored project (the first non-empty `cwd`, see Session object) by path boundary with bound parameters: `project = P or substr(project, 1, len(P) + 1) = P || '/'`, after stripping one trailing `/` from `P`. There is no wildcard and no symlink resolution.
 - `--kind` and `--outcome` match only sessions with a harness snapshot. `--model` is an exact model name among the session's models (1 to 128 characters, no control characters, DEL or surrogates; exit 2 otherwise). `--entrypoint` filters on `interactive` or `headless`.
 - Labels are unauthenticated hints: a label scope is not a confidentiality boundary (see Safety).
-- `--include-self-improve` (taken by `sessions`, `usage` and `export`; `retro run`'s scope adopts it in its own issue; not `ingest`; `export retros` ignores it): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
+- `--include-self-improve` (taken by `sessions`, `usage` and `export`; `retro run`'s scope takes it too; not `ingest`; `export retros` ignores it): a session whose harness snapshot labels contain `owner=self-improve` is left out of the default filters, and this flag includes it again. Ingest still stores it, and `show SESSION_ID` and `retro run --session` name a session explicitly, so they show it. Without a snapshot (no harness data) a session is never left out. The label is an unauthenticated hint, so this is a convenience and not a boundary.
 
 ## Time arguments
 
@@ -171,7 +171,7 @@ One stored session: the Session object, its agents and its usage rows. An agent 
 
 ### `retro run`
 
-`session-audit retro run SCOPE [--skill NAME] [--mode headless] [--model M] [--timeout DURATION] [--max-turns N] [--again] [--decision-id ID]... [--dry-run] [--actor ACTOR] [--json]`
+`session-audit retro run SCOPE [--include-self-improve] [--skill NAME] [--mode headless] [--model M] [--timeout DURATION] [--max-turns N] [--again] [--decision-id ID]... [--dry-run] [--actor ACTOR] [--json]`
 
 Runs one retro. Blocks until the retro is final. `SCOPE` is one or more of `--session ID` (a Claude Code session id or prefix; repeatable, at most 1000), `--label K=V` (repeatable), `--project PATH`, `--since WHEN`, `--until WHEN`, `--kind K`, `--outcome O`, filtered as in Session filters. At least one scope flag is required (exit 2 otherwise). The flow is the Order of checks under Retro lifecycle, Retro launch and Retro validation. Before launch it prints to stderr (unless `--quiet`) the kept and skipped session counts and the number of distinct projects.
 

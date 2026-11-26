@@ -23,7 +23,6 @@ from dataclasses import dataclass
 
 from . import errors
 from .command import Context
-from .commands import ingest
 from .digest import DigestScope, candidates
 from .grammar import (
     GrammarError,
@@ -90,6 +89,8 @@ class Refresher:
         if lease is None:
             self.busy = True
             return False
+        from .commands import ingest  # lazy: the commands package imports this module's users
+
         if self.deadline is None:
             self.deadline = run_deadline(self.ctx.gateway, self.ctx.settings.ingest.budget)
         try:

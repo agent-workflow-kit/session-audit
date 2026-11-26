@@ -2,8 +2,8 @@
 
 ``check`` holds the usage errors (Order of checks step 1). ``run`` does steps 2 to 10 through
 ``retro.prepare`` (the order, the digest, the key, reuse and ``already_running``) and prints a
-reused retro. TODO(#24): the plan check and the dry run's plan (steps 11 and 12). TODO(#26): the launch
-(steps 13 to 16).
+reused retro. TODO(#24): the plan check and the dry run's plan (steps 11 and 12).
+TODO(#26): the launch (steps 13 to 16).
 """
 
 from __future__ import annotations
