@@ -259,6 +259,8 @@ strings: fix_surrogates, then model, tool, agent_type and version capped at 128 
 
 Tool and model names are stored as read (capped at 128 characters); output lists are capped at query time (Session `models`: 64; `usage` rows: `--limit`).
 
+Details the parser fixes (conservative readings): a line is decoded as UTF-8 only (invalid bytes become U+FFFD); a numeric field that is absent or null is 0; an integer literal of more than 64 digits fails every numeric rule; a timestamp without a zone is missing; a line with more than 1,000 content blocks is an error line; a dedupe id (message id, tool-use id, uuid) longer than 4,096 characters, empty or not a string is missing, and the event then takes the line-offset fallback; `files.last_ts` is the timestamp of the latest line that had one, in file order; a `cost-state` line in an agent file is ignored; the whole of a `<synthetic>` message line with zero usage is ignored.
+
 `fix_surrogates` replaces each lone surrogate with U+FFFD at every point a string enters the store, a digest, a manifest, an artifact or output.
 
 **6. Progress.** For each file the store keeps what change detection needs and the per-file facts the session values come from (copy):
