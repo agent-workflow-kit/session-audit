@@ -236,6 +236,7 @@ below the root: every directory opened with openat(O_RDONLY|O_DIRECTORY|O_NOFOLL
 line read: readline(8 MiB + 1); a longer record is skipped to the next LF in 1 MiB steps, checking the budgets at each step, and counted in lines.oversized
 partial tail: left for the next run; a tail longer than 8 MiB sets the file's skip_to_lf column and the offset moves to EOF
 budgets: ingest.file_budget (default 60 s) per file and --budget per run; checked between lines
+line length: up to 8 MiB of content plus its LF is a line; a record with 8 MiB + 1 bytes of content is oversized
 ```
 
 A root is unusable (reported with `root_unusable`, other roots continue; none usable is exit 12 `no_readable_roots`) when it is missing, not a directory, not owned by the user, or writable by group or others (mode `& 0o022`). A group-writable root is refused on purpose: with a umask of 002 Claude Code can create `~/.claude/projects` as 0770, and the fix is `chmod g-w <root>` (the exit-12 hint says so). Any other violation skips the file and counts it as `files.unsafe`. A failure to open a path component or the file that is not `ENOENT` (`ENOENT` is `files.vanished`) is counted the same way, conservatively: `EACCES`, `EMFILE`, a component swapped for a symlink or a non-directory all count as `files.unsafe`, because no count or warning listed in this interface names an unreadable file at open. The only such signal is the discovery warning `dirs_unreadable` (a free-string ingest warning for a directory that cannot be listed); #15 settles the final reporting. A broken `agent-<id>.meta.json` (unsafe) counts the same; a missing one counts nothing.
@@ -274,6 +275,8 @@ tail_sha = SHA-256 of the 4 KiB ending at offset
 reread from the start when: (dev, inode) changed, or size < offset, or head_sha differs, or tail_sha of the bytes before offset differs
 otherwise read from offset
 ```
+
+`size` is the file size seen when the progress was saved (never below `offset`); change detection and "unchanged" never use it alone. A file is unchanged only when its current size equals the stored `offset` and the hashes match; `offset` below the size means unread bytes (or a partial tail, which waits) and the file is read again. A file stopped by a budget therefore has a size above its offset and is resumed.
 
 A reread first resets the file row (offset 0, `rereading` set) and deletes the old events in batches of at most 2,000 rows, each batch its own short transaction that also repairs the owner of every key it deleted from; the last batch clears `rereading`, and a run that finds it set finishes the deletion before it reads. Then the file's events are rebuilt chunk by chunk (at most 10,000 lines or 2,000 events per chunk); each chunk's events, offset, owners and per-file facts commit together, so a crash leaves the state of the last committed chunk (see Counting rules 1).
 
