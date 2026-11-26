@@ -8,7 +8,7 @@
    ``cli._check_config``, which runs first;
 3. claude-session present and at least MIN_CS (``csversion.check_version``);
 4. ``Steps.skill_preflight`` (``plugins.skill_preflight``, wired in ``commands/retro_run``);
-5. ``Steps.housekeeping``, not with ``--dry-run`` (TODO(#27));
+5. ``Steps.housekeeping``, not with ``--dry-run`` (``retrorecovery``, in ``commands/retro_run``);
 6. the scope (``retroscope.resolve_scope``), 7. the candidates by stored ``ended_at``;
 8. the refresh and the skips: the candidates are digested in growing prefixes of the order until
    ``retro.max_sessions`` are kept or none is left; each new prefix is refreshed first
@@ -73,7 +73,7 @@ class Steps(Protocol):
         for ``skill_not_found`` or ``unsafe_plugin_dir``. Returns the directories found."""
 
     def housekeeping(self, ctx: Context) -> None:
-        """Order of checks step 5 (TODO(#27)): recovery and cleanup retries. Not called with
+        """Order of checks step 5 (``retrorecovery``): recovery and cleanup retries. Not called with
         ``--dry-run``. Never changes the command's exit code."""
 
 

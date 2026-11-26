@@ -14,8 +14,12 @@ The flow of a real run (``retention`` holds the rules):
 ``--dry-run`` takes no lease and writes nothing: it plans the same rules over a read-only view of
 the store (none when there is none).
 
-TODO(#27): the housekeeping step (recovery and cleanup retries, ``recoveries`` and the warning
-``recovery_deferred``). Until then ``recoveries`` is empty and recovery is never attempted.
+Housekeeping (``retrorecovery``: recovery of retros left behind, cleanup retries, old temporary
+files) runs after session retention and before the retro rules, so a recovered retro's cleanup is
+settled before ``retro_sessions`` rows are judged; ``recoveries`` lists the retro ids recovered
+and the warning ``recovery_deferred`` says something had to wait (no claude-session, or the 120 s
+bound). The expired digests are the retention rule's. ``--dry-run`` only lists the retros it would
+recover.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ import sqlite3
 from typing import Any
 
 from .. import args as a
-from .. import errors
+from .. import errors, retrorecovery
 from ..command import Command, Context
 from ..lease import IngestTarget, acquire
 from ..retention import (
@@ -72,8 +76,7 @@ def build_report(report: Report, *, dry_run: bool) -> dict[str, Any]:
     return {
         "dry_run": dry_run,
         "tables": {name: report.tables[name] for name in PRUNE_TABLES},
-        # TODO(#27): the ids housekeeping recovered (or, with --dry-run, would recover).
-        "recoveries": [],
+        "recoveries": list(report.recoveries),
         "warnings": list(report.warnings),
     }
 
@@ -133,6 +136,7 @@ def _plan(ctx: Context, report: Report) -> None:
             report.warnings.append("ingest_busy")
         else:
             plan_sessions(conn, now_ms, settings, report)
+        report.recoveries.extend(retrorecovery.planned(conn, ctx.gateway))
         harness_runs(conn, None, now, settings, report)
         retros(conn, None, ctx.gateway, directory, now_ms, settings, report)
         retro_starts(conn, now, settings, report, apply=False)
@@ -160,6 +164,11 @@ def _apply(ctx: Context, store: Store, report: Report) -> None:
         finally:
             with contextlib.suppress(errors.CliError):
                 lease.release()
+    housekeeping = retrorecovery.run_housekeeping(ctx, digests=False)
+    report.recoveries.extend(housekeeping.recovered)
+    for warning in housekeeping.warnings:
+        if warning not in report.warnings:
+            report.warnings.append(warning)
     now = gateway.now()
     harness_runs(store.conn, store.transaction, now, settings, report)
     retros(store.conn, store.transaction, gateway, store.directory, now_ms(), settings, report)
@@ -176,7 +185,7 @@ def _apply(ctx: Context, store: Store, report: Report) -> None:
         ctx.actor,
         "prune",
         tables={name: report.tables[name] for name in PRUNE_TABLES},
-        recovered=0,  # TODO(#27): the number of retros housekeeping recovered
+        recovered=len(report.recoveries),
     )
 
 

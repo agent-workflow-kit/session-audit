@@ -30,7 +30,10 @@ from .ingesthelp import (
     messages,
     state_dir_of,
 )
+from .retrohelp import live_lease
 from .schemas import validate
+
+FINAL = ("done", "failed", "escalated", "canceled")
 
 DAY = timedelta(days=1)
 NOW = datetime(2026, 1, 1, tzinfo=UTC)  # the fake clock's start
@@ -91,11 +94,19 @@ def count(home: Path, table: str) -> int:
 
 
 def add_retro(
-    conn: sqlite3.Connection, rid: str, state: str, created_at: int, artifact: bool = True
+    conn: sqlite3.Connection,
+    rid: str,
+    state: str,
+    created_at: int,
+    artifact: bool = True,
+    lease: tuple[int, str, int] | None = None,
 ) -> None:
+    """A retro row. A non-final one needs a live ``lease`` to stay as it is: housekeeping
+    recovers every non-final retro whose lease is not live (``runner_lost``)."""
     conn.execute(
-        "INSERT INTO retros (id, key, state, created_at) VALUES (?, ?, ?, ?)",
-        (rid, hashlib.sha256(rid.encode()).hexdigest(), state, created_at),
+        "INSERT INTO retros (id, key, state, created_at, lease_pid, lease_start, "
+        "lease_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (rid, hashlib.sha256(rid.encode()).hexdigest(), state, created_at, *(lease or (None,) * 3)),
     )
     if artifact:
         conn.execute("INSERT INTO retro_artifacts (retro_id, artifact) VALUES (?, '{}')", (rid,))
@@ -198,8 +209,9 @@ def test_final_retros_older_than_the_retention_go_with_artifact_and_digest(
         "ra-gggggggg": ("digesting", cutoff - 1, False),
         "ra-hhhhhhhh": ("validating", cutoff - 1, False),
     }
+    held = live_lease(gw)
     for rid, (state, created, _) in cases.items():
-        add_retro(conn, rid, state, created)
+        add_retro(conn, rid, state, created, lease=None if state in FINAL else held)
     for rid, (_, _, has_digest) in cases.items():
         if has_digest:
             add_digest(home, rid, mtime=1)
@@ -222,7 +234,7 @@ def test_expired_digests_go_by_the_retro_row_else_by_the_directory_time(
     cutoff = NOW_MS - 7 * 86_400_000
     add_retro(conn, "ra-aaaaaaaa", "done", cutoff - 1)  # expired digest, retro kept
     add_retro(conn, "ra-bbbbbbbb", "done", cutoff)  # at the cutoff: kept
-    add_retro(conn, "ra-cccccccc", "running", 0)  # a live retro's digest is never expired
+    add_retro(conn, "ra-cccccccc", "running", 0, lease=live_lease(gw))  # live: never expired
     for rid in ("ra-aaaaaaaa", "ra-bbbbbbbb", "ra-cccccccc"):
         add_digest(home, rid)
     cutoff_s = cutoff // 1000
