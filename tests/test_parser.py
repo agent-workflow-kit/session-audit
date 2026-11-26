@@ -254,13 +254,27 @@ def test_agent_line_carries_parent_session_and_own_agent():
 def test_cost_state_valid(value):
     r = parse({"type": "cost-state", "totalCostUSD": value})
     assert r.status is Status.OK and r.cost_usd == float(value) and not r.cost_invalid
-    assert math.copysign(1, r.cost_usd) > 0
+    assert r.cost_usd is not None and math.copysign(1, r.cost_usd) > 0
 
 
 @pytest.mark.parametrize(
     "text",
-    ['1e999', '-1e999', 'NaN', 'Infinity', '-1', 'true', 'false', '"5"', '2e6', 'null1', '[]',
-     '{}', '1000000.01', "9" * 5000],
+    [
+        "1e999",
+        "-1e999",
+        "NaN",
+        "Infinity",
+        "-1",
+        "true",
+        "false",
+        '"5"',
+        "2e6",
+        "null1",
+        "[]",
+        "{}",
+        "1000000.01",
+        "9" * 5000,
+    ],
 )
 def test_cost_state_invalid_is_ignored_and_flagged(text):
     r = parse_line(b'{"type":"cost-state","totalCostUSD":' + text.encode() + b"}\n", CTX)
@@ -287,8 +301,10 @@ def test_cost_state_in_an_agent_file_is_ignored():
 
 
 @pytest.mark.parametrize("bad", [-1, 2**32 + 1, True, False, "5", 1.5, 5.0, [], {}, 1e999])
-@pytest.mark.parametrize("field", ["input_tokens", "output_tokens", "cache_read_input_tokens",
-                                   "cache_creation_input_tokens"])
+@pytest.mark.parametrize(
+    "field",
+    ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"],
+)
 def test_bad_token_counter_is_an_error_line(field, bad):
     r = parse_line(json.dumps(assistant({field: bad})).encode(), CTX)
     assert r.status is Status.ERROR
@@ -311,7 +327,7 @@ def test_boundary_values_are_kept():
     (e,) = parse(assistant({"input_tokens": 2**32, "output_tokens": 0})).events
     assert e.input_tokens == 2**32
     (t,) = parse({"type": "system", "subtype": "turn_duration", "durationMs": 2**32}).events
-    assert math.isfinite(t.seconds) and t.seconds == 2**32 / 1000
+    assert t.seconds is not None and math.isfinite(t.seconds) and t.seconds == 2**32 / 1000
 
 
 def test_null_counters_are_absent():
@@ -329,9 +345,20 @@ def test_bad_value_in_one_block_drops_the_whole_line():
 
 @pytest.mark.parametrize(
     "stamp",
-    ["2019-12-31T23:59:59Z", "2026-11-27T00:00:00Z", "nope", "", 5, None, True, "2026-03-04",
-     "2026-03-04T05:06:07", "0001-01-01T00:00:00+23:00", "9999-12-31T23:59:59-23:00",
-     "2026-03-04T05:06:07Z" + " " * 100],
+    [
+        "2019-12-31T23:59:59Z",
+        "2026-11-27T00:00:00Z",
+        "nope",
+        "",
+        5,
+        None,
+        True,
+        "2026-03-04",
+        "2026-03-04T05:06:07",
+        "0001-01-01T00:00:00+23:00",
+        "9999-12-31T23:59:59-23:00",
+        "2026-03-04T05:06:07Z" + " " * 100,
+    ],
 )
 def test_unusable_timestamps_are_missing_not_errors(stamp):
     r = parse({"type": "user", "timestamp": stamp})
@@ -361,6 +388,7 @@ def test_names_are_capped_and_surrogates_fixed():
     obj["version"] = "v\ud800" + "x" * 300
     obj["entrypoint"] = "e" * 200
     r = parse_line(json.dumps(obj, ensure_ascii=True).encode(), CTX)
+    assert r.cwd and r.entrypoint and r.version and r.events[0].model
     assert len(r.events[0].model) == 128
     assert len(r.cwd) == 4096 and len(r.entrypoint) == 128
     assert r.version.startswith("v�") and len(r.version) == 128
@@ -398,17 +426,41 @@ def test_wrong_shapes_are_missing_not_errors():
 # --- unknown and error lines ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("obj", [{}, {"type": "queue-operation"}, {"type": 5}, {"type": ["a"]},
-                                 {"type": None}, {"type": {"a": 1}}])
+@pytest.mark.parametrize(
+    "obj",
+    [
+        {},
+        {"type": "queue-operation"},
+        {"type": 5},
+        {"type": ["a"]},
+        {"type": None},
+        {"type": {"a": 1}},
+    ],
+)
 def test_unknown_types(obj):
     assert parse(obj).status is Status.UNKNOWN
 
 
 @pytest.mark.parametrize(
     "data",
-    [b"", b"\n", b"   \n", b"[]\n", b"1\n", b'"s"\n', b"null\n", b"not json\n", b"{\n", b'{"a":1}x\n',
-     b'{"type":"user"\x00}\n', b"\x00\n", b"\xef\xbb\xbf{}\n", b"\xff\xfe{\x00}\x00\n",
-     b'{"a": NaN, "a": 1,}\n', b"{'a':1}\n"],
+    [
+        b"",
+        b"\n",
+        b"   \n",
+        b"[]\n",
+        b"1\n",
+        b'"s"\n',
+        b"null\n",
+        b"not json\n",
+        b"{\n",
+        b'{"a":1}x\n',
+        b'{"type":"user"\x00}\n',
+        b"\x00\n",
+        b"\xef\xbb\xbf{}\n",
+        b"\xff\xfe{\x00}\x00\n",
+        b'{"a": NaN, "a": 1,}\n',
+        b"{'a':1}\n",
+    ],
 )
 def test_error_lines(data):
     assert parse_line(data, CTX) is ERROR
@@ -451,7 +503,9 @@ def test_huge_integers_and_exponents_never_raise():
     for number in (digits, b"-" + digits, b"1e99999999999999", b"0." + b"0" * 100000 + b"1"):
         r = parse_line(b'{"type":"user","x":' + number + b',"uuid":"u"}\n', CTX)
         assert r.status is Status.OK
-    r = parse_line(b'{"type":"system","subtype":"turn_duration","durationMs":' + digits + b"}\n", CTX)
+    r = parse_line(
+        b'{"type":"system","subtype":"turn_duration","durationMs":' + digits + b"}\n", CTX
+    )
     assert r.status is Status.ERROR
 
 
@@ -484,7 +538,12 @@ def test_digest_items_only_when_asked():
     obj = user("hello there")
     assert parse(obj).digest == ()
     (item,) = parse(obj, DCTX).digest
-    assert (item.kind, item.text, item.uuid, item.ts) == (DigestKind.PROMPT, "hello there", "u2", TS_MS)
+    assert (item.kind, item.text, item.uuid, item.ts) == (
+        DigestKind.PROMPT,
+        "hello there",
+        "u2",
+        TS_MS,
+    )
 
 
 def test_prompt_rules():
@@ -498,8 +557,11 @@ def test_prompt_rules():
 
 
 def test_assistant_text_items_per_block_with_message_id():
-    content = [{"type": "thinking", "thinking": "secret"}, {"type": "text", "text": "one"},
-               {"type": "text", "text": "two"}]
+    content = [
+        {"type": "thinking", "thinking": "secret"},
+        {"type": "text", "text": "one"},
+        {"type": "text", "text": "two"},
+    ]
     items = parse(assistant({"output_tokens": 1}, content), DCTX).digest
     assert [(i.kind, i.text, i.block, i.message_id) for i in items] == [
         (DigestKind.ASSISTANT, "one", 1, "msg_1"),
@@ -508,7 +570,9 @@ def test_assistant_text_items_per_block_with_message_id():
 
 
 def test_rejection_item_and_denial_event():
-    content = [{"type": "tool_result", "tool_use_id": "t", "content": [{"type": "text", "text": "no"}]}]
+    content = [
+        {"type": "tool_result", "tool_use_id": "t", "content": [{"type": "text", "text": "no"}]}
+    ]
     r = parse(user(content, toolDenialKind="user-rejected"), DCTX)
     assert [e.kind for e in r.events] == [Kind.DENIAL]
     assert [(i.kind, i.text) for i in r.digest] == [(DigestKind.REJECTION, "no")]
@@ -518,7 +582,9 @@ def test_rejection_item_and_denial_event():
 
 def test_tool_call_argument_summaries():
     def call(name, inp):
-        r = parse(assistant(None, [{"type": "tool_use", "id": "t", "name": name, "input": inp}]), DCTX)
+        r = parse(
+            assistant(None, [{"type": "tool_use", "id": "t", "name": name, "input": inp}]), DCTX
+        )
         return [i.text for i in r.digest]
 
     assert call("Bash", {"command": "ls -l"}) == ["ls -l"]
@@ -536,9 +602,7 @@ def test_tool_call_argument_summaries():
 def test_digest_text_cannot_be_stored_or_printed_by_accident():
     event_fields = {f.name: f.type for f in dataclasses.fields(Event)}
     assert not any("text" in n or "content" in n or "input" == n for n in event_fields)
-    assert set(event_fields.values()) <= {
-        "Kind", "str | None", "int", "int | None", "float | None"
-    }
+    assert set(event_fields.values()) <= {"Kind", "str | None", "int", "int | None", "float | None"}
     assert {f.name for f in dataclasses.fields(Event)}.isdisjoint(
         {f.name for f in dataclasses.fields(DigestItem)} - {"kind", "block", "uuid", "ts", "tool"}
     )
@@ -546,7 +610,9 @@ def test_digest_text_cannot_be_stored_or_printed_by_accident():
     assert "SECRET-PROMPT" not in repr(item)
     r = parse(user("SECRET-PROMPT"), DCTX)
     assert "SECRET-PROMPT" not in repr(r)
-    for e in parse(assistant({"output_tokens": 1}, [{"type": "text", "text": "SECRET"}]), DCTX).events:
+    for e in parse(
+        assistant({"output_tokens": 1}, [{"type": "text", "text": "SECRET"}]), DCTX
+    ).events:
         assert "SECRET" not in repr(e)
 
 
@@ -577,11 +643,22 @@ def test_slot_of():
 def test_file_facts_counts_and_facts():
     facts = FileFacts()
     lines = [
-        {"type": "user", "timestamp": "2026-03-04T05:06:07Z", "cwd": "/a", "entrypoint": "cli",
-         "version": "1", "uuid": "u"},
+        {
+            "type": "user",
+            "timestamp": "2026-03-04T05:06:07Z",
+            "cwd": "/a",
+            "entrypoint": "cli",
+            "version": "1",
+            "uuid": "u",
+        },
         {"type": "mystery"},
-        {"type": "user", "timestamp": "2026-03-04T05:00:00Z", "cwd": "/b", "version": "2",
-         "interruptedMessageId": "m"},
+        {
+            "type": "user",
+            "timestamp": "2026-03-04T05:00:00Z",
+            "cwd": "/b",
+            "version": "2",
+            "interruptedMessageId": "m",
+        },
         {"type": "cost-state", "totalCostUSD": 2.5},
         {"type": "cost-state", "totalCostUSD": -1},
         {"type": "cost-state", "totalCostUSD": 3.5},
@@ -611,8 +688,16 @@ def test_slot_is_null_until_a_timestamp_was_read():
 
 def test_error_line_does_not_touch_identity():
     facts = FileFacts()
-    facts.add(parse({"type": "assistant", "cwd": "/x", "timestamp": TS,
-                     "message": {"usage": {"input_tokens": -1}}}))
+    facts.add(
+        parse(
+            {
+                "type": "assistant",
+                "cwd": "/x",
+                "timestamp": TS,
+                "message": {"usage": {"input_tokens": -1}},
+            }
+        )
+    )
     assert (facts.first_cwd, facts.min_ts, facts.last_ts) == (None, None, None)
 
 
@@ -633,15 +718,41 @@ def numbers(result) -> list[float]:
 
 def test_every_output_number_is_finite_and_capped():
     rng = random.Random(7)
-    weird = [0, 1, -1, 2**32, 2**32 + 1, 2**63, 10**30, 1.5, 1e999, -1e999, float("nan"), True, "7", None]
+    weird = [
+        0,
+        1,
+        -1,
+        2**32,
+        2**32 + 1,
+        2**63,
+        10**30,
+        1.5,
+        1e999,
+        -1e999,
+        float("nan"),
+        True,
+        "7",
+        None,
+    ]
     for _ in range(300):
-        usage = {k: rng.choice(weird) for k in
-                 ("input_tokens", "output_tokens", "cache_read_input_tokens",
-                  "cache_creation_input_tokens")}
-        usage["cache_creation"] = {"ephemeral_5m_input_tokens": rng.choice(weird),
-                                   "ephemeral_1h_input_tokens": rng.choice(weird)}
-        for obj in (assistant(usage), {"type": "cost-state", "totalCostUSD": rng.choice(weird)},
-                    {"type": "system", "subtype": "turn_duration", "durationMs": rng.choice(weird)}):
+        usage = {
+            k: rng.choice(weird)
+            for k in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            )
+        }
+        usage["cache_creation"] = {
+            "ephemeral_5m_input_tokens": rng.choice(weird),
+            "ephemeral_1h_input_tokens": rng.choice(weird),
+        }
+        for obj in (
+            assistant(usage),
+            {"type": "cost-state", "totalCostUSD": rng.choice(weird)},
+            {"type": "system", "subtype": "turn_duration", "durationMs": rng.choice(weird)},
+        ):
             r = parse_line(json.dumps(obj).encode(), CTX)  # json.dumps emits NaN/Infinity tokens
             for n in numbers(r):
                 assert type(n) is not bool and math.isfinite(n) and 0 <= n <= 2**32 * 1.0 + 1e6
@@ -653,8 +764,17 @@ def test_every_output_number_is_finite_and_capped():
 
 def corpus(rng: random.Random, n: int) -> list[bytes]:
     pool = [
-        raw(assistant({"input_tokens": 1, "output_tokens": 2}, [{"type": "tool_use", "id": "t", "name": "Bash"}])),
-        raw(user([{"type": "tool_result", "tool_use_id": "t", "is_error": True}], toolDenialKind="x")),
+        raw(
+            assistant(
+                {"input_tokens": 1, "output_tokens": 2},
+                [{"type": "tool_use", "id": "t", "name": "Bash"}],
+            )
+        ),
+        raw(
+            user(
+                [{"type": "tool_result", "tool_use_id": "t", "is_error": True}], toolDenialKind="x"
+            )
+        ),
         raw({"type": "system", "subtype": "turn_duration", "durationMs": 5, "timestamp": TS}),
         raw({"type": "system", "subtype": "compact_boundary", "uuid": "c"}),
         raw({"type": "cost-state", "totalCostUSD": 1.25}),
@@ -683,9 +803,14 @@ def read_all(path: Path, cuts: list[int], blob: bytes) -> tuple[list, FileFacts]
         last = cut
         handle = opened(path)
         try:
-            run = IncrementalRead(handle, progress, gateway=Ticking(), rules_version=1,
-                                  file_budget=__import__("datetime").timedelta(seconds=60),
-                                  run_deadline=None)
+            run = IncrementalRead(
+                handle,
+                progress,
+                gateway=Ticking(),
+                rules_version=1,
+                file_budget=__import__("datetime").timedelta(seconds=60),
+                run_deadline=None,
+            )
             for line in run:
                 events.extend((line.offset, e) for e in facts.add(parse_line(line.data, CTX)))
             progress = run.checkpoint()

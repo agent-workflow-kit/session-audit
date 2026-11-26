@@ -435,7 +435,9 @@ class _Line:
         obj = self.obj
         blocks = _blocks(self.message)
         results = [
-            (i, b) for i, b in enumerate(blocks) if isinstance(b, dict) and b.get("type") == "tool_result"
+            (i, b)
+            for i, b in enumerate(blocks)
+            if isinstance(b, dict) and b.get("type") == "tool_result"
         ]
         for index, block in results:
             if block.get("is_error") is True:
@@ -469,7 +471,7 @@ class _Line:
             self.event(Kind.COMPACTION)
 
 
-# --- the per-file accumulator -----------------------------------------------------------------------
+# --- the per-file accumulator ------------------------------------------------------------------
 
 
 def slot_of(ts_ms: int) -> int:
