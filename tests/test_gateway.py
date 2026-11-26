@@ -709,6 +709,19 @@ def test_open_private_read_only_refuses_create_and_append(tmp_path: Path) -> Non
         SystemGateway().open_private(tmp_path / "f", create=False, append=True, read_only=True)
 
 
+def test_token_urlsafe_is_random_url_safe_and_inside_the_run_token_range() -> None:
+    gw = SystemGateway()
+    first, second = gw.token_urlsafe(24), gw.token_urlsafe(24)
+    assert re.fullmatch(r"[A-Za-z0-9_-]{32}", first) and first != second
+    assert len(gw.token_urlsafe(12)) == 16 and len(gw.token_urlsafe(96)) == 128
+
+
+@pytest.mark.parametrize("nbytes", [0, 11, 97, -1, True, 24.0, "24"])
+def test_token_urlsafe_refuses_a_size_outside_the_run_token_range(nbytes: object) -> None:
+    with pytest.raises(ValueError, match="run token"):
+        SystemGateway().token_urlsafe(nbytes)  # type: ignore[arg-type]
+
+
 def test_token_hex_is_random_lowercase_hex_of_twice_the_bytes() -> None:
     gw = SystemGateway()
     first, second = gw.token_hex(16), gw.token_hex(16)

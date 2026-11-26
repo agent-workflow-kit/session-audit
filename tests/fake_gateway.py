@@ -82,6 +82,9 @@ class FakeGateway:
         # Hex strings token_hex hands out in order (the last one repeats); empty: a counter.
         self.nonces: list[str] = []
         self._nonce_count = 0
+        # The same for token_urlsafe (run tokens): the last one repeats; empty: a counter.
+        self.tokens: list[str] = []
+        self._token_count = 0
         # Called with the normalized path of every directory or file opened below a root, before
         # the open looks at the tree: a test swaps the entry here to stage a race.
         self.on_open: Callable[[str], None] | None = None
@@ -127,6 +130,15 @@ class FakeGateway:
             return self.nonces.pop(0) if len(self.nonces) > 1 else self.nonces[0]
         self._nonce_count += 1
         return f"{self._nonce_count:0{2 * nbytes}x}"
+
+    def token_urlsafe(self, nbytes: int) -> str:
+        if isinstance(nbytes, bool) or not isinstance(nbytes, int) or not 12 <= nbytes <= 96:
+            raise ValueError("a run token is 12 to 96 random bytes (16 to 128 characters)")
+        if self.tokens:
+            return self.tokens.pop(0) if len(self.tokens) > 1 else self.tokens[0]
+        self._token_count += 1
+        length = (nbytes * 4 + 2) // 3  # the length token_urlsafe(nbytes) has
+        return f"t{self._token_count}".ljust(length, "A")
 
     def pid(self) -> int:
         return self.pid_value
