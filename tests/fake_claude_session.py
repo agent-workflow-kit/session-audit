@@ -416,20 +416,25 @@ def status_doc(
 
 def kinds_doc(
     *,
-    sandbox_available: bool | None = True,
+    sandbox_available: bool | None = None,
+    review_sandbox_available: bool | None = True,
     names: tuple[str, ...] = ("audit", "review"),
     **top: Any,
 ) -> dict[str, Any]:
-    """A valid ``kinds --json`` document: one profile per name (the ``audit`` one is the retro's,
-    its ``sandbox_available`` is the argument), ``top`` replaces top-level fields."""
+    """A valid ``kinds --json`` document of a stock install: one profile per name. The ``audit``
+    profile has the sandbox off, so its ``sandbox_available`` is null (pass a boolean to make it
+    sandboxed); the sandbox-capable ``review`` profile's is ``review_sandbox_available``. ``top``
+    replaces top-level fields."""
     profile = plan_doc()["profile"]
     kinds = []
     for name in names:
         one = {**profile, "name": name, "fallback": False}
-        if name == "audit":
-            one["sandbox_available"] = sandbox_available
-            if sandbox_available is False:
-                one["sandbox_problems"] = ["the sandbox helper is not installed"]
+        available = sandbox_available if name == "audit" else review_sandbox_available
+        if name == "audit" and sandbox_available is None:
+            one["sandbox"] = "off"
+        one["sandbox_available"] = available
+        if available is False:
+            one["sandbox_problems"] = ["the sandbox helper is not installed"]
         kinds.append(one)
     return {
         "default_kind": "review",

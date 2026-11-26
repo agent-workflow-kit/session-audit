@@ -120,12 +120,21 @@ def freshness(conn: sqlite3.Connection | None) -> dict[str, str | None]:
     }
 
 
-def _stamp(value: Any) -> str | None:
+def whole_ms(value: Any) -> int | None:
+    """An untyped ``meta`` value as epoch milliseconds: a non-negative integer or ASCII digit
+    text (None for anything else; ``validate`` and ``store`` share this rule)."""
     if isinstance(value, bool):
         return None
     if isinstance(value, str) and value.isascii() and value.isdigit():
         value = int(value)
     if not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _stamp(value: Any) -> str | None:
+    value = whole_ms(value)
+    if value is None:
         return None
     try:
         return derive.format_ms(value)

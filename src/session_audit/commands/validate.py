@@ -19,6 +19,7 @@ Hooks are never run (a parsed config already holds only well-formed entries).
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import os
 import re
@@ -30,17 +31,17 @@ from typing import Any
 
 from .. import plugins
 from ..command import Command, Context
-from ..config import ConfigIssue, home_dir, profile_issues
+from ..config import DEFAULT_CLAUDE_SESSION_CMD, ConfigIssue, home_dir, profile_issues
 from ..csversion import Presence, check_version
 from ..errors import CliError
 from ..gateway import Gateway
 from ..grammar import GrammarError, parse_ingest_every
 from ..harness import Invalid, strict_loads
-from ..launchplan import PROFILE_RELATIVE
+from ..launchplan import PROFILE_RELATIVE, RETRO_KIND
 from ..reader import open_root_checked
 from ..retroartifact import bundled_marker
 from ..retrorecovery import planned
-from ..sessionquery import read_store
+from ..sessionquery import read_store, whole_ms
 from ..store import StoreStatus, inspect_store
 from . import cron
 
@@ -52,8 +53,8 @@ PROBE_TIMEOUT = 30.0
 PROBE_OUTPUT_LIMIT = 1024 * 1024
 SKILL_LIMIT = 1024 * 1024
 BUNDLED_SKILL = "skills/audit/SKILL.md"
-DEFAULT_CS = "claude-session"
-RETRO_KIND = "audit"
+DEFAULT_CS = DEFAULT_CLAUDE_SESSION_CMD
+SANDBOX_FALLBACK_KIND = "review"  # a sandbox-capable built-in kind
 
 WARNING_ORDER = (
     "price_table_old",
@@ -159,9 +160,11 @@ def _permission_profile(ctx: Context, bundled: str | None) -> str | None:
         return None
     try:
         gateway.lstat(configured)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return "permission_profile_missing"
-    except OSError:
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            return "permission_profile_missing"
         return "config_unsafe"
     if profile_issues(gateway, configured, home_dir(os.environ)):
         return "config_unsafe"
@@ -237,7 +240,7 @@ def _read_facts(ctx: Context) -> Facts:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "meta" in tables:
             last = _meta(conn, "last_complete_ingest_at")
-            facts.last_complete = last if type(last) is int else None
+            facts.last_complete = whole_ms(last)
             interval = _meta(conn, "ingest_interval")
             if isinstance(interval, str):
                 try:
@@ -260,9 +263,30 @@ def _read_facts(ctx: Context) -> Facts:
     return read_store(ctx, work)
 
 
+def _wal_without_shm(gateway: Gateway, directory: str) -> bool:
+    """A non-empty ``state.db-wal`` with no ``state.db-shm``: an unrecovered log."""
+    db = os.path.join(directory, "state.db")
+    try:
+        if gateway.lstat(db + "-wal").st_size <= 0:
+            return False
+    except OSError:
+        return False
+    try:
+        gateway.lstat(db + "-shm")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _store(ctx: Context, report: Report) -> Facts | None:
     """The ``store`` check; the facts when the store can be read (None: not readable, or a newer
     one that is never read)."""
+    if _wal_without_shm(ctx.gateway, ctx.state_path()):
+        # Opening it read-only would create a persistent ``-shm``; a writer command recovers it.
+        report.add("store", "store_unreadable")
+        return None
     try:
         status: StoreStatus = inspect_store(ctx.gateway, ctx.state_path())
     except CliError:
@@ -278,8 +302,9 @@ def _store(ctx: Context, report: Report) -> Facts | None:
         return Facts()
     try:
         facts = _read_facts(ctx)
-    except (CliError, OSError, sqlite3.Error):
-        # A lease whose liveness cannot be read is an error, never a dead holder.
+    except (CliError, OSError, sqlite3.Error, TypeError, ValueError, OverflowError):
+        # A lease whose liveness cannot be read (or whose stored values are not a lease at
+        # all) is an error, never a dead holder.
         report.add("store", "store_unreadable")
         return None
     report.add("store")
@@ -367,10 +392,9 @@ def _claude_session(ctx: Context, report: Report, command: str) -> None:
         report.add("claude_session", "claude_session_too_old")
 
 
-def _audit_profile(result_ok: bool, text: str) -> dict[str, Any] | None:
-    """The ``audit`` profile of a ``kinds --json`` document when the document is usable: strict
-    JSON, a claude that was found and is new enough, and a profile named ``audit`` that is not a
-    fallback."""
+def _profiles(result_ok: bool, text: str) -> dict[str, dict[str, Any]] | None:
+    """The non-fallback profiles (by name) of a ``kinds --json`` document when it is usable and
+    holds the ``audit`` profile: strict JSON, a claude that was found and is new enough."""
     if not result_ok:
         return None
     try:
@@ -379,16 +403,32 @@ def _audit_profile(result_ok: bool, text: str) -> dict[str, Any] | None:
         return None
     if not isinstance(document, dict):
         return None
-    if not isinstance(document.get("claude_bin_resolved"), str):
+    resolved = document.get("claude_bin_resolved")
+    if not isinstance(resolved, str) or not resolved:
         return None
     if document.get("claude_version_ok") is not True:
         return None
     kinds = document.get("kinds")
     if not isinstance(kinds, list):
         return None
+    found: dict[str, dict[str, Any]] = {}
     for one in kinds:
-        if isinstance(one, dict) and one.get("name") == RETRO_KIND and one.get("fallback") is False:
-            return one
+        if (
+            isinstance(one, dict)
+            and one.get("fallback") is False
+            and isinstance(one.get("name"), str)
+        ):
+            found.setdefault(one["name"], one)
+    return found if RETRO_KIND in found else None
+
+
+def _sandbox_available(profiles: dict[str, dict[str, Any]]) -> bool | None:
+    """``sandbox_available`` of the ``audit`` profile; null when its sandbox is off (a stock
+    install), then the same field of the sandbox-capable built-in ``review`` profile."""
+    for name in (RETRO_KIND, SANDBOX_FALLBACK_KIND):
+        available = profiles.get(name, {}).get("sandbox_available")
+        if isinstance(available, bool):
+            return available
     return None
 
 
@@ -408,14 +448,14 @@ def _probe(ctx: Context, report: Report) -> None:
         timeout=PROBE_TIMEOUT,
         stdout_limit=PROBE_OUTPUT_LIMIT,
     )
-    profile = _audit_profile(result.ok, result.stdout)
-    if profile is None:
+    profiles = _profiles(result.ok, result.stdout)
+    if profiles is None:
         report.add("probe_kinds", "probe_failed")
         report.add("probe_sandbox", "probe_failed")
         return
     report.add("probe_kinds")
     sandbox = ctx.settings.retro.sandbox
-    available = profile.get("sandbox_available")
+    available = _sandbox_available(profiles)
     if sandbox == "off" or available is True:
         report.add("probe_sandbox")
     elif sandbox == "preferred":

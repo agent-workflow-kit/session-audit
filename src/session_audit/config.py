@@ -100,6 +100,7 @@ _FIELD_SEGMENT = re.compile(r"[a-z_][a-z0-9_-]*", _ASCII)
 _ENVELOPE_FIELD = re.compile(r"[a-z_][a-z0-9_.-]{0,63}", _ASCII)  # errors.py: the "field" pattern
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}", _ASCII)
 _TOOL_NAME = re.compile(r"[A-Z][A-Za-z]{1,31}", _ASCII)
+DEFAULT_CLAUDE_SESSION_CMD = "claude-session"
 _CMD_NAME = re.compile(r"[A-Za-z0-9._/+-]{1,256}", _ASCII)
 # Starts with a letter or digit and holds no "..": the name is a path-like actor part.
 _ME_NAME = re.compile(r"(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._@/-]{0,63}", _ASCII)
@@ -430,7 +431,9 @@ class HarnessSettings(_Model):
     # A YAML 1.1 loader reads an unquoted ``off`` or ``on`` as a boolean; the schema says the
     # value is a string, so it is refused (quote it) rather than guessed.
     enabled: Annotated[Literal["auto", "on", "off"], _choice("auto", "on", "off")] = "auto"
-    claude_session_cmd: Annotated[str, _text(maximum=256, pattern=_CMD_NAME)] = "claude-session"
+    claude_session_cmd: Annotated[str, _text(maximum=256, pattern=_CMD_NAME)] = (
+        DEFAULT_CLAUDE_SESSION_CMD
+    )
 
 
 class ModelPrice(_Model):

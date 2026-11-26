@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ import pytest
 
 from session_audit import plugins
 from session_audit.commands import cron
+from session_audit.commands import validate as validate_module
+from session_audit.commands.validate import env_file_of
 from session_audit.config import ScheduleRetro, ScheduleScope
 from session_audit.gateway import CallResult, CallStatus
 from session_audit.grammar import IngestEvery
@@ -27,6 +30,7 @@ from .validatehelp import (
     check_of,
     hold_wal,
     install,
+    listing,
     make_newer,
     make_pending,
     make_store,
@@ -248,6 +252,7 @@ def test_a_store_with_a_live_wal_is_left_byte_identical(
         directory = state_dir_of(home)
         assert (directory / "state.db-wal").exists()
         before = snapshot(directory)
+        listing_before = listing(directory)
         wal_bytes = (directory / "state.db-wal").read_bytes()
         run = validate(capsys, gw)
         assert run.code == 0, run.out + run.err
@@ -257,6 +262,30 @@ def test_a_store_with_a_live_wal_is_left_byte_identical(
             assert after[path] == before[path], name
         assert (directory / "state.db-wal").read_bytes() == wal_bytes
         assert set(after) == set(before)
+        assert listing(directory) == listing_before
+        # an existing -shm is shared memory readers touch (inherent): only its content may move
+    finally:
+        close()
+
+
+def test_a_wal_without_a_shm_fails_store_unreadable_and_creates_nothing(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path
+) -> None:
+    close = hold_wal(home)
+    try:
+        directory = state_dir_of(home)
+        (directory / "state.db-shm").unlink()
+        assert (directory / "state.db-wal").stat().st_size > 0
+        before = listing(directory)
+        db_bytes = (directory / "state.db").read_bytes()
+        wal_bytes = (directory / "state.db-wal").read_bytes()
+        run = validate(capsys, gw)
+        assert run.code == 12, run.out + run.err
+        assert reasons(run.doc) == {"store": "store_unreadable"}
+        assert listing(directory) == before
+        assert not (directory / "state.db-shm").exists()
+        assert (directory / "state.db").read_bytes() == db_bytes
+        assert (directory / "state.db-wal").read_bytes() == wal_bytes
     finally:
         close()
 
@@ -315,6 +344,21 @@ def test_an_unsafe_profile_fails_config_unsafe(
     run = validate(capsys, gw)
     assert run.code == 12
     assert reasons(run.doc) == {"permission_profile": "config_unsafe"}
+
+
+@pytest.mark.parametrize("shape", ["under-a-file", "too-long"])
+def test_a_profile_path_that_cannot_exist_is_missing_not_unsafe(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, shape: str
+) -> None:
+    if shape == "under-a-file":
+        (home / "plain").write_text("x\n")
+        path = f"{home}/plain/profile.yaml"
+    else:
+        path = f"{home}/{'a' * 300}/profile.yaml"
+    write_config(home, f"retro: {{permission_profile: '{path}'}}\n")
+    run = validate(capsys, gw)
+    assert run.code == 12
+    assert reasons(run.doc) == {"permission_profile": "permission_profile_missing"}
 
 
 def test_a_profile_symlink_fails_config_unsafe(
@@ -467,6 +511,16 @@ def test_an_unusable_claude_session_fails_too_old(
     assert reasons(run.doc) == {"claude_session": "claude_session_too_old"}
 
 
+def test_a_too_old_claude_session_fails_with_harness_on(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path
+) -> None:
+    write_config(home, "harness: {enabled: 'on'}\n")
+    gw.version = CallResult(CallStatus.EXITED, 0, stdout="claude-session 0.45.1\n")
+    run = validate(capsys, gw)
+    assert run.code == 12
+    assert reasons(run.doc) == {"claude_session": "claude_session_too_old"}
+
+
 def test_claude_session_0_100_0_is_new_enough(
     capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path
 ) -> None:
@@ -537,7 +591,15 @@ def test_ingest_stale_uses_the_longer_of_a_day_and_twice_the_interval(
     assert warnings == (["ingest_stale"] if stale else [])
 
 
-@pytest.mark.parametrize("value", ["yesterday", 1.5, None])
+def test_a_last_complete_ingest_stored_as_digit_text_counts_like_a_number(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path
+) -> None:
+    gw.crontab = managed_block()
+    set_meta(home, "last_complete_ingest_at", str(now_ms(gw)))
+    assert validate(capsys, gw).doc["warnings"] == []
+
+
+@pytest.mark.parametrize("value", ["yesterday", 1.5, None, "", "-5", "1.5"])
 def test_a_last_complete_ingest_that_is_not_a_whole_number_counts_as_never(
     capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, value: object
 ) -> None:
@@ -569,6 +631,25 @@ def test_a_final_retro_does_not_warn(
 ) -> None:
     orphan(home, state="failed", reason="timeout")
     assert validate(capsys, gw).doc["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "lease",
+    [
+        (os.getpid(), "x", "zz"),
+        (b"\x00\x01", "x", 10**15),
+        ("pid", "x", 10**15),
+    ],
+    ids=["text-expiry", "blob-pid", "text-pid"],
+)
+def test_a_corrupt_lease_row_is_store_unreadable_with_the_document(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, lease: tuple[Any, ...]
+) -> None:
+    orphan(home, state="running", lease=lease)
+    run = validate(capsys, gw)
+    assert run.code == 12, run.out + run.err
+    assert reasons(run.doc) == {"store": "store_unreadable"}
+    validate_schema(run.doc, SCHEMA)
 
 
 @pytest.mark.parametrize("error", [PermissionError("proc"), FileNotFoundError("ps")])
@@ -647,6 +728,15 @@ def test_an_unsafe_env_file_of_the_managed_block_warns(
     os.chmod(env_file, 0o600)
     env_file.unlink()
     assert validate(capsys, gw).doc["warnings"] == ["env_file_unsafe"]
+
+
+@pytest.mark.parametrize("path", ["/a && b/env", "/x/it'", "/x/'", "/x/a' && 'b"])
+def test_env_file_of_reads_back_the_path_cron_install_quoted(path: str) -> None:
+    block = cron.build_block(
+        IngestEvery(60), ScheduleRetro(scope=ScheduleScope(since="7d")), "/usr/bin", path
+    )
+    found = [env_file_of(line) for line in block[1:-1]]
+    assert path in found
 
 
 def test_an_env_file_is_checked_without_a_store(
@@ -818,10 +908,110 @@ def test_an_unavailable_sandbox_passes_when_not_required(
 def test_an_unknown_sandbox_state_fails_when_required(
     capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
 ) -> None:
-    fake.script("kinds", step(kinds_doc(sandbox_available=None)))
+    fake.script("kinds", step(kinds_doc(review_sandbox_available=None)))  # both null
     assert (
         check_of(validate(capsys, gw, "--probe").doc, "probe_sandbox")["reason"] == "probe_failed"
     )
+
+
+def test_a_stock_audit_profile_with_the_sandbox_off_falls_back_to_the_review_profile(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
+) -> None:
+    fake.script("kinds", step(kinds_doc(sandbox_available=None, review_sandbox_available=True)))
+    run = validate(capsys, gw, "--probe")
+    assert run.code == 0, run.out
+    assert check_of(run.doc, "probe_sandbox")["ok"] is True
+
+
+def test_a_null_audit_sandbox_and_an_unavailable_review_sandbox_fail_when_required(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
+) -> None:
+    fake.script("kinds", step(kinds_doc(sandbox_available=None, review_sandbox_available=False)))
+    run = validate(capsys, gw, "--probe")
+    assert run.code == 12
+    assert reasons(run.doc) == {"probe_sandbox": "sandbox_unavailable"}
+
+
+def test_a_null_audit_sandbox_without_a_review_profile_fails_probe_failed(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
+) -> None:
+    fake.script("kinds", step(kinds_doc(names=("audit",))))
+    run = validate(capsys, gw, "--probe")
+    assert reasons(run.doc) == {"probe_sandbox": "probe_failed"}
+
+
+def test_a_boolean_audit_sandbox_wins_over_the_review_profile(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
+) -> None:
+    fake.script("kinds", step(kinds_doc(sandbox_available=True, review_sandbox_available=False)))
+    assert validate(capsys, gw, "--probe").code == 0
+    fake.script("kinds", step(kinds_doc(sandbox_available=False, review_sandbox_available=True)))
+    assert reasons(validate(capsys, gw, "--probe").doc) == {"probe_sandbox": "sandbox_unavailable"}
+
+
+def test_a_null_sandbox_everywhere_passes_when_not_required(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
+) -> None:
+    fake.script("kinds", step(kinds_doc(review_sandbox_available=None)))
+    write_config(home, "retro: {sandbox: preferred}\n")
+    assert validate(capsys, gw, "--probe").code == 0
+
+
+# --- probe gaps --------------------------------------------------------------------------------
+
+
+def test_a_kinds_call_that_times_out_fails_and_leaves_no_orphan(
+    capsys: pytest.CaptureFixture[str],
+    gw: ValidateGateway,
+    home: Path,
+    fake: FakeClaudeSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid_file = tmp_path / "kinds.pid"
+    fake.script("kinds", step(kinds_doc(), sleep=30.0, pid_file=pid_file))
+    monkeypatch.setattr(validate_module, "PROBE_TIMEOUT", 1.0)
+    run = validate(capsys, gw, "--probe")
+    assert reasons(run.doc) == {"probe_kinds": "probe_failed", "probe_sandbox": "probe_failed"}
+    pid = int(pid_file.read_text().strip())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("the timed-out kinds process is still running")
+
+
+def test_an_audit_profile_that_is_a_fallback_fails_the_probe(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
+) -> None:
+    document = kinds_doc()
+    document["kinds"][0]["fallback"] = True
+    fake.script("kinds", step(document, unvalidated=True))
+    run = validate(capsys, gw, "--probe")
+    assert check_of(run.doc, "probe_kinds")["reason"] == "probe_failed"
+
+
+def test_a_kinds_output_over_the_limit_fails_the_probe(
+    capsys: pytest.CaptureFixture[str],
+    gw: ValidateGateway,
+    home: Path,
+    fake: FakeClaudeSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake.script("kinds", step(kinds_doc()))
+    monkeypatch.setattr(validate_module, "PROBE_OUTPUT_LIMIT", 100)
+    run = validate(capsys, gw, "--probe")
+    assert reasons(run.doc) == {"probe_kinds": "probe_failed", "probe_sandbox": "probe_failed"}
+
+
+def test_an_empty_claude_bin_resolved_fails_the_probe(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, fake: FakeClaudeSession
+) -> None:
+    fake.script("kinds", step(kinds_doc(claude_bin_resolved=""), unvalidated=True))
+    assert check_of(validate(capsys, gw, "--probe").doc, "probe_kinds")["reason"] == "probe_failed"
 
 
 def test_a_kinds_call_that_cannot_start_fails(
@@ -853,6 +1043,30 @@ def test_probe_never_runs_a_hook_or_the_exec_bearing_config_of_an_unsafe_config(
     assert not marker.exists()
     assert all(call[0] == "claude-session" for call in gw.runs)  # never the configured command
     assert ["claude-session", "kinds", "--json"] not in gw.runs
+
+
+def test_an_unsafe_config_runs_nothing_for_plugin_dirs_and_the_profile(
+    capsys: pytest.CaptureFixture[str], gw: ValidateGateway, home: Path, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    script = tmp_path / "profile.yaml"
+    script.write_text(f"touch {marker}\n")
+    os.chmod(script, 0o600)
+    mine = tmp_path / "plugins"
+    mine.mkdir()
+    write_config(
+        home,
+        f"retro: {{plugin_dirs: ['{mine}'], permission_profile: '{script}'}}\n"
+        f"hooks: {{pre-retro: [{{cmd: 'touch {marker}'}}]}}\n",
+        mode=0o666,
+    )
+    gw.kinds = CallResult(CallStatus.EXITED, 0, stdout=json.dumps(kinds_doc()))
+    run = validate(capsys, gw, "--probe")
+    assert run.code == 12
+    assert check_of(run.doc, "probe_kinds")["reason"] == "config_unsafe"
+    assert check_of(run.doc, "probe_sandbox")["reason"] == "config_unsafe"
+    assert gw.runs == [["claude-session", "--version"]]
+    assert not marker.exists()
 
 
 def test_an_unsafe_config_never_runs_its_claude_session_command_even_without_probe(

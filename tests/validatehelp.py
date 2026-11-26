@@ -182,3 +182,8 @@ def hold_wal(home: Path) -> Callable[[], None]:
         "INSERT INTO meta (key, value) VALUES ('held', 1) ON CONFLICT (key) DO UPDATE SET value = 1"
     )
     return conn.close
+
+
+def listing(directory: Path) -> dict[str, int]:
+    """The names and sizes of the entries directly in ``directory``."""
+    return {p.name: p.lstat().st_size for p in sorted(directory.iterdir())}
