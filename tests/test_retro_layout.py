@@ -347,3 +347,29 @@ def test_an_artifact_over_the_bound_is_refused_before_it_is_parsed(corpus: Corpu
     reader.commit()
     assert load_retro(reader, RETRO) is not None
     reader.close()
+
+
+def test_the_writer_stores_repeated_labels_once_in_typed_order(
+    corpus: Corpus, conn: sqlite3.Connection
+) -> None:
+    flags = {
+        "labels": ["a=b", "c=d", "a=b"],
+        "project": None,
+        "since": None,
+        "until": None,
+        "kind": None,
+        "outcome": None,
+    }
+    assert scope_text(flags) == "label=a=b label=c=d"
+    add_retro(
+        corpus.home,
+        KEY_A,
+        scope=scope_text(flags),
+        resolved_scope=encode_resolved_scope(flags, [S1], None, None),
+    )
+    reader = connect(corpus.home)
+    try:
+        loaded = load_retro(reader, RETRO)
+    finally:
+        reader.close()
+    assert loaded is not None and loaded["scope"]["labels"] == ["a=b", "c=d"]

@@ -104,7 +104,7 @@ def scope_text(flags: Mapping[str, Any]) -> str:
     for name in _FLAG_KEYS:
         value = flags.get(name)
         if name == "labels":
-            words.extend(f"label={label}" for label in value or [])
+            words.extend(f"label={label}" for label in dict.fromkeys(value or []))
         elif value is not None:
             words.append(f"{name}={value}")
     return fix_surrogates(" ".join(words))[:SCOPE_TEXT_MAX]
@@ -115,10 +115,13 @@ def encode_resolved_scope(
 ) -> str:
     """``retros.resolved_scope``. At the maxima (500 session ids, 64 labels, a 4096-character
     project of characters JSON escapes to six, the other flags at their bounds) it is 65,185
-    characters of the 65,536 the column allows."""
+    characters of the 65,536 the column allows. Labels are stored de-duplicated in typed order
+    (the reader and the schema require unique labels)."""
+    stored = {name: flags[name] for name in _FLAG_KEYS}
+    stored["labels"] = list(dict.fromkeys(stored["labels"]))
     return _dumps(
         {
-            "flags": {name: flags[name] for name in _FLAG_KEYS},
+            "flags": stored,
             "sessions": list(sessions),
             "since": since,
             "until": until,

@@ -710,6 +710,37 @@ def test_a_done_row_that_did_not_fit_is_counted_in_one_stderr_note(
     assert "did not fit" not in run_retro(capsys, gw, "--session", S1).err
 
 
+def bulk_bad_rows(corpus: Corpus, key: str, count: int) -> None:
+    """``count`` newer ``done`` rows that pass the SQL pre-filters but fail ``load_retro``."""
+    for n in range(count):
+        add_retro(corpus.home, key, retro_id=rid(100 + n), created=10_000 + n, session_map="{}")
+
+
+def test_the_reuse_window_is_the_newest_fifty_rows_that_pass_the_sql_filters(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two(gw, corpus, capsys)
+    key = key_of(gw, corpus, session=[S1])
+    add_retro(corpus.home, key, retro_id=rid(1), created=1_000)  # valid, oldest
+    bulk_bad_rows(corpus, key, 51)
+    behind = prepare(gw, corpus, session=[S1])
+    assert behind.reuse is None  # behind 51 newer rows that pass the filters: a re-run
+    assert behind.unfit_retros == 52  # every done row of the key is counted, not only 50
+    conn = connect(corpus.home)
+    conn.execute("DELETE FROM retros WHERE id = ?", (rid(100),))
+    conn.commit()
+    conn.close()
+    inside = prepare(gw, corpus, session=[S1])  # 50 newer bad rows: the valid one is the 51st
+    assert inside.reuse is None
+    conn = connect(corpus.home)
+    conn.execute("DELETE FROM retros WHERE id = ?", (rid(101),))
+    conn.commit()
+    conn.close()
+    reused = prepare(gw, corpus, session=[S1])  # 49 newer bad rows: it is the 50th
+    assert reused.reuse is not None and reused.reuse["id"] == rid(1)
+    assert reused.unfit_retros == 0
+
+
 def test_warnings_hold_only_closed_tokens_and_notes_the_free_text(
     corpus: Corpus,
     gw: RetroGateway,
