@@ -64,9 +64,7 @@ def pre_payload(gw: FakeGateway) -> hooks.HookPayload:
     )
 
 
-def run_pre(
-    gw: FakeGateway, cmds: list[str], flags: tuple[str, ...] = ()
-) -> hooks.HookOutcome:
+def run_pre(gw: FakeGateway, cmds: list[str], flags: tuple[str, ...] = ()) -> hooks.HookOutcome:
     cfg = settings(pre_retro=[{"cmd": c, "timeout": 5} for c in cmds])
     return run_hooks(gw, cfg, pre_payload(gw), flag_decision_ids=flags)
 
@@ -411,7 +409,9 @@ def test_async_entries_run_beside_the_others_and_are_joined_before_return() -> N
     gw = FakeGateway()
     for c in "abc":
         gw.on(sh(c), exited(0))
-    cfg = settings(post_retro=[{"cmd": "a", "async": True}, {"cmd": "b"}, {"cmd": "c", "async": True}])
+    cfg = settings(
+        post_retro=[{"cmd": "a", "async": True}, {"cmd": "b"}, {"cmd": "c", "async": True}]
+    )
     outcome = run_hooks(gw, cfg, post_payload(gw))
     assert sorted(c["argv"][2] for c in gw.calls) == ["a", "b", "c"]  # type: ignore[index]
     assert [(e.index, e.run_async) for e in outcome.entries] == [(0, True), (1, False), (2, True)]
@@ -437,7 +437,7 @@ def real(cmd: str, timeout: float = 20) -> HookSettings:
 def test_real_hook_reads_the_payload_and_prints_a_decision(tmp_path: Path) -> None:
     gw = SystemGateway(kill_grace=1)
     out = tmp_path / "stdin.json"
-    cmd = f"cat > '{out}'; printf '{{\"decision_id\": \"%s\"}}' \"$SESSION_AUDIT_ID\""
+    cmd = f'cat > \'{out}\'; printf \'{{"decision_id": "%s"}}\' "$SESSION_AUDIT_ID"'
     payload = hooks.pre_retro_payload(
         gw,
         retro_id=RETRO,
@@ -524,7 +524,7 @@ def test_real_hook_that_ignores_term_is_killed_after_the_grace(tmp_path: Path) -
 
 def test_real_command_with_quotes_and_newlines_runs_as_one_script() -> None:
     gw = SystemGateway(kill_grace=1)
-    cmd = "x='a \"b\" '\"'\"'c'\"'\"\ncase \"$x\" in *b*) exit 0;; esac\nexit 1"
+    cmd = 'x=\'a "b" \'"\'"\'c\'"\'"\ncase "$x" in *b*) exit 0;; esac\nexit 1'
     assert run_hooks(gw, real(cmd), real_payload(gw)).decision is Decision.ALLOW
 
 

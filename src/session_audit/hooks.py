@@ -289,9 +289,7 @@ def entries_for(settings: HookSettings, hook: str) -> tuple[PreHook | PostHook, 
     raise ValueError("unknown hook")
 
 
-def _call(
-    gateway: Gateway, entry: PreHook | PostHook, payload: HookPayload
-) -> CallResult:
+def _call(gateway: Gateway, entry: PreHook | PostHook, payload: HookPayload) -> CallResult:
     try:
         return gateway.run_hook(
             entry.cmd,

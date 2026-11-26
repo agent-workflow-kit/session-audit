@@ -45,7 +45,7 @@ def test_the_extra_variables_are_added_to_the_inherited_environment(monkeypatch)
 
 def test_a_command_with_quotes_and_newlines_is_one_script() -> None:
     result = hook("echo 'a b'\necho \"c\\\"d\"; printf '%s' $((1+2))")
-    assert result.ok and result.stdout == "a b\nc\"d\n3"
+    assert result.ok and result.stdout == 'a b\nc"d\n3'
 
 
 def test_the_exit_code_is_reported_and_13_is_just_an_exit() -> None:
@@ -117,7 +117,7 @@ def test_a_death_by_signal_is_a_failed_call_with_the_signal() -> None:
 
 def test_stdout_beyond_the_cap_is_discarded_and_the_hook_is_not_killed() -> None:
     code = "import sys\nfor _ in range(64): sys.stdout.write('x' * 65536)\nsys.exit(7)"
-    result = hook(f"{PY} -c \"{code}\"")
+    result = hook(f'{PY} -c "{code}"')
     assert result.exit_is(7)  # not OUTPUT_LIMIT: the hook ran to its own exit
     assert len(result.stdout.encode()) == HOOK_STDOUT_LIMIT  # one byte over the 64 KiB read
 

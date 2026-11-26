@@ -639,7 +639,7 @@ def test_ingest_failing_is_due_at_the_threshold_and_quiet_for_24_hours() -> None
             "object_type": "ingest",
             "object_id": "ingest",
             "event_id": "ev-" + "a" * 26,
-            "labels": {},
+            "labels": [],
             "reason": "ingest_failing",
             "details": due,
         },

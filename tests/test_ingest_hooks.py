@@ -13,7 +13,7 @@ import pytest
 
 from session_audit.gateway import CallResult, CallStatus
 
-from .ingesthelp import Corpus, TickGateway, ingest, meta, messages, state_dir_of
+from .ingesthelp import Corpus, TickGateway, ingest, messages, meta, state_dir_of
 from .schemas import validate
 
 HOUR = 3600
@@ -239,7 +239,9 @@ def test_quiet_silences_the_warning(
 def test_every_post_attention_entry_runs_in_config_order(
     gw: HookGateway, broken: Corpus, home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    text = "ingest:\n  fail_threshold: 1\nhooks:\n  post-attention:\n    - cmd: one\n    - cmd: two\n"
+    text = (
+        "ingest:\n  fail_threshold: 1\nhooks:\n  post-attention:\n    - cmd: one\n    - cmd: two\n"
+    )
     write_config(home, text)
     fail(capsys, gw)
     assert [c["command"] for c in gw.hook_calls] == ["one", "two"]

@@ -217,7 +217,13 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     if ctx.dry_run:  # step 12
         _print_plan(ctx, plan_document(ctx, args, prepared, launch))
         return 0
-    # TODO(#26): steps 13 to 16 (the row, the hooks, the launch) from ``prepared``.
+    # TODO(#26): steps 13 to 16 (the row, the hooks, the launch) from ``prepared``. The hook
+    # runner is ``hooks.run_hooks`` (#25): ``hooks.pre_retro_payload`` after the row exists (never
+    # in a dry run, never with a write lock held, the lease renewed meanwhile; the outcome's
+    # ``decision`` maps to exit 0, 13 or 11 and ``decision_ids`` and ``output_ignored`` go in the
+    # ``retro_state`` log entry); ``hooks.post_retro_payload`` once when the retro reaches a final
+    # state, ``hook_vetoed`` included, after cleanup; ``hooks.retro_failed_payload`` when it ends
+    # ``failed``.
     raise a.not_implemented()
 
 
