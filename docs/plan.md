@@ -32,6 +32,7 @@ Status: planned against architecture v1.33 and design guide v1.17. This plan imp
 | `derive` | 2 | query-time session values, slot buckets, cost basis (the owner rule and slots are in `eventstore` and `parser`) |
 | `usage` | 2 | aggregation for `usage`, `sessions`, `show`, `export` |
 | `harness` | 3 | claude-session snapshots and the query-time join |
+| `redact` | 4 | redaction patterns (package data), literal masks, encoded-value check, the cut and `digest_text` |
 | `digest` | 4 | numbering, selection, budget, redaction, sanitizing, fencing, manifest |
 | `retro` | 5 | order of checks, key, preflight, plan check, launch, outcome mapping, collect and cleanup, recovery |
 | `hooks` | 5 | hook execution, process groups, payloads |

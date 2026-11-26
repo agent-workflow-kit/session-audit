@@ -118,7 +118,7 @@ redaction:
   # Variable names whose set values are masked in the digest.
   mask_env: []
   # Token prefixes to mask, such as an organization's token prefix; a prefix followed by
-  # 8 to 256 token characters is redacted (3 to 64 characters each).
+  # 8 or more token characters is redacted, the whole run (3 to 64 characters each).
   extra_token_prefixes: []
 
 # Optional weekly retro run from cron (cron install adds the line). Default: absent (off).
