@@ -124,8 +124,9 @@ regex = '''(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,16384}\.(?:[A-Za-z0-9_-]{4,16384
 [[pattern]]
 name = "url_userinfo"
 kind = "url_userinfo"
-regex = '''(?<=://)(?P<v>[^\s/?#@:]{0,128}:[^\s/?#]{1,16384})(?=@)'''
+regex = '''(?<=://)(?P<v>[^\s/?#@:]{0,128}:(?:[^\s/?#]{1,16384}(?=@)|[^\s/?#]{16384}))'''
 group = "v"
+extend = "userinfo"
 
 # ---- headers -----------------------------------------------------------------------------------
 # A header value may sit on the next line when that line is indented.
@@ -288,15 +289,25 @@ regex = '''(?i)(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,128}(?:password|passwd|passph
 group = "v"
 extend = "sq"
 
-# YAML: a key at the start of a line (after indentation or "- ") or in a flow mapping ({a: b,
-# c: d}), a quoted value of any length or a bare value of at least 6 characters that runs to the
-# end of the line (commas and "#" included).
+# YAML: a key at the start of a line (after indentation or "- "): a quoted value of any length or a
+# bare value of at least 6 characters that runs to the end of the line (commas and "#" included),
+# unless the value is an identifier followed by "=" or ":" (a type annotation: token: str = None).
 [[pattern]]
 name = "yaml_key"
 kind = "json_secret"
-regex = '''(?im)(?:^[ \t]{0,32}(?:-[ \t]{1,4})?|[{,][ \t]{0,8})[A-Za-z0-9_.-]{0,128}(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|signing[_-]?key|credentials?|authorization|auth|cookie|session[_-]?key|encryption[_-]?key|master[_-]?key|ssh[_-]?key|(?<![A-Za-z])(?:pass|pwd))[ \t]{0,2}:[ \t]{0,8}(?P<v>"[^"\r\n]{1,16384}"?|'[^'\r\n]{1,16384}'?|[^\s"'#,{}\[\]:=][^\r\n]{5,16384})'''
+regex = '''(?im)^[ \t]{0,32}(?:-[ \t]{1,4})?[A-Za-z0-9_.-]{0,128}(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|signing[_-]?key|credentials?|authorization|auth|cookie|session[_-]?key|encryption[_-]?key|master[_-]?key|ssh[_-]?key|(?<![A-Za-z])(?:pass|pwd))[ \t]{0,2}:[ \t]{0,8}(?![A-Za-z_][A-Za-z0-9_.]{0,64}[ \t]{1,8}[=:])(?P<v>"[^"\r\n]{1,16384}"?|'[^'\r\n]{1,16384}'?|[^\s"'#,{}\[\]:=][^\r\n]{5,16384})'''
 group = "v"
 extend = "line"
+
+# YAML in a flow mapping ({a: b, c: d}) or after a comma: a quoted value of any length or a bare
+# value of at least 6 characters up to white space, a comma, a bracket or a brace (so code such as
+# def f(a: int, token: str = None, n: int = 3): and { token: string; user: User } stays).
+[[pattern]]
+name = "yaml_flow_key"
+kind = "json_secret"
+regex = '''(?im)[{,][ \t]{0,8}[A-Za-z0-9_.-]{0,128}(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|signing[_-]?key|credentials?|authorization|auth|cookie|session[_-]?key|encryption[_-]?key|master[_-]?key|ssh[_-]?key|(?<![A-Za-z])(?:pass|pwd))[ \t]{0,2}:[ \t]{0,8}(?P<v>"[^"\r\n]{1,16384}"?|'[^'\r\n]{1,16384}'?|[^\s"'#,{}\[\]:=][^\s"'#,}\]]{5,16384})'''
+group = "v"
+extend = "flow"
 
 # a quoted key ('password': x, "password": 12345678): the value is bare, to a delimiter
 [[pattern]]

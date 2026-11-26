@@ -578,6 +578,8 @@ def adversarial_families() -> dict[str, str]:
         "dash flags": "--password -" * 5400,
         "cli attached": "-ua:" * 16000,
         "partial prefixes": "ghp_gho_ghu_AKIAxox-sk-ant-github_pat_" * 1700,
+        "typed signatures": "def f(a: int, token: str = None, retries: int = 3): " * 1300,
+        "userinfo long password": "https://a:" + "b" * 65000,
     }
 
 
@@ -1489,3 +1491,36 @@ def test_documents_state_the_same_counts_and_rules() -> None:
         assert "{8,256}" not in text and "8 to 256" not in text, rel
     assert "8 or more" in (root / "schemas/config.json").read_text()
     assert "8 or more" in (root / "config.example.yaml").read_text()
+
+
+# ---- round 2: flow-style YAML stays out of typed code, long URL passwords ----------------------
+
+
+def test_flow_yaml_key_does_not_eat_typed_code() -> None:
+    sig = "def f(a: int, token: str = None, retries: int = 3):"
+    assert red(sig) == sig
+    assert red("api_key: str = field(default='')") == "api_key: str = field(default='')"
+    assert red("    token: str = None") == "    token: str = None"
+    out = red("interface A { token: string; user: User }")
+    assert out.endswith(" user: User }")
+    assert red("db: {password: v1234567}") == "db: {password: [REDACTED:json_secret]}"
+    assert red("db: {user: u, password: v1234567, port: 5}") == (
+        "db: {user: u, password: [REDACTED:json_secret], port: 5}"
+    )
+
+
+def test_line_start_yaml_value_still_runs_to_the_end_of_the_line() -> None:
+    assert red("password: abc, def # note") == "password: [REDACTED:json_secret]"
+    assert red("auth: false # default") == "auth: [REDACTED:json_secret]"
+    assert red("pwd: /home/user/project") == "pwd: [REDACTED:json_secret]"
+
+
+def test_url_password_over_the_value_bound_is_redacted_to_its_end() -> None:
+    pw = "p" * 21000
+    assert red(f"https://bob:{pw}@host/x") == "https://[REDACTED:url_userinfo]@host/x"
+    assert red(f"https://bob:{pw}") == "https://[REDACTED:url_userinfo]"
+    assert red(f"https://bob:{pw}@w@host/x") == "https://[REDACTED:url_userinfo]@host/x"
+    big = f"https://bob:{'p' * 60000}@host/x"
+    t0 = time.perf_counter()
+    assert red(big) == "https://[REDACTED:url_userinfo]@host/x"
+    assert time.perf_counter() - t0 < 3.0

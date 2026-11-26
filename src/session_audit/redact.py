@@ -97,6 +97,8 @@ _EXTEND = {
     "sq": re.compile(r"[^'\r\n]*"),
     "bare": re.compile(r"[^\s,}\]#]*"),
     "line": re.compile(r"[^\r\n]*"),
+    "flow": re.compile(r"[^\s\"'#,}\]]*"),
+    "userinfo": re.compile(r"[^\s/?#]*"),
     "value": re.compile(r"[^\s\"']*"),
     "hdr": re.compile(r"[^\r\n\"']*"),
     "conn": re.compile(r"[^;\r\n\"']*"),
@@ -273,11 +275,16 @@ def _fold(text: str) -> str:
 def _extend(text: str, start: int, end: int, mode: str) -> int:
     """The end of a value that reached the length bound: over the rest of the same run."""
     first = text[start]
-    if mode in ("value", "line") and first in "\"'":
+    if mode in ("value", "line", "flow") and first in "\"'":
         if end - start > 1 and text[end - 1] == first:
             return end  # closed
         mode = "dq" if first == '"' else "sq"
-    return _EXTEND[mode].match(text, end).end()  # type: ignore[union-attr]
+    stop = _EXTEND[mode].match(text, end).end()  # type: ignore[union-attr]
+    if mode == "userinfo":
+        at = text.rfind("@", end, stop)  # the host starts at the last "@" of the run
+        if at != -1:
+            return at
+    return stop
 
 
 def _past_marks(text: str, end: int) -> int:
