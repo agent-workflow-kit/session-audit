@@ -20,6 +20,7 @@ from .textsafe import dumps_json, show, write_stderr
 if TYPE_CHECKING:
     from .config import ConfigIssue, Settings
     from .errors import CliError
+    from .interrupt import Signals
     from .store import Store
 
 
@@ -96,6 +97,9 @@ class Context:
     # ``open_memory_copy``): when set, every read of the store (``sessionquery.open_reader``,
     # ``reader.discover``) uses it and the real store is never opened for writing.
     memory: Store | None = field(default=None, repr=False)
+    # The signal controller of the run (``interrupt.Signals``, set by ``cli.main``); a command
+    # that must end in an orderly way (``retro run``) defers the first signal and polls it.
+    interrupts: Signals | None = field(default=None, repr=False)
 
     def state_path(self) -> str:
         """The state directory: ``state_directory`` or the standard location."""

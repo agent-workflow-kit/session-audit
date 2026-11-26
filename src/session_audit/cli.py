@@ -14,13 +14,12 @@ knows no command by name.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import os
 import re
 import signal
 import sys
 import traceback
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, NoReturn
 
 from . import __version__, errors
@@ -30,20 +29,13 @@ from .commands import COMMANDS
 from .config import load_config
 from .errors import CliError
 from .gateway import Gateway, SystemGateway, discard_stream
+from .interrupt import Interrupted, Signals
 from .textsafe import dumps_json
 
 PROG = "session-audit"
 DESCRIPTION = "Analyze Claude session transcripts and outcomes: retros and usage analytics."
 HELP_HINT = "Run session-audit --help (or the command with --help) for usage."
 _COMMAND_ATTR = "_session_audit_command"
-
-
-class Interrupted(BaseException):
-    """Raised by the signal handlers; a ``BaseException`` so no ``except Exception`` swallows it."""
-
-    def __init__(self, signum: int) -> None:
-        super().__init__(signum)
-        self.signum = signum
 
 
 _stderr = stderr_line
@@ -190,50 +182,6 @@ def _isatty(stream: Any) -> bool:
         return False
 
 
-@contextlib.contextmanager
-def _signals() -> Iterator[None]:
-    """SIGHUP, SIGINT and SIGTERM raise ``Interrupted``; a signal that was ignored on entry
-    (``nohup``, a background job) stays ignored. The first delivery ignores the three again, so a
-    second signal while the exit is unwinding cannot raise out of ``main`` (a signal during a
-    command's own cleanup is the command's concern). SIGPIPE stays ignored so a closed pipe is an
-    ``EPIPE`` error on the write, which ends the run with exit 1. Everything is put back on exit.
-
-    Contract: after the first SIGHUP/SIGINT/SIGTERM the three signals stay ``SIG_IGN`` until
-    ``main`` returns, so a command's cleanup is not interrupted by a second signal. A child
-    spawned during that cleanup inherits ``SIG_IGN`` for them (ignored dispositions survive
-    ``exec``).
-
-    TODO(#28): #28 owns the second-signal policy for command cleanup. It must reset the child
-    signal dispositions when spawning (``restore_signals=True`` or a ``preexec_fn``)."""
-    previous: dict[int, Any] = {}
-    owned: list[int] = []
-
-    def handler(signum: int, _frame: object) -> None:
-        # Contract: stay SIG_IGN until main returns (see the docstring; TODO(#28) for children).
-        for sig in owned:
-            with contextlib.suppress(ValueError, OSError):
-                signal.signal(sig, signal.SIG_IGN)
-        raise Interrupted(signum)
-
-    try:
-        try:
-            for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-                current = signal.getsignal(sig)
-                if current is signal.SIG_IGN:
-                    continue
-                previous[sig] = current
-                signal.signal(sig, handler)
-                owned.append(sig)
-            previous[signal.SIGPIPE] = signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-        except ValueError:  # not the main thread: the host owns the signals
-            pass
-        yield
-    finally:
-        for sig, old in previous.items():
-            with contextlib.suppress(ValueError, TypeError, OSError):
-                signal.signal(sig, old)
-
-
 def _report(error: CliError, *, json_mode: bool, out: Output) -> int:
     """Print the error once: sanitized on stderr, and with ``--json`` as the envelope on stdout."""
     for line in errors.stderr_lines(error, prog=PROG):
@@ -250,7 +198,12 @@ def _stdout_failed(out: Output) -> int:
 
 
 def _context(
-    namespace: argparse.Namespace, command: Command, gateway: Gateway, out: Output, tty: bool
+    namespace: argparse.Namespace,
+    command: Command,
+    gateway: Gateway,
+    out: Output,
+    tty: bool,
+    signals: Signals,
 ) -> Context:
     ctx = Context(
         gateway=gateway,
@@ -262,6 +215,7 @@ def _context(
         dry_run=bool(getattr(namespace, "dry_run", False)),
         yes=bool(getattr(namespace, "yes", False)),
         stdin_is_tty=tty,
+        interrupts=signals,
     )
     if ctx.verbose and ctx.quiet:
         raise errors.usage(
@@ -311,6 +265,7 @@ def _dispatch(
     out: Output,
     tty: bool,
     state: dict[str, bool],
+    signals: Signals,
 ) -> int:
     parser = build_parser(commands, out)
     namespace = parser.parse_args(list(argv))
@@ -319,7 +274,7 @@ def _dispatch(
     command: Command | None = getattr(namespace, _COMMAND_ATTR, None)
     if command is None:
         raise errors.usage("A command is required", hint=HELP_HINT)
-    ctx = _context(namespace, command, gateway, out, tty)
+    ctx = _context(namespace, command, gateway, out, tty, signals)
     try:
         command.check(ctx, namespace)
         _check_config(ctx, command)
@@ -345,9 +300,10 @@ def main(
     out = Output(stdout)
     state = {"json": _wants_json(arguments), "verbose": False}
     tty = _isatty(sys.stdin) if stdin_is_tty is None else stdin_is_tty
-    with _signals():
+    signals = Signals()
+    with signals.install():
         try:
-            return _run(arguments, commands, gateway, out, tty, state)
+            return _run(arguments, commands, gateway, out, tty, state, signals)
         except Interrupted as interrupt:
             return errors.interrupt_exit(interrupt.signum)
         except KeyboardInterrupt:
@@ -365,6 +321,7 @@ def _run(
     out: Output,
     tty: bool,
     state: dict[str, bool],
+    signals: Signals,
 ) -> int:
     """Dispatch and turn every outcome into an exit code. Only an interrupt escapes."""
 
@@ -383,6 +340,7 @@ def _run(
                 out,
                 tty,
                 state,
+                signals,
             )
             return code if _is_exit_code(code) else internal()
         except SystemExit as exit_:  # --help and --version
