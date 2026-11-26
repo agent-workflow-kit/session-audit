@@ -86,6 +86,131 @@ def start_doc(csession_id: str = "cs-aaaaaaab", *, run: int = 1) -> dict[str, An
     }
 
 
+def _set_path(document: dict[str, Any], path: str, value: Any) -> None:
+    """``document["a"]["b"] = value`` for ``path`` ``a.b`` (every parent must exist)."""
+    *parents, last = path.split(".")
+    target = document
+    for part in parents:
+        target = target[part]
+    target[last] = value
+
+
+def plan_doc(changes: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A valid ``start --dry-run --json`` plan of the retro launch: what claude-session prints for
+    ``--kind audit --reads-third-party --no-implicit-done --tools Read Write Bash Skill ...`` with
+    no config that changes a safety setting. ``changes`` maps a dotted path
+    (``profile.env.inherit``, ``sandbox.mode``, ``origins.mcp``, ``tools``) to the value that
+    replaces the default, so one test changes one safety setting. A path that does not exist
+    yet (a new ``origins`` key) is added when its parent exists."""
+    document: dict[str, Any] = {
+        "dry_run": True,
+        "csession_id": None,
+        "run": 1,
+        "fork": False,
+        "forked_from": None,
+        "launch_kind": "audit",
+        "run_kind": "audit",
+        "labels": ["kind=audit", "owner=session-audit", "retro=ra-aaaaaaaa"],
+        "taints": True,
+        "mode": "headless",
+        "cwd": "/state/sessions/cs-aaaaaaaa/work",
+        "repo": None,
+        "skill": "session-audit:audit",
+        "has_prompt": True,
+        "input_files": ["digest.md", "manifest.json"],
+        "implicit_done": False,
+        "tools": ["Read", "Write", "Bash", "Skill"],
+        "permission_profile": "file:0123456789abcdef",
+        "timeout": 1200,
+        "max_turns": 12,
+        "actor": "auto:unknown",
+        "override_escalation": False,
+        "allow_tainted": False,
+        "sandbox_lowered": False,
+        "config_hash_changed": None,
+        "profile": {
+            "name": "audit",
+            "builtin": True,
+            "fallback": False,
+            "permission_profile": "file:0123456789abcdef",
+            "sandbox": "required",
+            "sandbox_available": True,
+            "sandbox_problems": [],
+            "reads_third_party": True,
+            "implicit_done": False,
+            "setting_sources": [],
+            "mcp": "none",
+            "cwd": "session-dir",
+            "env": {
+                "inherit": False,
+                "allow": ["PATH", "HOME", "USER", "LANG", "TERM"],
+                "set_names": [],
+                "path_prepend": [],
+            },
+            "required_env_names": ["PATH"],
+            "path": "/usr/bin:/bin",
+            "read_dirs": [],
+            "write_dirs": [],
+            "timeout": 1200,
+            "interactive_timeout": None,
+            "max_turns": 12,
+            "auto_exit": True,
+            "backstop": True,
+            "notes_context": False,
+            "model": None,
+            "claude_args": [],
+            "warnings": [],
+        },
+        "origins": {
+            "sandbox": "flag-implied",
+            "setting_sources": "flag-implied",
+            "mcp": "flag-implied",
+            "env.inherit": "flag-implied",
+            "reads_third_party": "flag",
+            "implicit_done": "flag",
+            "tools": "flag",
+            "permission_profile": "flag",
+            "cwd": "flag",
+            "notes_context": "builtin",
+            "write_dirs": "builtin",
+            "claude_args": "builtin",
+            "model": "builtin",
+            "timeout": "flag",
+            "max_turns": "flag",
+        },
+        "settings": {},
+        "claude_argv": ["claude", "--tools", "Read,Write,Bash,Skill"],
+        "env_names": ["HOME", "LANG", "PATH", "TERM", "USER"],
+        "plugin_dirs": [],
+        "sandbox": {
+            "mode": "required",
+            "available": True,
+            "problems": [],
+            "allow_read": [],
+            "allow_write": [],
+            "deny_read": [],
+            "deny_write": [],
+        },
+        "hooks": [],
+        "would_refuse": None,
+        "would_fail": None,
+        "warnings": [],
+    }
+    for path, value in (changes or {}).items():
+        _set_path(document, path, value)
+    return document
+
+
+def refusing_plan(reason: str = "live", **changes: Any) -> dict[str, Any]:
+    """A plan whose launch would be refused (exit 20, ``would_refuse`` set)."""
+    return plan_doc({"would_refuse": reason, **changes})
+
+
+def failing_plan(end_reason: str = "sandbox_unavailable", **changes: Any) -> dict[str, Any]:
+    """A plan whose launch would fail a validation (exit 12, ``would_fail`` set)."""
+    return plan_doc({"would_fail": end_reason, **changes})
+
+
 def list_doc(sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """A valid ``list --json`` document (sessions must be complete records when given)."""
     return {"sessions": sessions or []}
@@ -490,10 +615,13 @@ __all__ = [
     "PINNED_VERSION",
     "FakeClaudeSession",
     "error_doc",
+    "failing_plan",
     "forget_doc",
     "list_doc",
     "list_item",
     "outcome_doc",
+    "plan_doc",
+    "refusing_plan",
     "start_doc",
     "status_doc",
     "step",
