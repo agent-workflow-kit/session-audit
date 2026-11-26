@@ -1103,9 +1103,9 @@ def test_a_path_with_invalid_utf8_is_accepted_under_the_c_locale() -> None:
         _module(b"sessions", b"--project", b"/p/\xff", b"--json"),
         env=_env(LC_ALL="C"),
     )
-    # The command is a stub here: reaching it (exit 1, internal) means the argv was accepted.
-    assert result.returncode == 1
-    assert envelope(result.stdout.decode("ascii"))["code"] == "internal"
+    # The argv was accepted: the (empty) store lists no session.
+    assert result.returncode == 0
+    assert json.loads(result.stdout.decode("ascii"))["sessions"] == []
 
 
 def test_an_ascii_only_stdout_and_stderr_still_print_everything() -> None:

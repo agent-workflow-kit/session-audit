@@ -62,6 +62,16 @@ def add_session_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--outcome", metavar="O", help="a claude-session outcome")
 
 
+def add_owner_filter(parser: argparse.ArgumentParser) -> None:
+    """``--include-self-improve``: sessions whose harness snapshot labels contain
+    ``owner=self-improve`` are left out unless this is given (Session filters)."""
+    parser.add_argument(
+        "--include-self-improve",
+        action="store_true",
+        help="include sessions labeled owner=self-improve (left out by default)",
+    )
+
+
 def not_implemented() -> CliError:
     """What a registered command whose implementation has not landed returns after its flags
     validated: an internal error naming no input."""
