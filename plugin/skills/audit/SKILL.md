@@ -89,9 +89,11 @@ copy the example values.
 - Allowed values, copied from the manifest's `finding_categories` and `target_classes`:
 
 <!-- enums -->
-  - finding `category`: `went_well`, `went_badly`, `friction`, `cost`
-  - finding `severity`: `low`, `medium`, `high`
-  - candidate `target_class`: `skill`, `instructions_file`, `config`, `permission_profile`, `workflow`
+
+- finding `category`: `went_well`, `went_badly`, `friction`, `cost`
+- finding `severity`: `low`, `medium`, `high`
+- candidate `target_class`: `skill`, `instructions_file`, `config`, `permission_profile`, `workflow`
+
 <!-- /enums -->
 
 - Use no numbers other than integers, and write none unless the schema needs one. Do not write

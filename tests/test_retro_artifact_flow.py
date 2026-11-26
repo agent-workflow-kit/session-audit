@@ -96,7 +96,11 @@ def good(launcher: Any, **over: Any) -> dict[str, Any]:
 
 
 def freeze(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, build: Builder | bytes | None = good
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    build: Builder | bytes | None = good,
+    *,
+    real_marker: bool = False,
 ) -> None:
     """Make ``collect`` return a report whose frozen file holds what ``build`` makes."""
     real = retrolaunch.Launcher._collect
@@ -119,7 +123,8 @@ def freeze(
         return dataclasses.replace(collected, report=report)
 
     monkeypatch.setattr(retrolaunch.Launcher, "_collect", collect)
-    monkeypatch.setattr(retroartifact, "bundled_marker", lambda _gw, _dir: MARKER)
+    if not real_marker:
+        monkeypatch.setattr(retroartifact, "bundled_marker", lambda _gw, _dir: MARKER)
 
 
 def stored_row_count(home: Path) -> int:
@@ -164,6 +169,26 @@ def test_a_valid_artifact_ends_done_and_is_stored_and_printed(
     done = [e for e in log_entries(corpus.home) if e["state"] == "done"]
     assert [(e["findings"], e["candidates"]) for e in done] == [(1, 1)]
     assert row["lease_pid"] is None
+
+
+def test_the_marker_of_the_bundled_skill_file_validates_without_a_stub(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The real ``marker.txt`` of the bundled plugin (issue #30), read by ``bundled_marker``."""
+    real = (
+        Path(__file__).resolve().parent.parent / "plugin/skills/audit/references/marker.txt"
+    ).read_text(encoding="ascii")
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path, lambda run: good(run, marker=real.strip()), real_marker=True)
+    result = launch(capsys, gw)
+    assert result.code == 0, result.err
+    assert the_retro(corpus.home)["state"] == "done"
 
 
 def test_the_second_run_reuses_the_stored_retro(

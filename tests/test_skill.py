@@ -233,7 +233,9 @@ def test_the_profile_is_valid_for_an_isolated_run_of_claude_session() -> None:
     for key, value in document["sandbox"].items():
         allowed = PINNED_SANDBOX_KEYS[key]
         assert allowed is not None and set(value) <= allowed
-        assert all(isinstance(v, list) and all(isinstance(e, str) for e in v) for v in value.values())
+        assert all(
+            isinstance(v, list) and all(isinstance(e, str) for e in v) for v in value.values()
+        )
 
 
 def test_the_profile_has_no_variable_and_no_duplicate_entry() -> None:
@@ -285,7 +287,9 @@ def test_the_wheel_force_includes_the_plugin_with_its_hidden_manifest_directory(
     assert wheel["force-include"] == {"plugin": "session_audit/plugin"}
     assert "exclude" not in wheel and "include" not in wheel
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert not any(line.strip() in (".claude-plugin", ".claude-plugin/", "plugin") for line in ignored)
+    assert not any(
+        line.strip() in (".claude-plugin", ".claude-plugin/", "plugin") for line in ignored
+    )
 
 
 def test_every_plugin_file_is_tracked_so_a_checkout_builds_the_same_wheel() -> None:
