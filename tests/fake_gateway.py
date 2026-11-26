@@ -16,6 +16,7 @@ import io
 import os
 import posixpath
 import stat as statmod
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -125,6 +126,7 @@ class FakeGateway:
         stdin: str,
         env_extra: Mapping[str, str],
         stdout_limit: int = HOOK_STDOUT_LIMIT,
+        cancel: threading.Event | None = None,
     ) -> CallResult:
         """Scripted like ``run``: match with ``on(["/bin/sh", "-c", command], ...)``. The call is
         recorded with ``hook`` set and the extra environment."""

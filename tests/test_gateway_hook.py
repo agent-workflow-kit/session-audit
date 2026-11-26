@@ -6,9 +6,11 @@ from __future__ import annotations
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
+from session_audit import gateway as gateway_module
 from session_audit.gateway import HOOK_STDOUT_LIMIT, CallStatus, SystemGateway
 
 from .procs import gone, wait_until_gone
@@ -168,3 +170,48 @@ def test_a_missing_shell_is_a_spawn_failure(monkeypatch) -> None:
     monkeypatch.setattr("session_audit.gateway.HOOK_SHELL", "/nonexistent/sh")
     result = hook("true")
     assert result.status is CallStatus.SPAWN_FAILED
+
+
+def test_an_interrupt_in_the_grace_wait_still_kills_a_term_ignoring_grandchild(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pids = tmp_path / "grandchild.pid"
+    real_sleep = time.sleep
+
+    def interrupted(seconds: float) -> None:
+        monkeypatch.setattr(gateway_module.time, "sleep", real_sleep)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gateway_module.time, "sleep", interrupted)
+    grandchild = 0
+    try:
+        try:
+            hook(f"(trap '' TERM; exec sleep 60) & echo $! > '{pids}'", grace=2)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("the interrupt did not propagate")
+        grandchild = read_pid(pids)
+        assert wait_until_gone(grandchild), "the grandchild survived the interrupted grace"
+    finally:
+        if grandchild and not gone(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+
+
+def test_a_cancel_event_ends_the_group_like_a_timeout(tmp_path: Path) -> None:
+    pids = tmp_path / "grandchild.pid"
+    cancel = threading.Event()
+    timer = threading.Timer(0.5, cancel.set)
+    timer.start()
+    started = time.monotonic()
+    grandchild = 0
+    try:
+        result = hook(f"sleep 60 & echo $! > '{pids}'; wait", timeout=60, cancel=cancel)
+        grandchild = read_pid(pids)
+        assert result.status is CallStatus.TIMEOUT
+        assert wait_until_gone(grandchild)
+        assert time.monotonic() - started < 15
+    finally:
+        timer.cancel()
+        if grandchild and not gone(grandchild):
+            os.kill(grandchild, signal.SIGKILL)

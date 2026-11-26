@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from session_audit.commands import ingest as ingest_command
 from session_audit.gateway import CallResult, CallStatus
 
 from .ingesthelp import Corpus, TickGateway, ingest, messages, meta, state_dir_of
@@ -31,6 +33,7 @@ class HookGateway(TickGateway):
         self.error: Exception | None = None
         self.lease_during_hook: list[object] = []
         self.write_lock_free: list[bool] = []
+        self.during_hook: Callable[[], None] | None = None
 
     def run_hook(
         self,
@@ -40,6 +43,7 @@ class HookGateway(TickGateway):
         stdin: str,
         env_extra: Mapping[str, str],
         stdout_limit: int = 0,
+        cancel: threading.Event | None = None,
     ) -> CallResult:
         self.hook_calls.append(
             {"command": command, "timeout": timeout, "payload": json.loads(stdin), "env": env_extra}
@@ -57,6 +61,9 @@ class HookGateway(TickGateway):
                 self.write_lock_free.append(False)
         finally:
             conn.close()
+        reenter, self.during_hook = self.during_hook, None
+        if reenter is not None:
+            reenter()
         if self.error is not None:
             raise self.error
         return self.result
@@ -191,6 +198,28 @@ def test_no_lease_and_no_write_lock_is_held_while_the_hook_runs(
     fail(capsys, gw)
     assert gw.lease_during_hook == [""]
     assert gw.write_lock_free == [True]
+
+
+def test_the_due_check_and_the_claim_are_one_transaction_before_the_hook(
+    gw: HookGateway,
+    broken: Corpus,
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second firing that starts while the first hook runs (another process, here a re-entrant
+    call) must find the claim already made: exactly one hook call."""
+    write_config(home, "ingest:\n  fail_threshold: 1\n" + HOOK_CONFIG)
+    original = ingest_command.fire_ingest_failing
+
+    def spy(ctx: Any, store: Any) -> None:
+        if gw.during_hook is None and not gw.hook_calls:
+            gw.during_hook = lambda: original(ctx, store)
+        original(ctx, store)
+
+    monkeypatch.setattr(ingest_command, "fire_ingest_failing", spy)
+    assert fail(capsys, gw) == 12
+    assert len(gw.hook_calls) == 1
 
 
 @pytest.mark.parametrize(

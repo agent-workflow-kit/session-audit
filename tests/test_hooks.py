@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -543,3 +544,86 @@ def test_real_async_post_hook_is_joined_and_its_grandchild_is_gone(tmp_path: Pat
     finally:
         if not gone(grandchild):
             os.kill(grandchild, signal.SIGKILL)
+
+
+# -- an interrupt ends every started group (R1-1) ---------------------------------------------
+
+
+def wait_for_pid_file(path: Path) -> int:
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        text = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+        if text:
+            return int(text)
+        time.sleep(0.02)
+    raise AssertionError("the hook never wrote its pid")
+
+
+def post_cfg(*entries: dict[str, Any]) -> HookSettings:
+    return settings(post_retro=list(entries))
+
+
+def test_an_interrupt_while_joining_async_entries_ends_their_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gw = SystemGateway(kill_grace=1)
+    pids = tmp_path / "pids"
+    cfg = post_cfg({"cmd": f"sleep 60 & echo $! > '{pids}'; wait", "async": True, "timeout": 60})
+    real_join = threading.Thread.join
+    calls: list[int] = []
+
+    def join(self: threading.Thread, timeout: float | None = None) -> None:
+        if not calls:
+            calls.append(1)
+            wait_for_pid_file(pids)
+            raise KeyboardInterrupt
+        real_join(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", join)
+    started = time.monotonic()
+    grandchild = 0
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_hooks(gw, cfg, real_post_payload(gw))
+        grandchild = wait_for_pid_file(pids)
+        assert wait_until_gone(grandchild), "the hook outlived the interrupted call"
+        assert time.monotonic() - started < 20
+    finally:
+        if grandchild and not gone(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+
+
+def test_an_interrupted_sync_entry_ends_the_async_groups_running_beside_it(
+    tmp_path: Path,
+) -> None:
+    pids = tmp_path / "pids"
+
+    class Interrupting(SystemGateway):
+        def run_hook(self, command: str, **kw: Any) -> CallResult:
+            if command == "interrupt-me":
+                wait_for_pid_file(pids)
+                raise KeyboardInterrupt
+            return super().run_hook(command, **kw)
+
+    gw = Interrupting(kill_grace=1)
+    cfg = post_cfg(
+        {"cmd": f"sleep 60 & echo $! > '{pids}'; wait", "async": True, "timeout": 60},
+        {"cmd": "interrupt-me"},
+    )
+    started = time.monotonic()
+    grandchild = 0
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_hooks(gw, cfg, real_post_payload(gw))
+        grandchild = wait_for_pid_file(pids)
+        assert wait_until_gone(grandchild), "the async hook outlived the interrupted call"
+        assert time.monotonic() - started < 20
+    finally:
+        if grandchild and not gone(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+
+
+def real_post_payload(gw: SystemGateway) -> hooks.HookPayload:
+    return hooks.post_retro_payload(
+        gw, retro_id=RETRO, state="done", reason=None, findings=1, candidates=0, cost_usd=None
+    )

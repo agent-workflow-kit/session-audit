@@ -96,8 +96,9 @@ class HookOutcome:
     """The result of one ``run_hooks``. ``decision`` is ``ALLOW`` for every hook but ``pre-retro``
     (and for a ``pre-retro`` with no entries). ``decision_ids`` are the flag ids then the ids the
     hooks returned (no duplicates); ``output_ignored`` counts the entries whose stdout was ignored
-    (the log entry's ``hook_output_ignored``); ``warnings`` holds the closed tokens
-    ``hook_output_ignored`` and ``hook_failed``, each at most once."""
+    (the log entry's ``hook_output_ignored``); ``warnings`` holds the tokens
+    ``hook_output_ignored`` and ``hook_failed`` (internal markers, not schema values), each at most
+    once."""
 
     decision: Decision = Decision.ALLOW
     decision_ids: tuple[str, ...] = ()
@@ -289,13 +290,19 @@ def entries_for(settings: HookSettings, hook: str) -> tuple[PreHook | PostHook, 
     raise ValueError("unknown hook")
 
 
-def _call(gateway: Gateway, entry: PreHook | PostHook, payload: HookPayload) -> CallResult:
+def _call(
+    gateway: Gateway,
+    entry: PreHook | PostHook,
+    payload: HookPayload,
+    cancel: threading.Event | None = None,
+) -> CallResult:
     try:
         return gateway.run_hook(
             entry.cmd,
             timeout=min(entry.timeout.total_seconds(), 600.0),
             stdin=payload.text(),
             env_extra=payload.env(),
+            cancel=cancel,
         )
     except Exception as exc:  # noqa: BLE001 - a hook never takes the command down
         return CallResult(CallStatus.SPAWN_FAILED, detail=type(exc).__name__)
@@ -360,22 +367,31 @@ def _run_post(
 ) -> HookOutcome:
     slots: list[EntryResult | None] = [None] * len(entries)
     threads: list[threading.Thread] = []
+    cancel = threading.Event()  # set on an interrupt: every running hook group is ended
 
     def work(index: int, entry: PostHook) -> None:
         slots[index] = _classify(
-            payload.hook, index, _call(gateway, entry, payload), entry.run_async
+            payload.hook, index, _call(gateway, entry, payload, cancel), entry.run_async
         )
 
-    for index, entry in enumerate(entries):
-        assert isinstance(entry, PostHook)
-        if entry.run_async:
-            thread = threading.Thread(target=work, args=(index, entry), name=f"hook-{index}")
-            thread.start()
-            threads.append(thread)
-        else:
-            work(index, entry)
-    for thread in threads:
-        thread.join()  # bounded by the entry's timeout and the group kill
+    try:
+        for index, entry in enumerate(entries):
+            assert isinstance(entry, PostHook)
+            if entry.run_async:
+                thread = threading.Thread(target=work, args=(index, entry), name=f"hook-{index}")
+                thread.start()
+                threads.append(thread)
+            else:
+                work(index, entry)
+        for thread in threads:
+            thread.join()  # bounded by the entry's timeout and the group kill
+    except BaseException:
+        # An interrupt: no hook outlives the process. Each started thread ends its group (TERM,
+        # 5 s, KILL) once it sees the event; the joins are bounded by that.
+        cancel.set()
+        for thread in threads:
+            thread.join()
+        raise
     results = tuple(r for r in slots if r is not None)
     failed = any(r.status != "ok" for r in results)
     return HookOutcome(entries=results, warnings=(WARN_FAILED,) if failed else ())
