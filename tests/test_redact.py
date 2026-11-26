@@ -1003,7 +1003,7 @@ def test_marker_forgery_in_input_is_just_text() -> None:
 
 
 def test_format_version_and_unicode_drift_are_exposed() -> None:
-    assert redact.DIGEST_FORMAT == 2
+    assert redact.DIGEST_FORMAT == 3
     assert redact.UNICODE_VERSION == unicodedata.unidata_version
     # U+2FFC: a marker where the interpreter's database does not know it, kept where it does
     out = textsafe.sanitize("⿼")

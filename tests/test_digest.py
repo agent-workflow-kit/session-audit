@@ -97,7 +97,7 @@ def test_the_layout_of_one_session_is_exact(
     )
     assert "NEVER-INCLUDED" not in render(out)
     assert out.skipped == () and out.over_cap == 0 and out.matched_total == 1
-    assert (out.unicode_version, out.digest_format) == (digest.redact.UNICODE_VERSION, 2)
+    assert (out.unicode_version, out.digest_format) == (digest.redact.UNICODE_VERSION, 3)
 
 
 def test_the_rendered_size_equals_the_counted_parts_and_is_utf8(

@@ -78,7 +78,7 @@ def test_the_key_follows_the_documented_formula() -> None:
     parts = [("b" * 36, "2" * 64), ("a" * 36, "1" * 64)]
     sections = [SectionHash(f"s{i}", sid, digest) for i, (sid, digest) in enumerate(parts, 1)]
     doc = {
-        "v": 2,
+        "v": 3,
         "sessions": [["a" * 36, "1" * 64], ["b" * 36, "2" * 64]],
         "skill": "p:s",
         "model": "",

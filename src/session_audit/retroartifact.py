@@ -55,7 +55,7 @@ MAX_ARTIFACT_FILE = 262_144  # 256 KB
 MAX_DEPTH = 16
 MAX_DIGITS = 16
 MAX_INTEGER = 2**53
-# todo(#30): marker.txt ships with the skill; until then every bundled run ends marker_mismatch
+# the bundled skill's marker (plugin/skills/audit/references/marker.txt, issue #30)
 MARKER_FILE = "skills/audit/references/marker.txt"
 _MARKER_LINE = re.compile(r"[a-z0-9-]{16,64}", re.ASCII)
 _PATH_MAX = 4096
