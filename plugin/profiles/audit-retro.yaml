@@ -1,5 +1,6 @@
 # The retro session's permission profile (claude-session, Permission profiles).
-# It only adds denies; claude-session generates every allow rule and the permission mode.
+# It only adds denies. The allow rules claude-session generates cover Read, Edit, Write and the
+# report command, and it sets the permission mode; the Skill tool under dontAsk is verified live (#37).
 permissions:
   deny:
     - Agent
