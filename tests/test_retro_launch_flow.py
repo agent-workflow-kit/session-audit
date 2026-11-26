@@ -454,11 +454,6 @@ def test_a_same_key_retro_whose_lease_is_not_live_does_not_block_a_new_insert(
         ctx.close()
 
 
-def test_the_daily_limit_has_its_named_seam() -> None:
-    doc = retrostate.check_daily_limit.__doc__
-    assert doc and "TODO(#28)" in doc
-
-
 def test_a_reused_retro_found_at_step_13_prints_and_exits_0(
     corpus: Corpus,
     gw: RetroGateway,

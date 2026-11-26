@@ -36,6 +36,7 @@ import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 from . import errors, harness
@@ -53,7 +54,17 @@ from .retroview import load_retro
 from .sessionquery import Filters, read_store, snapshot_index
 from .store import open_memory_copy
 
-__all__ = ["KeyState", "NoSteps", "Prepared", "Steps", "lookup_key", "prepare"]
+__all__ = [
+    "KeyState",
+    "NoSteps",
+    "Prepared",
+    "Steps",
+    "day_of",
+    "local_day",
+    "lookup_key",
+    "prepare",
+    "reserved",
+]
 
 LOOKUP_LIMIT = 50  # ``done`` rows read per key: a store full of one key stays bounded
 LEASE_LOOKUP_LIMIT = 1000  # non-final rows with an unexpired lease examined per key
@@ -224,19 +235,24 @@ def lookup_key(ctx: Context, conn: sqlite3.Connection, key: str) -> KeyState:
     return KeyState(reused, running, previous, unfit)
 
 
-def daily_remaining(ctx: Context, conn: sqlite3.Connection | None) -> int:
-    """``max(0, limits.retros_per_day - reserved(today))`` (Retro lifecycle, Daily limit):
-    ``reserved(day)`` is the starts recorded for the day (``time_zone``) plus the ``digesting``
-    retros whose lease is live. Read only; the binding check is step 13's (#26)."""
-    limit = ctx.settings.limits.retros_per_day
-    if conn is None:
-        return limit
-    now = ctx.gateway.now()
-    today = now.astimezone(ctx.settings.zone()).strftime("%Y-%m-%d")
-    reserved = conn.execute("SELECT COUNT(*) FROM retro_starts WHERE day = ?", (today,)).fetchone()[
-        0
-    ]
-    stamp = int(now.timestamp() * 1000)
+def day_of(ctx: Context, moment: datetime) -> str:
+    """The local day (``YYYY-MM-DD``) of ``moment`` in ``time_zone``."""
+    return moment.astimezone(ctx.settings.zone()).strftime("%Y-%m-%d")
+
+
+def local_day(ctx: Context) -> str:
+    """Today's date (``YYYY-MM-DD``) in ``time_zone``, from the gateway's clock: the ``local_day``
+    of a ``retro_starts`` row. A day is a calendar date of the zone, so a DST change makes it 23 or
+    25 hours long and a zone with a 45-minute offset changes its day at its own midnight."""
+    return day_of(ctx, ctx.gateway.now())
+
+
+def reserved(ctx: Context, conn: sqlite3.Connection, day: str) -> int:
+    """``reserved(day)`` (Retro lifecycle, Daily limit): the ``retro_starts`` rows of the local day
+    plus the ``digesting`` retros whose lease is live (a run waiting on its ``pre-retro`` hook holds
+    a place; a run whose process died does not). Read only."""
+    count = conn.execute("SELECT COUNT(*) FROM retro_starts WHERE day = ?", (day,)).fetchone()[0]
+    stamp = int(ctx.gateway.now().timestamp() * 1000)
     for retro_id, *lease in conn.execute(
         "SELECT id, lease_pid, lease_start, lease_expires_at FROM retros "
         "WHERE state = 'digesting' AND typeof(id) = 'text' AND id GLOB ? "
@@ -246,8 +262,17 @@ def daily_remaining(ctx: Context, conn: sqlite3.Connection | None) -> int:
     ).fetchall():
         state = _lease_of(tuple(lease))
         if state is not None and _RETRO_ID.fullmatch(retro_id) and is_live(ctx.gateway, state):
-            reserved += 1
-    return max(0, limit - reserved)
+            count += 1
+    return int(count)
+
+
+def daily_remaining(ctx: Context, conn: sqlite3.Connection | None) -> int:
+    """``max(0, limits.retros_per_day - reserved(today))`` (Retro lifecycle, Daily limit). Read
+    only; the binding check is step 13's (``retrostate.check_daily_limit``)."""
+    limit = ctx.settings.limits.retros_per_day
+    if conn is None:
+        return limit
+    return max(0, limit - reserved(ctx, conn, local_day(ctx)))
 
 
 # --- steps 8 and 9 -------------------------------------------------------------------------------

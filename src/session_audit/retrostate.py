@@ -24,7 +24,9 @@ final states    ``done`` (#29), ``failed``, ``escalated``, ``canceled``: ``finis
                 lease stays held (and renewed) until cleanup and the post hooks are done, then
                 ``release`` clears it.
 
-``daily limit`` (TODO(#28)): ``check_daily_limit`` is the seam inside the step 13 transaction.
+Daily limit (#28): ``check_daily_limit`` runs inside the step 13 transaction; the ``retro_starts``
+row is inserted with the ``running`` write (``retrolaunch``) and deleted again only by the refund of
+a run that never reached the model (``Launcher._end``).
 """
 
 from __future__ import annotations
@@ -68,9 +70,18 @@ def _ms(gateway: Gateway) -> int:
 
 
 def check_daily_limit(ctx: Context, conn: sqlite3.Connection) -> None:
-    """TODO(#28): ``reserved(today) >= limits.retros_per_day`` is exit 20 ``daily_limit`` with no
-    row and no hook (Retro lifecycle, Daily limit). Called inside the step 13 transaction, before
-    the insert; nothing is checked yet."""
+    """``reserved(today) >= limits.retros_per_day`` is exit 20 ``daily_limit``: no row, no hook
+    (Retro lifecycle, Daily limit). Called inside the step 13 ``BEGIN IMMEDIATE`` transaction,
+    before the insert, so two processes cannot both take the last place: the write lock orders
+    them, and the second one sees the first one's ``digesting`` row (live lease) as reserved."""
+    limit = ctx.settings.limits.retros_per_day
+    if retro.reserved(ctx, conn, retro.local_day(ctx)) >= limit:
+        raise errors.CliError(
+            "refused",
+            "the daily retro limit is reached",
+            details={"reason": "daily_limit", "limit": limit},
+            hint="Raise limits.retros_per_day or try again tomorrow.",
+        )
 
 
 @dataclass(frozen=True)

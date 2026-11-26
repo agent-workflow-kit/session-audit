@@ -36,7 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import errors, fencing, hooks, launchplan, retrofiles
+from . import errors, fencing, hooks, launchplan, retro, retrofiles
 from .command import Context
 from .config import home_dir, profile_issues
 from .fencing import FencedDigest
@@ -204,7 +204,7 @@ class Launcher:
 
     def _mark_running(self, run_token: str, fenced: FencedDigest) -> None:
         now = self.gw.now()
-        day = now.astimezone(self.ctx.settings.zone()).strftime("%Y-%m-%d")
+        day = retro.day_of(self.ctx, now)
         row = self.row
 
         def starts(conn: Any) -> None:
