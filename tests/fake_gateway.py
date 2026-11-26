@@ -12,16 +12,23 @@ test runs something nobody scripted.
 from __future__ import annotations
 
 import errno
+import io
 import os
 import posixpath
 import stat as statmod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import BinaryIO
 
-from session_audit.gateway import DEFAULT_STDOUT_LIMIT, CallResult, CallStatus, FileContent
+from session_audit.gateway import (
+    DEFAULT_STDOUT_LIMIT,
+    CallResult,
+    CallStatus,
+    DirHandle,
+    FileContent,
+)
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -48,11 +55,14 @@ class FakeClock:
 
 @dataclass
 class FakeEntry:
-    kind: str  # "file", "dir", "symlink" or "socket"
+    kind: str  # "file", "dir", "symlink", "socket", "fifo" or "device"
     data: bytes = b""
     uid: int = 1000
     mode: int = 0o644
     target: str = ""  # a symlink's target
+    nlink: int = 1
+    mtime_ns: int = 0
+    ino: int = 1
 
 
 class FakeGateway:
@@ -69,6 +79,10 @@ class FakeGateway:
         self.time_zone: str | None = "UTC"
         self.time_zone_env: Mapping[str, str] | None = None
         self.reads: list[str] = []
+        # Called with the normalized path of every directory or file opened below a root, before
+        # the open looks at the tree: a test swaps the entry here to stage a race.
+        self.on_open: Callable[[str], None] | None = None
+        self._next_ino = 100
         self.calls: list[dict[str, object]] = []
         self.crontab = ""
         self.pid_value = 4242
@@ -112,24 +126,45 @@ class FakeGateway:
         return self.process_starts.get(pid)
 
     # --- the file tree -------------------------------------------------------------------------
-    def add_dir(self, path: str, *, uid: int | None = None, mode: int = 0o700) -> None:
-        self.files[path] = FakeEntry("dir", uid=self.user_id if uid is None else uid, mode=mode)
+    def _new(self, kind: str, path: str, uid: int | None, mode: int, **more: object) -> None:
+        self._next_ino += 1
+        self.files[path] = FakeEntry(
+            kind,
+            uid=self.user_id if uid is None else uid,
+            mode=mode,
+            ino=self._next_ino,
+            **more,  # type: ignore[arg-type]
+        )
+
+    def add_dir(
+        self, path: str, *, uid: int | None = None, mode: int = 0o700, mtime_ns: int = 0
+    ) -> None:
+        self._new("dir", path, uid, mode, mtime_ns=mtime_ns)
 
     def add_file(
-        self, path: str, data: bytes | str = b"", *, uid: int | None = None, mode: int = 0o600
+        self,
+        path: str,
+        data: bytes | str = b"",
+        *,
+        uid: int | None = None,
+        mode: int = 0o600,
+        nlink: int = 1,
+        mtime_ns: int = 0,
     ) -> None:
         raw = data.encode("utf-8") if isinstance(data, str) else data
-        self.files[path] = FakeEntry(
-            "file", raw, uid=self.user_id if uid is None else uid, mode=mode
-        )
+        self._new("file", path, uid, mode, data=raw, nlink=nlink, mtime_ns=mtime_ns)
 
     def add_socket(self, path: str, *, uid: int | None = None, mode: int = 0o600) -> None:
-        self.files[path] = FakeEntry("socket", uid=self.user_id if uid is None else uid, mode=mode)
+        self._new("socket", path, uid, mode)
+
+    def add_fifo(self, path: str, *, uid: int | None = None, mode: int = 0o600) -> None:
+        self._new("fifo", path, uid, mode)
+
+    def add_device(self, path: str, *, uid: int | None = None, mode: int = 0o600) -> None:
+        self._new("device", path, uid, mode)
 
     def add_symlink(self, path: str, target: str, *, uid: int | None = None) -> None:
-        self.files[path] = FakeEntry(
-            "symlink", uid=self.user_id if uid is None else uid, mode=0o777, target=target
-        )
+        self._new("symlink", path, uid, 0o777, target=target)
 
     @staticmethod
     def _result(entry: FakeEntry) -> os.stat_result:
@@ -138,9 +173,31 @@ class FakeGateway:
             "dir": statmod.S_IFDIR,
             "symlink": statmod.S_IFLNK,
             "socket": statmod.S_IFSOCK,
+            "fifo": statmod.S_IFIFO,
+            "device": statmod.S_IFCHR,
         }
         mode = kind[entry.kind] | entry.mode
-        return os.stat_result((mode, 1, 1, 1, entry.uid, entry.uid, len(entry.data), 0, 0, 0))
+        seconds = entry.mtime_ns // 1_000_000_000
+        return os.stat_result(
+            (
+                mode,
+                entry.ino,
+                1,
+                entry.nlink,
+                entry.uid,
+                entry.uid,
+                len(entry.data),
+                0,
+                seconds,
+                0,
+                0.0,
+                seconds + (entry.mtime_ns % 1_000_000_000) / 1e9,
+                0.0,
+                0,
+                entry.mtime_ns,
+                0,
+            )
+        )
 
     def _entry(self, path: str | bytes | os.PathLike[str]) -> FakeEntry:
         name = os.fsdecode(path)
@@ -150,9 +207,27 @@ class FakeGateway:
         return found
 
     def open_read(self, path: str | bytes | os.PathLike[str]) -> BinaryIO:
-        raise NotImplementedError(
-            "transcript reads are scripted by the issue that first needs them"
-        )
+        raise NotImplementedError("transcript reads go through open_root and its handles")
+
+    # --- directory descriptors -----------------------------------------------------------------
+    def open_root(self, path: str | bytes) -> DirHandle:
+        name = posixpath.normpath(os.fsdecode(path))
+        for _ in range(8):  # realpath of the root: a symlink as the last component is followed
+            entry = self._entry(name)
+            if entry.kind != "symlink":
+                break
+            name = posixpath.normpath(entry.target)
+        else:
+            raise OSError(errno.ELOOP, "too many levels of symbolic links")
+        if self._entry(name).kind != "dir":
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", name)
+        return FakeDir(self, name)
+
+    def fstat(self, handle: BinaryIO) -> os.stat_result:
+        return handle.fake_stat  # type: ignore[attr-defined, no-any-return]
+
+    def set_blocking(self, handle: BinaryIO) -> None:
+        handle.fake_blocking = True  # type: ignore[attr-defined]
 
     def lstat(self, path: str | bytes | os.PathLike[str]) -> os.stat_result:
         return self._result(self._entry(path))
@@ -218,3 +293,71 @@ class FakeGateway:
 
     def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
         raise NotImplementedError("state directory access is tested against real directories")
+
+
+class _FakeFile(io.BytesIO):
+    """What ``FakeDir.open_file`` returns: the bytes, the ``fstat`` taken at open and whether
+    ``set_blocking`` ran."""
+
+    fake_stat: os.stat_result
+    fake_blocking = False
+
+
+class FakeDir:
+    """A directory descriptor of the in-memory tree (see ``DirHandle``): names are looked up
+    below ``path`` and a symlink is never followed."""
+
+    def __init__(self, gateway: FakeGateway, path: str) -> None:
+        self._gateway = gateway
+        self._path = path
+        self.closed = False
+
+    @property
+    def path(self) -> bytes:
+        return os.fsencode(self._path)
+
+    def _child(self, name: bytes) -> str:
+        text = os.fsdecode(name)
+        if not text or "/" in text or text in (".", ".."):
+            raise ValueError("a name is one path component")
+        return posixpath.join(self._path, text)
+
+    def entries(self, limit: int) -> tuple[list[bytes], bool]:
+        names = [os.fsencode(n) for n in self._gateway.list_dir(self._path)]
+        return names[:limit], len(names) > limit
+
+    def lstat(self, name: bytes) -> os.stat_result:
+        return self._gateway.lstat(self._child(name))
+
+    def open_dir(self, name: bytes) -> DirHandle:
+        path = self._child(name)
+        if self._gateway.on_open:
+            self._gateway.on_open(path)
+        entry = self._gateway._entry(path)
+        if entry.kind == "symlink":
+            raise OSError(errno.ELOOP, "too many levels of symbolic links", path)
+        if entry.kind != "dir":
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", path)
+        return FakeDir(self._gateway, path)
+
+    def open_file(self, name: bytes) -> BinaryIO:
+        path = self._child(name)
+        if self._gateway.on_open:
+            self._gateway.on_open(path)
+        entry = self._gateway._entry(path)
+        if entry.kind == "symlink":
+            raise OSError(errno.ELOOP, "too many levels of symbolic links", path)
+        if entry.kind == "dir":
+            raise IsADirectoryError(errno.EISDIR, "is a directory", path)
+        if entry.kind == "socket":
+            raise OSError(errno.ENXIO, "no such device or address", path)
+        self._gateway.reads.append(path)
+        handle = _FakeFile(entry.data)
+        handle.fake_stat = self._gateway._result(entry)
+        return handle  # type: ignore[return-value]
+
+    def stat(self) -> os.stat_result:
+        return self._gateway.lstat(self._path)
+
+    def close(self) -> None:
+        self.closed = True
