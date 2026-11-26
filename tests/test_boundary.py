@@ -41,7 +41,11 @@ FORBIDDEN_OS_CALLS = frozenset(
     {"open", "fdopen", "scandir", "listdir", "walk", "system", "popen", "fork", "forkpty"}
 )
 FORBIDDEN_OS_PREFIXES = ("exec", "spawn", "posix_spawn")
-SAFE_OPEN_USERS = frozenset({"commands/ingest.py"})
+# The exact call chains of the one sanctioned open method, per file.
+SAFE_OPEN_USERS = {
+    "commands/ingest.py": [["discovery", "open"]],
+    "digest.py": [["self", "discovery", "open"]],
+}
 FORBIDDEN_METHODS = frozenset({"open", "read_text", "read_bytes", "iterdir", "glob", "rglob"})
 # Dotted names (after import aliases are resolved) that are forbidden to call or to import.
 FORBIDDEN_NAMES = frozenset(
@@ -164,8 +168,9 @@ def violations(source: str, filename: str) -> list[str]:
                         add(node, f"{'.'.join(dotted)}() with a name that is not a literal")
                     elif _forbidden(target.value.split(".")):
                         add(node, f"{'.'.join(dotted)}({target.value!r})")
-            # reader.Discovery.open, the safe open, is called only by the ingest command.
-            sanctioned = chain == ["discovery", "open"] and filename in SAFE_OPEN_USERS
+            # reader.Discovery.open, the safe open, is called only by the ingest command and the
+            # digest (which reads the stored bytes of a transcript through it).
+            sanctioned = chain is not None and chain in SAFE_OPEN_USERS.get(filename, [])
             if (
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr in FORBIDDEN_METHODS
@@ -336,3 +341,19 @@ def test_discovery_open_is_the_one_sanctioned_open_method(tmp_path: Path) -> Non
     allowed.write_text("discovery.open(candidate)\n", encoding="utf-8")
     (tmp_path / "bad.py").write_text("other.open(candidate)\n", encoding="utf-8")
     assert scan(tmp_path) == ["bad.py:1: .open() call"]
+
+
+def test_the_sanction_is_the_exact_chain_of_each_file(tmp_path: Path) -> None:
+    (tmp_path / "gateway.py").write_text("", encoding="utf-8")
+    (tmp_path / "commands").mkdir()
+    (tmp_path / "commands" / "ingest.py").write_text("self.discovery.open(c)\n", encoding="utf-8")
+    (tmp_path / "digest.py").write_text(
+        "self.discovery.open(c)\nother.open(c)\nx.y.discovery.open(c)\ndiscovery.open(c)\n",
+        encoding="utf-8",
+    )
+    assert scan(tmp_path) == [
+        "commands/ingest.py:1: .open() call",
+        "digest.py:2: .open() call",
+        "digest.py:3: .open() call",
+        "digest.py:4: .open() call",
+    ]

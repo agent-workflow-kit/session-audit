@@ -13,9 +13,10 @@ Two kinds of output, kept in two types so the second can never be stored by acci
 - ``Event``: one counted fact. It holds only numbers, capped names and ids (never text); #13 turns
   it into an ``events`` row (dedupe key, ref, owner) and #14 derives the session values.
 - ``DigestItem``: a fact only the digest uses (prompt, assistant text, a tool call's argument
-  summary, a rejection). It carries conversation text, lives in memory, is produced only when the
-  context asks for it (``ParseContext.digest``) and has no path to the store: the events table
-  has no text column, ``Event`` has no text field, and a test pins both.
+  summary, and the text of a tool error, denial, rejection or interruption; a compaction has
+  none). It carries conversation text, lives in memory, is produced only when the context asks
+  for it (``ParseContext.digest``) and has no path to the store: the events table has no text
+  column, ``Event`` has no text field, and a test pins both.
 
 ``FileFacts`` is the per-file accumulator: line counts and the facts of the ``files`` row. It also
 gives each event its slot (Counting rules 3), which needs the file order.
@@ -45,7 +46,7 @@ NAME_CAP = 128  # model, tool, agent id, session id, entrypoint, version
 PATH_CAP = 4096  # cwd
 ID_CAP = 4096  # a dedupe id longer than this is treated as missing (it is hashed, never stored)
 TEXT_CAP = 65_536  # one digest text (the digest cuts it further)
-ARG_CAP = 4096  # one tool argument summary
+ARG_CAP = TEXT_CAP  # one tool argument summary: never below the largest digest.arg_chars (65536)
 MAX_BLOCKS = 1000  # content blocks per line; more is an error line
 MAX_DIGITS = 64  # an integer literal longer than this is "huge"
 SLOT_SECONDS = 900
@@ -82,7 +83,11 @@ class DigestKind(Enum):
     PROMPT = "prompt"
     ASSISTANT = "assistant"
     TOOL_CALL = "tool_call"
+    TOOL_ERROR = "tool_error"
+    DENIAL = "denial"
+    INTERRUPTION = "interruption"
     REJECTION = "rejection"
+    COMPACTION = "compaction"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +133,9 @@ class Event:
 class DigestItem:
     """A digest-only fact. ``text`` is conversation content: it is excluded from ``repr`` only,
     so never persist or log it and never use ``dataclasses.asdict`` on it.
-    Cut to ``TEXT_CAP`` (``ARG_CAP`` for a tool argument), then fixed with ``fix_surrogates``."""
+    Cut to ``TEXT_CAP`` (``ARG_CAP`` for a tool argument), then fixed with ``fix_surrogates``.
+    ``tool_use_id`` is the id of the tool call (tool_call item) or of the tool result a
+    tool_error, denial or rejection item came from; it is an id, never text."""
 
     kind: DigestKind
     block: int
@@ -137,6 +144,7 @@ class DigestItem:
     ts: int | None
     tool: str | None  # tool_call items
     text: str = field(repr=False)
+    tool_use_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +363,7 @@ class _Line:
         self.agent = _ident128(obj.get("agentId"))
         self.events: list[Event] = []
         self.digest: list[DigestItem] = []
+        self._denied = False
 
     def event(self, kind: Kind, **fields: object) -> None:
         base: dict[str, object] = {
@@ -417,6 +426,7 @@ class _Line:
                     block=index,
                     tool=name,
                     message_id=message_id,
+                    tool_use_id=_ident(block.get("id")),
                 )
             elif block.get("type") == "text" and self.want_digest:
                 text = _content_text([block])
@@ -458,6 +468,7 @@ class _Line:
         denied = (type(denial_kind) is str and denial_kind != "") or (
             isinstance(decision, dict) and decision.get("decision") == "reject"
         )
+        self._denied = denied
         if denied:
             first = _ident(results[0][1].get("tool_use_id")) if results else None
             self.event(Kind.DENIAL, ref_id=first)
@@ -465,10 +476,43 @@ class _Line:
             self.event(Kind.INTERRUPTION)
         if not self.want_digest:
             return
+        self._digest_user(obj, results)
+
+    def _digest_user(
+        self, obj: dict[str, object], results: list[tuple[int, dict[str, object]]]
+    ) -> None:
+        """The digest items of a user line: one tool_error item per error result, a denial (or,
+        for ``user-rejected``, a rejection) item, an interruption item, else a prompt. Their text
+        is the result's (a denial's or rejection's: the first error result's, else empty) or the
+        message's text; successful tool output is never an item."""
+        for index, block in results:
+            if block.get("is_error") is True:
+                self.item(
+                    DigestKind.TOOL_ERROR,
+                    _content_text(block.get("content")) or "",
+                    block=index,
+                    tool_use_id=_ident(block.get("tool_use_id")),
+                )
+        text = None  # the first error result's text; a successful result's is never used
+        source = results[0][1] if results else None  # the id comes from the same block as the text
+        for _, block in results:
+            if block.get("is_error") is True:
+                text = block.get("content")
+                source = block
+                break
+        first = _ident(source.get("tool_use_id")) if source is not None else None
         if obj.get("toolDenialKind") == "user-rejected":
-            source = results[0][1].get("content") if results else self.message.get("content")
-            self.item(DigestKind.REJECTION, _content_text(source))
-        elif not results and not obj.get("isMeta") and not obj.get("isCompactSummary"):
+            self.item(DigestKind.REJECTION, _content_text(text) or "", tool_use_id=first)
+        elif self._denied:
+            self.item(DigestKind.DENIAL, _content_text(text) or "", tool_use_id=first)
+        if obj.get("interruptedMessageId") is not None:
+            self.item(DigestKind.INTERRUPTION, _content_text(self.message.get("content")) or "")
+        elif (
+            not results
+            and not self._denied
+            and not obj.get("isMeta")
+            and not obj.get("isCompactSummary")
+        ):  # a denial or an interruption is a fact of its own, never also a prompt
             self.item(DigestKind.PROMPT, _content_text(self.message.get("content")))
 
     # system: turn duration and compaction
@@ -480,6 +524,7 @@ class _Line:
                 self.event(Kind.TURN, seconds=ms / 1000)
         elif subtype == "compact_boundary":
             self.event(Kind.COMPACTION)
+            self.item(DigestKind.COMPACTION, "")
 
 
 # --- the per-file accumulator ------------------------------------------------------------------

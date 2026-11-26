@@ -987,3 +987,97 @@ def test_an_open_error_other_than_vanished_counts_unsafe(tmp_path: Path) -> None
         finally:
             os.chmod(w._p(f"proj/{U1}/subagents"), 0o700)
         assert d.stats.unsafe == 1 and d.stats.vanished == 0
+
+
+# --- candidate_for: a stored path back to a Candidate (issue #21) ---------------------------------
+
+
+def test_candidate_for_rebuilds_every_listed_candidate(world: World) -> None:
+    world.file(f"proj/{U1}.jsonl", b"main\n", mtime=5 * NS)
+    world.file(f"proj/{U1}/subagents/agent-ab_1.jsonl", mtime=4 * NS)
+    world.file(f"proj/{U1}/subagents/workflows/wf-1.x/agent-z9.jsonl", mtime=3 * NS)
+    with discovery(world) as d:
+        for each in d.candidates():
+            found = d.candidate_for(each.path)
+            assert found is not None
+            assert (found.root_index, found.rel, found.path, found.kind) == (
+                each.root_index,
+                each.rel,
+                each.path,
+                each.kind,
+            )
+            assert (found.session_id, found.agent_id, found.workflow, found.project) == (
+                each.session_id,
+                each.agent_id,
+                each.workflow,
+                each.project,
+            )
+            assert isinstance(d.open(found), Opened)  # and it opens through the same safe walk
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "",  # the root itself
+        "proj",
+        f"proj/{U1}.json",
+        "proj/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.jsonl",
+        f"proj/{U1}/agent-a.jsonl",  # no subagents directory
+        f"proj/{U1}/subagents/agent-a.meta.json",
+        f"proj/{U1}/subagents/workflows/agent-a.jsonl",
+        f"proj/{U1}/subagents/workflows/wf/deeper/agent-a.jsonl",
+        f"proj/{U1}/tool-results/{U2}.jsonl",
+        f"proj/../{U1}.jsonl",
+        f"./{U1}.jsonl",
+        f"proj//{U1}.jsonl",
+        f"{U1}.jsonl",
+    ],
+)
+def test_candidate_for_refuses_every_name_that_is_not_a_transcript(world: World, rel: str) -> None:
+    with discovery(world) as d:
+        assert d.candidate_for(os.fsencode(world.root) + b"/" + rel.encode()) is None
+
+
+def test_candidate_for_refuses_a_path_outside_every_root(world: World) -> None:
+    other = os.fsencode(world.root) + b"x"  # a sibling name that shares the root's prefix
+    with discovery(world) as d:
+        assert d.candidate_for(other + f"/proj/{U1}.jsonl".encode()) is None
+        assert d.candidate_for(b"/elsewhere/proj/" + f"{U1}.jsonl".encode()) is None
+        assert d.candidate_for(b"") is None
+
+
+def test_candidate_for_refuses_a_nul_or_an_overlong_project_name(world: World) -> None:
+    base = os.fsencode(world.root) + b"/"
+    with discovery(world) as d:
+        assert d.candidate_for(base + b"pr\0oj/" + f"{U1}.jsonl".encode()) is None
+        assert d.candidate_for(base + b"p" * 256 + b"/" + f"{U1}.jsonl".encode()) is None
+        assert d.candidate_for(base + b"p" * 255 + b"/" + f"{U1}.jsonl".encode()) is not None
+
+
+def test_the_listing_and_classify_accept_exactly_the_same_names(world: World) -> None:
+    sub = f"proj/{U1}/subagents"
+    rels = [f"proj/{U1}.jsonl", f"proj/{U2[:-1]}.jsonl", "proj/not-a-uuid.jsonl"]
+    for name in (
+        "agent-a.jsonl",
+        "agent-.jsonl",
+        "agent-a b.jsonl",
+        f"agent-{'a' * 128}.jsonl",
+        f"agent-{'a' * 129}.jsonl",
+        "agent-a.meta.json",
+        "agent-a.jsonl.bak",
+        "x.jsonl",
+    ):
+        rels += [f"{sub}/{name}", f"{sub}/workflows/wf-1/{name}"]
+    for wf in ("..x", "wf_1.v2", "w f", "w" * 128, "w" * 129):
+        rels.append(f"{sub}/workflows/{wf}/agent-b.jsonl")
+    for rel in rels:
+        world.file(rel, b"x\n")
+    base = os.fsencode(world.root)
+    with discovery(world) as d:
+        listed = {c.path for c in d.candidates()}
+        expected = {
+            base + b"/" + r.encode()
+            for r in rels
+            if reader._classify(tuple(r.encode().split(b"/"))) is not None
+        }
+        assert listed == expected and listed
