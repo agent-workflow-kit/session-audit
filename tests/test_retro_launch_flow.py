@@ -65,9 +65,22 @@ def cs(gw: RetroGateway, tmp_path: Path) -> FakeClaudeSession:
 
 
 def test_the_row_has_every_column_written_as_the_data_model_says(
-    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, capsys: pytest.CaptureFixture[str]
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared_corpus(gw, corpus, capsys)
+    written: list[str] = []
+    real_write = retrofiles.write_run_files
+
+    def keep_prompt(*args: Any, **kwargs: Any) -> Any:
+        files = real_write(*args, **kwargs)
+        written.append(Path(files.prompt).read_text())  # cleanup removes it at the end of the run
+        return files
+
+    monkeypatch.setattr(retrolaunch.retrofiles, "write_run_files", keep_prompt)
     flags = ("--model", "some-model", "--session", S1[:8], "--session", S2, "--since", "3650d")
     plan_key = run_retro(capsys, gw, "--dry-run", *flags).doc["key"]
     session_run(cs, "blocked")
@@ -116,7 +129,8 @@ def test_the_row_has_every_column_written_as_the_data_model_says(
     assert manifest["digest_sha256"] == row["digest_sha256"]
     assert manifest["run_token"] == row["run_token"] and manifest["retro_id"] == row["id"]
     assert [s["csession_id"] for s in manifest["sessions"]] == [None, None]
-    prompt = (state / "prompts" / row["id"] / "prompt.md").read_text()
+    [prompt] = written
+    assert not (state / "prompts" / row["id"]).exists()  # cleanup's delete_local
     assert row["run_token"] in prompt and row["digest_sha256"] in prompt
     assert "secret" not in prompt and "answer" not in prompt  # no transcript text
     for path in (state / "digests", state / "prompts", state / "outcomes"):

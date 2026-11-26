@@ -96,6 +96,7 @@ class Report:
     tables: dict[str, int] = field(default_factory=lambda: dict.fromkeys(PRUNE_TABLES, 0))
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # skipped items, for stderr
+    recoveries: list[str] = field(default_factory=list)  # retro ids housekeeping recovered
 
 
 @dataclass
@@ -481,6 +482,23 @@ def retros(
         if handle is None:
             return
         _expired_digests(store_conn, gateway, handle, digest_cutoff, apply, skip, report)
+
+
+def expire_digests(
+    conn: sqlite3.Connection,
+    gateway: Gateway,
+    directory: str,
+    now_ms: int,
+    settings: Settings,
+    report: Report,
+) -> None:
+    """Delete the digests older than ``retention.digests`` (housekeeping of ``retro run``: a user
+    without the cron block keeps no digest past its retention once any retro runs). Only final
+    retros' digests, and directories no retro row names, expire."""
+    with digest_dir(gateway, directory) as handle:
+        if handle is not None:
+            cutoff = now_ms - ms(settings.digests)
+            _expired_digests(conn, gateway, handle, cutoff, True, set(), report)
 
 
 def _expired_digests(

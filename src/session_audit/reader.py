@@ -212,6 +212,9 @@ def _open_root(gateway: Gateway, configured: str, seen: set[tuple[int, int]]) ->
     return Root(configured, handle, None, identity)
 
 
+open_root_checked = _open_root  # the same root checks, for the cleanup of the retro's transcripts
+
+
 def _classify(
     rel: tuple[bytes, ...],
 ) -> tuple[Kind, bytes, bytes | None, bytes | None] | None:

@@ -15,7 +15,7 @@ import os
 from typing import Any
 
 from .. import args as a
-from .. import errors, fencing, launchplan, plugins, retro, retrolaunch, retrostate
+from .. import errors, fencing, launchplan, plugins, retro, retrolaunch, retrorecovery, retrostate
 from ..command import Command, Context
 from ..grammar import (
     MAX_TURNS_RANGE,
@@ -31,7 +31,16 @@ from ..sessionquery import one_line, put
 
 
 class Steps(retro.NoSteps):
-    """The real step 4 (the skill preflight). TODO(#27): the housekeeping of step 5."""
+    """The real step 4 (the skill preflight) and step 5 (housekeeping)."""
+
+    def housekeeping(self, ctx: Context) -> None:
+        """Recovery of retros left behind, cleanup retries, expired digests and old temporary
+        files (``retrorecovery``). Never changes the command's exit code."""
+        result = retrorecovery.run_housekeeping(ctx)
+        if result.recovered:
+            ctx.note(f"session-audit: recovered {len(result.recovered)} retro(s)")
+        for warning in result.warnings:
+            ctx.note(f"session-audit: warning: {warning}")
 
     def skill_preflight(self, ctx: Context, skill: str) -> plugins.PluginChoice:
         return plugins.skill_preflight(

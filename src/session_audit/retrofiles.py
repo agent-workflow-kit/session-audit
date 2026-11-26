@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat as statmod
 from dataclasses import dataclass
 from typing import BinaryIO
@@ -47,6 +48,7 @@ __all__ = [
 DIGESTS = "digests"
 PROMPTS = "prompts"
 OUTCOMES = "outcomes"
+RETRO_ID = re.compile(r"ra-[a-z2-7]{8}", re.ASCII)
 
 
 class FilesError(Exception):
@@ -249,7 +251,10 @@ def delete_local(gateway: Gateway, state: str, retro_id: str) -> bool:
     """Remove ``prompts/<retro_id>/`` and ``outcomes/<retro_id>.json``; True when both are gone
     (Collect and cleanup, ``delete_local``). Idempotent; never follows a symlink, a symlinked
     ``prompts`` or ``outcomes`` included (that is "not clean", nothing is deleted through it). The
-    digest directory stays until its retention expires."""
+    digest directory stays until its retention expires. An id that is not a retro id removes
+    nothing (False)."""
+    if not RETRO_ID.fullmatch(retro_id):
+        return False
     clean = True
     for parent, name in ((PROMPTS, retro_id), (OUTCOMES, f"{retro_id}.json")):
         try:
@@ -270,7 +275,10 @@ def delete_local(gateway: Gateway, state: str, retro_id: str) -> bool:
 
 def remove_digest(gateway: Gateway, state: str, retro_id: str) -> bool:
     """Remove ``digests/<retro_id>/`` (a retro that never ran has no use for its digest); a
-    symlinked ``digests`` is not entered (False)."""
+    symlinked ``digests`` is not entered (False). An id that is not a retro id removes nothing
+    (False)."""
+    if not RETRO_ID.fullmatch(retro_id):
+        return False
     try:
         handle = _open_parent(gateway, state, DIGESTS)
     except OSError:

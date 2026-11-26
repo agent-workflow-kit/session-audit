@@ -16,7 +16,7 @@ from session_audit import retrofiles
 from session_audit.errors import CliError
 from session_audit.fencing import FencedDigest
 from session_audit.gateway import SystemGateway
-from session_audit.retrofiles import FilesError, delete_local, write_run_files
+from session_audit.retrofiles import FilesError, delete_local, remove_digest, write_run_files
 
 RETRO = "ra-abcdefgh"
 TOKEN = "t" * 32
@@ -200,6 +200,25 @@ def test_delete_local_removes_the_prompt_and_the_outcome_and_is_idempotent(state
     assert not (state / "prompts" / RETRO).exists() and not Path(files.outcome).exists()
     assert (state / "digests" / RETRO).is_dir()  # the digest waits for its retention
     assert delete_local(SystemGateway(), str(state), RETRO)
+
+
+@pytest.mark.parametrize(
+    "bad", ["...........", "ra-ABCDEFGH", "ra-abcdefg1", "ra-abcdefgh/", "ra-.."]
+)
+def test_a_retro_id_that_is_not_an_id_removes_nothing(state: Path, bad: str) -> None:
+    gateway = SystemGateway()
+    kept = [state / "prompts" / "sibling", state / "digests" / "sibling"]
+    for directory in kept:
+        directory.mkdir(parents=True, mode=0o700)
+        (directory / "keep").write_text("x")
+    (state / "outcomes").mkdir(mode=0o700)
+    (state / "outcomes" / "sibling.json").write_text("{}")
+    (state / "prompts" / bad.strip("/")).mkdir(exist_ok=True, mode=0o700)
+    assert delete_local(gateway, str(state), bad) is False
+    assert remove_digest(gateway, str(state), bad) is False
+    assert (state / "prompts" / bad.strip("/")).is_dir()
+    assert all((d / "keep").exists() for d in kept)
+    assert (state / "outcomes" / "sibling.json").exists()
 
 
 def test_delete_local_never_follows_a_symlink(state: Path, tmp_path: Path) -> None:
