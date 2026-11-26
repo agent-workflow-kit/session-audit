@@ -35,11 +35,11 @@ import os
 import re
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from . import errors, harness
+from . import errors, harness, redact
 from .command import Context
 from .config import home_dir, profile_issues
 from .csversion import check_version
@@ -134,6 +134,9 @@ class Prepared:
     bundled_plugin: str | None = None  # the bundled plugin directory (the default profile's home)
     daily_remaining: int = 0  # for the dry-run plan; the binding check is step 13's
     filters: Filters | None = None  # the resolved scope filters (``scope_resolved`` of the row)
+    # The literal masks of the digest (built from the ``env`` of ``prepare``): the artifact check
+    # redacts model text with the same ones. Secrets: never shown in a repr.
+    masks: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def kept(self) -> int:
@@ -413,4 +416,5 @@ def _prepare_rest(
         bundled_plugin=None if plugins is None else plugins.bundled,
         daily_remaining=remaining,
         filters=resolved.filters,
+        masks=tuple(redact.build_masks(env, ctx.settings.redaction.mask_env, lambda _m: None)),
     )

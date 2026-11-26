@@ -23,6 +23,7 @@ import json
 import math
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -83,11 +84,23 @@ def _no_constants(_name: str) -> Any:
     raise Invalid("NaN or Infinity")
 
 
-def strict_loads(text: str) -> Any:
+def strict_loads(
+    text: str,
+    *,
+    parse_int: Callable[[str], Any] | None = None,
+    parse_float: Callable[[str], Any] | None = None,
+) -> Any:
     """``json.loads`` that refuses duplicate keys, ``NaN`` and ``Infinity`` and turns every parse
-    failure (including a document nested too deeply) into ``Invalid``."""
+    failure (including a document nested too deeply) into ``Invalid``. ``parse_int`` and
+    ``parse_float`` (the retro artifact guard) see the text of each number and may raise."""
     try:
-        return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
+        return json.loads(
+            text,
+            object_pairs_hook=_no_duplicates,
+            parse_constant=_no_constants,
+            parse_int=parse_int,
+            parse_float=parse_float,
+        )
     except Invalid:
         raise
     except (ValueError, RecursionError, MemoryError, OverflowError):

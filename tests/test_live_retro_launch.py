@@ -111,7 +111,7 @@ def test_a_real_launch_is_not_refused_for_its_working_directory(
         if not_started_for_the_profile(document):
             pytest.skip("the bundled profile arrives with #30")
         assert details.get("end_reason") not in REFUSED_CWD, details
-    # Whatever the retro ends as (the skill and the artifact check arrive with #29 and #30), the
+    # Whatever the retro ends as (the artifact check exists; the skill arrives with #30), the
     # session was started from its own directory under the state directory, was recorded, and was
     # forgotten again.
     assert result.returncode in (0, 12, 13, 14, 15, 16, 17, 18, 22), result.stderr
