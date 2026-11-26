@@ -138,7 +138,7 @@ def parse_marker(value: object) -> tuple[str, int | None]:
     """``(session id, start ms)`` of a marker; the start is None for a bare legacy value."""
     text = str(value)
     session_id, bar, start = text.rpartition("|")
-    if bar and start.isdigit():
+    if bar and start.isascii() and start.isdigit():
         return session_id, int(start)
     return text, None
 

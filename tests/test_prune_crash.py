@@ -83,13 +83,18 @@ def test_a_killed_prune_is_finished_by_the_next_one(tmp_path: Path) -> None:
     database = f"{directory}/state.db"
     process = child(directory, "slow")
     pid = process.pid  # captured at launch: the only process this test ever signals
-    deadline = time.monotonic() + 60
-    while not marker_visible(database):
-        assert process.poll() is None, "the child ended before it showed a marker"
-        assert time.monotonic() < deadline, "no marker within 60 s"
-        time.sleep(0.005)
-    os.kill(pid, signal.SIGKILL)
-    assert process.wait(timeout=30) == -signal.SIGKILL
+    try:
+        deadline = time.monotonic() + 60
+        while not marker_visible(database):
+            assert process.poll() is None, "the child ended before it showed a marker"
+            assert time.monotonic() < deadline, "no marker within 60 s"
+            time.sleep(0.005)
+        os.kill(pid, signal.SIGKILL)
+    finally:
+        if process.poll() is None:
+            os.kill(pid, signal.SIGKILL)
+        killed = process.wait(timeout=30)
+    assert killed == -signal.SIGKILL
     conn = sqlite3.connect(database, timeout=30)
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 3  # mid-run
     assert conn.execute("SELECT value FROM meta WHERE key = 'prune_session'").fetchone()[0]

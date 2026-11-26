@@ -547,3 +547,7 @@ def test_retros_are_deleted_a_page_per_transaction_not_one_by_one(
     assert len(opened) == 3  # pages of 2, 2 and 1
     assert rows(env, "SELECT COUNT(*) FROM retros") == [(0,)]
     assert rows(env, "SELECT COUNT(*) FROM retro_artifacts") == [(0,)]
+
+
+def test_a_marker_with_a_non_ascii_digit_start_falls_back_to_legacy() -> None:
+    assert retention.parse_marker("abc|²") == ("abc|²", None)
