@@ -152,6 +152,7 @@ class PathFilter:
 
     root_index: int
     rel: tuple[bytes, ...]
+    empty: bool = False  # the path does not exist or goes through a file: it selects nothing
 
 
 def display_path(path: bytes) -> str:
@@ -164,7 +165,8 @@ def _no_readable_roots() -> errors.CliError:
         "failed",
         "no transcript root is readable",
         details={"reason": "no_readable_roots", "retryable": False},
-        hint="Check transcript_roots in the config and the owner and mode of each root.",
+        hint="Check transcript_roots in the config and the owner and mode of each root; a root "
+        "must not be group or other writable (chmod g-w <root>).",
     )
 
 
@@ -248,7 +250,11 @@ class Discovery:
     def unusable_roots(self) -> list[tuple[str, str]]:
         """``(configured root, reason)`` of every root that cannot be used, in config order. A
         duplicate of an earlier root is not a problem and is left out."""
-        return [(r.configured, r.reason) for r in self.roots if r.reason not in (None, "duplicate")]  # type: ignore[misc]
+        return [
+            (r.configured, r.reason)
+            for r in self.roots
+            if r.reason is not None and r.reason != "duplicate"
+        ]
 
     @property
     def warnings(self) -> list[str]:
@@ -277,7 +283,7 @@ class Discovery:
         if not self.filters:
             return True
         for each in self.filters:
-            if each.root_index == root_index:
+            if each.root_index == root_index and not each.empty:
                 n = min(len(rel), len(each.rel))
                 if rel[:n] == each.rel[:n]:
                     return True
@@ -510,7 +516,11 @@ class Discovery:
             self._count(found)
             return found
         file, info = found
-        pruned = self._pruned_at(candidate.session_id)
+        try:
+            pruned = self._pruned_at(candidate.session_id)
+        except BaseException:
+            file.close()
+            raise
         if pruned is not None and info.st_mtime_ns // 1_000_000 <= pruned:
             file.close()
             self.stats.pruned += 1
@@ -532,7 +542,9 @@ class Discovery:
         self, root: DirHandle, rel: tuple[bytes, ...]
     ) -> tuple[BinaryIO, os.stat_result] | Skip:
         """Walk ``rel`` from ``root`` with ``openat`` and check what was opened. A directory
-        or file that is a symlink, or any open that fails, is a skip, never an error."""
+        or file that is a symlink, or any open that fails, is a skip, never an error. ENOENT is
+        ``VANISHED``; every other failure (ELOOP, ENOTDIR, ENXIO, EACCES, EMFILE, ...) is
+        ``UNSAFE``, the conservative reading (interface.md, Ingest rules 3)."""
         held: list[DirHandle] = []
         try:
             current = root
@@ -568,6 +580,8 @@ class Discovery:
             return None
         found = self._open_regular(handle, (*candidate.rel[:-1], name))
         if isinstance(found, Skip):
+            if found is Skip.UNSAFE:  # a missing meta file is normal and not counted
+                self._count(found)
             return None
         file, _ = found
         try:
@@ -661,47 +675,60 @@ def resolve_path_filters(
         index, rel = match
         handle = roots[index].handle
         assert handle is not None
-        _check_below(handle, rel)
-        filters.append(PathFilter(index, tuple(rel)))
+        exists = _check_below(handle, rel)
+        filters.append(PathFilter(index, tuple(rel), empty=not exists))
     return filters
 
 
 def _match_root(roots: list[Root], parts: list[bytes]) -> tuple[int, list[bytes]] | None:
+    """The root a path is below, by whole components: the configured spelling or the real path.
+    A duplicate root's spelling maps to the root that was kept for the same directory."""
     best: tuple[int, list[bytes]] | None = None
     best_len = -1
-    for index, root in enumerate(roots):
-        if root.handle is None:
+    for root in roots:
+        target = root
+        if root.reason == "duplicate":
+            target = next((r for r in roots if r.usable and r.identity == root.identity), root)
+        if target.handle is None or not target.usable:
             continue
-        for candidate in (os.fsencode(root.configured), root.handle.path):
+        index = roots.index(target)
+        for candidate in (os.fsencode(root.configured), target.handle.path):
             base = _components(candidate)
             if parts[: len(base)] == base and len(base) > best_len:
                 best, best_len = (index, parts[len(base) :]), len(base)
     return best
 
 
-def _check_below(root: DirHandle, rel: list[bytes]) -> None:
+def _check_below(root: DirHandle, rel: list[bytes]) -> bool:
+    """Check every component of ``rel`` below ``root`` without following a symlink. True when the
+    whole path exists; False when a component is missing, too long, not a name the file system
+    takes, or has something that is not a directory before the last component (the path then
+    selects nothing). A symlinked component exits 2."""
     held: list[DirHandle] = []
     try:
         current = root
         for position, name in enumerate(rel):
             try:
                 info = current.lstat(name)
-            except FileNotFoundError:
-                return
+            except (FileNotFoundError, ValueError):
+                return False
+            except OSError as exc:
+                if exc.errno == errno.ENAMETOOLONG:
+                    return False
+                raise _outside() from None
             if statmod.S_ISLNK(info.st_mode):
                 raise _outside()
             if position < len(rel) - 1:
                 if not statmod.S_ISDIR(info.st_mode):
-                    return
+                    return False
                 try:
                     current = current.open_dir(name)
                 except FileNotFoundError:
-                    return
+                    return False
                 except OSError:
                     raise _outside() from None
                 held.append(current)
-    except OSError:
-        raise _outside() from None
+        return True
     finally:
         for each in held:
             each.close()
@@ -721,8 +748,10 @@ def open_discovery(
     resolve ``paths``. Raises ``CliError`` exit 12 ``no_readable_roots`` when no root is usable
     and exit 2 for a ``--path`` outside every root."""
     seen: set[tuple[int, int]] = set()
-    opened = [_open_root(gateway, root, seen) for root in roots]
+    opened: list[Root] = []
     try:
+        for root in roots:
+            opened.append(_open_root(gateway, root, seen))
         if not any(root.usable for root in opened):
             raise _no_readable_roots()
         filters = resolve_path_filters(gateway, opened, paths)

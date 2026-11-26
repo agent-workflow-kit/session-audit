@@ -238,7 +238,7 @@ partial tail: left for the next run; a tail longer than 8 MiB sets the file's sk
 budgets: ingest.file_budget (default 60 s) per file and --budget per run; checked between lines
 ```
 
-A root writable by another user makes that root unusable (reported, other roots continue). Any other violation skips the file and counts it as `files.unsafe`.
+A root is unusable (reported with `root_unusable`, other roots continue; none usable is exit 12 `no_readable_roots`) when it is missing, not a directory, not owned by the user, or writable by group or others (mode `& 0o022`). A group-writable root is refused on purpose: with a umask of 002 Claude Code can create `~/.claude/projects` as 0770, and the fix is `chmod g-w <root>` (the exit-12 hint says so). Any other violation skips the file and counts it as `files.unsafe`. A failure to open a path component or the file that is not `ENOENT` (`ENOENT` is `files.vanished`) is counted the same way, conservatively: `EACCES`, `EMFILE`, a component swapped for a symlink or a non-directory all count as `files.unsafe`, because no other count or warning names an unreadable file. A broken `agent-<id>.meta.json` (unsafe) counts the same; a missing one counts nothing.
 
 **4. Lines.** Only lines ending in a line feed are parsed. A line that is not a JSON object is counted in `lines.errors` and skipped. NUL bytes inside a line make it an error line. Unknown line types count in `lines.unknown`.
 
@@ -1169,6 +1169,7 @@ Linux and WSL (Ubuntu) are tested. macOS is expected to work: the roots, `flock`
 - Lease liveness is the holder's PID with its start time and nothing stronger: a process in another PID namespace or host that shares the state directory looks dead and its lease is taken over (not supported), and a machine suspend can pass `expires_at` while the holder lives, so the next run recovers a healthy retro and the holder's compare-and-set write stops it.
 - The project directory is matched by its exact encoded name; a same-user process that creates another directory encoding to the same name (it needs the random csession id) could have it removed.
 - The cron env-file is sourced by the shell; a file its owner makes writable after install is run as shell code until `validate` reports it.
+- `st_nlink == 1` on the opened descriptor cannot exclude a same-user hard-link-then-unlink race in the window between `openat` and `fstat` (the file then looks like it has one link). The owner check and the kernel's `protected_hardlinks` limit what such a process can point the tool at; the tool only reads the file.
 - Transcript format changes in future Claude Code versions can make counts wrong without failing; the Session object's `unknown_line_types`, `lines.unknown` and the `no_usage` flag are the signals.
 
 ## Deviations from the design guide

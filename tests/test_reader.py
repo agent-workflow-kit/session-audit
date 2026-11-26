@@ -783,3 +783,207 @@ def test_no_leaked_descriptors_after_a_scan(world: World) -> None:
             assert isinstance(got, Opened)
             got.close()
     assert len(os.listdir("/proc/self/fd")) == before
+
+
+# --- review round 1 ----------------------------------------------------------------------------
+
+
+def test_an_excluded_file_is_never_opened(world: World) -> None:
+    world.file(f"retro-proj/{U1}.jsonl")
+    with discovery(world, excluded=lambda name: name == "retro-proj") as d:
+        (c,) = d.candidates()
+        opened: list[str] = []
+        if isinstance(world, FakeWorld):
+            world.gateway.on_open = opened.append
+        before = len(world.gateway.reads) if isinstance(world, FakeWorld) else 0
+        assert d.open(c) is Skip.EXCLUDED
+        assert opened == []
+        if isinstance(world, FakeWorld):
+            assert len(world.gateway.reads) == before
+
+
+def test_an_excluded_file_is_not_opened_on_the_real_file_system(tmp_path: Path) -> None:
+    w = RealWorld(tmp_path)
+    w.file(f"retro-proj/{U1}.jsonl")
+    with discovery(w, excluded=lambda name: True) as d:
+        (c,) = d.candidates()
+        os.remove(w._p(f"retro-proj/{U1}.jsonl"))  # an open would count vanished, not excluded
+        assert d.open(c) is Skip.EXCLUDED
+        assert d.stats.vanished == 0 and d.stats.unsafe == 0
+
+
+def fd_count() -> int:
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("no /proc")
+    return len(os.listdir("/proc/self/fd"))
+
+
+class SpyDir:
+    """A real directory handle that remembers every file it opened: CPython closes a dropped
+    file object at once, so only a held reference shows whether the code closed it."""
+
+    def __init__(self, inner: Any, files: list[Any]) -> None:
+        self._inner = inner
+        self._files = files
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def open_dir(self, name: bytes) -> SpyDir:
+        return SpyDir(self._inner.open_dir(name), self._files)
+
+    def open_file(self, name: bytes) -> Any:
+        file = self._inner.open_file(name)
+        self._files.append(file)
+        return file
+
+
+class SpyGateway(SystemGateway):
+    def __init__(self) -> None:
+        self.files: list[Any] = []
+
+    def open_root(self, path: str | bytes) -> Any:
+        return SpyDir(super().open_root(path), self.files)
+
+
+def test_no_descriptor_leaks_on_any_skip_path(tmp_path: Path) -> None:
+    w = RealWorld(tmp_path)
+    w.gateway = SpyGateway()
+    w.file(f"proj/{U1}.jsonl", mtime=10 * NS)  # becomes a FIFO
+    w.file(f"proj/{U2}.jsonl", mtime=10 * NS)  # gets a second link
+    w.file(f"proj/{U3}.jsonl", mtime=10 * NS)  # pruned
+    w.file(f"retro/{U1}.jsonl")  # excluded
+    w.file(f"proj/{U3}/subagents/agent-a.jsonl")  # its directory vanishes
+    pruned = {U3: 10_000}
+    with discovery(w, excluded=lambda name: name == "retro", pruned_at=pruned.get) as d:
+        found = {(c.project_dir, c.rel[1:]): c for c in d.candidates()}
+        os.remove(w._p(f"proj/{U1}.jsonl"))
+        os.mkfifo(w._p(f"proj/{U1}.jsonl"))
+        os.link(w._p(f"proj/{U2}.jsonl"), w._p("proj/second-link"))
+        os.remove(w._p(f"proj/{U3}/subagents/agent-a.jsonl"))
+        os.rmdir(w._p(f"proj/{U3}/subagents"))
+        before = fd_count()
+        results = [d.open(c) for c in found.values()]
+        assert fd_count() == before
+        assert w.gateway.files and all(f.closed for f in w.gateway.files)
+    reasons = sorted(r.value for r in results if isinstance(r, Skip))
+    assert reasons == ["excluded", "pruned", "unsafe", "unsafe", "vanished"]
+
+
+def test_a_pruned_lookup_that_raises_closes_the_file(tmp_path: Path) -> None:
+    w = RealWorld(tmp_path)
+    w.gateway = SpyGateway()
+    w.file(f"proj/{U1}.jsonl")
+
+    def boom(_: str) -> int | None:
+        raise RuntimeError("sqlite")
+
+    with discovery(w, pruned_at=boom) as d:
+        (c,) = d.candidates()
+        before = fd_count()
+        with pytest.raises(RuntimeError):
+            d.open(c)
+        assert fd_count() == before
+        assert w.gateway.files and all(f.closed for f in w.gateway.files)
+
+
+def test_a_file_that_changes_owner_after_listing_is_unsafe() -> None:
+    w = FakeWorld()
+    w.file(f"proj/{U1}.jsonl")
+    with discovery(w) as d:
+        (c,) = d.candidates()
+        w.gateway.files[w._p(f"proj/{U1}.jsonl")].uid = 4321
+        assert d.open(c) is Skip.UNSAFE
+        assert d.stats.unsafe == 1
+
+
+@pytest.mark.parametrize("kind", ["socket", "device", "fifo"])
+def test_a_file_replaced_by_a_special_file_after_listing_is_unsafe(kind: str) -> None:
+    w = FakeWorld()
+    w.file(f"proj/{U1}.jsonl")
+    with discovery(w) as d:
+        (c,) = d.candidates()
+        w.remove(f"proj/{U1}.jsonl")
+        getattr(w.gateway, f"add_{kind}")(w._p(f"proj/{U1}.jsonl"))
+        assert d.open(c) is Skip.UNSAFE
+        assert d.stats.unsafe == 1
+
+
+def test_path_through_a_regular_file_matches_nothing(world: World) -> None:
+    world.file(f"proj/{U1}.jsonl")
+    world.file(f"proj/{U2}.jsonl")
+    assert listed(world, paths=[world.root + f"/proj/{U1}.jsonl/extra"]) == []
+    assert listed(world, paths=[world.root + f"/proj/{U1}.jsonl/extra/more"]) == []
+
+
+def test_path_by_the_spelling_of_a_duplicate_root_is_accepted(world: World, tmp_path: Path) -> None:
+    world.file(f"proj/{U1}.jsonl")
+    world.file(f"other/{U2}.jsonl")
+    if isinstance(world, RealWorld):
+        link = str(tmp_path / "again")
+        os.symlink(world.root, link)
+    else:
+        link = "/again"
+        world.gateway.add_symlink(link, world.root)
+    found = listed(world, roots=[world.root, link], paths=[link + "/proj"])
+    assert rels(found) == [f"proj/{U1}.jsonl"] and found[0].root_index == 0
+    assert len(listed(world, roots=[link, world.root], paths=[world.root + "/proj"])) == 1
+
+
+def test_an_over_long_component_matches_nothing(tmp_path: Path) -> None:
+    w = RealWorld(tmp_path)
+    w.file(f"proj/{U1}.jsonl")
+    assert listed(w, paths=[w.root + "/" + "a" * 300]) == []
+    assert listed(w, paths=[w.root + "/proj/" + "a" * 300 + "/b"]) == []
+
+
+def test_a_nul_in_a_path_matches_nothing(world: World) -> None:
+    world.file(f"proj/{U1}.jsonl")
+    assert listed(world, paths=[world.root + "/pr\x00oj"]) == []
+
+
+def test_every_later_root_that_fails_closes_the_handles_already_open() -> None:
+    w = FakeWorld()
+    w.gateway.add_dir("/second")
+    opened: list[Any] = []
+    real_open_root = w.gateway.open_root
+
+    def open_root(path: str | bytes) -> Any:
+        handle = real_open_root(path)
+        opened.append(handle)
+        if len(opened) == 2:
+
+            def broken() -> os.stat_result:
+                raise RuntimeError("stat failed")
+
+            handle.stat = broken
+        return handle
+
+    w.gateway.open_root = open_root
+    with pytest.raises(RuntimeError):
+        discovery(w, roots=[w.root, "/second"])
+    assert len(opened) == 2 and all(h.closed for h in opened)
+
+
+def test_an_unsafe_meta_file_counts_unsafe_and_a_missing_one_counts_nothing(world: World) -> None:
+    world.file(f"proj/{U1}/subagents/agent-a.jsonl")
+    world.fifo(f"proj/{U1}/subagents/agent-a.meta.json")
+    world.file(f"proj/{U1}/subagents/agent-b.jsonl")
+    with discovery(world) as d:
+        for c in d.candidates():
+            assert d.read_meta(c) is None
+        assert d.stats.unsafe == 1 and d.stats.vanished == 0
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_an_open_error_other_than_vanished_counts_unsafe(tmp_path: Path) -> None:
+    w = RealWorld(tmp_path)
+    w.file(f"proj/{U1}/subagents/agent-a.jsonl")
+    with discovery(w) as d:
+        (c,) = d.candidates()
+        os.chmod(w._p(f"proj/{U1}/subagents"), 0)
+        try:
+            assert d.open(c) is Skip.UNSAFE
+        finally:
+            os.chmod(w._p(f"proj/{U1}/subagents"), 0o700)
+        assert d.stats.unsafe == 1 and d.stats.vanished == 0
