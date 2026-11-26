@@ -39,7 +39,8 @@ USD_STEP = Decimal("0.000001")  # dollars are shown in whole micro-dollars
 UNKNOWN_MODEL = "unknown"  # a message with no model name
 TOKENS_PER_PRICE = Decimal(1_000_000)  # prices are USD per million tokens
 EXACT_PRECISION = 80  # digits: a sum of capped counts times prices never rounds at this width
-MAX_AGENTS = 1000  # agent_values cap; keeps its bound parameters below SQLite's limit
+MAX_AGENTS = 1000  # agent_values cap (documented)
+AGENT_CHUNK = 500  # agent ids per IN list: with the session id, under SQLite's old 999 limit
 
 # The closed set of quality flags, in output order (schemas/defs.json ``flag``).
 FLAGS = (
@@ -536,7 +537,7 @@ def _derive_batch(
             started = min(file_mins) if file_mins else None
             ended = max(file_maxs) if file_maxs else None
 
-        accumulator = accumulators.get(sid) or CostAccumulator(settings.prices)
+        accumulator = accumulators.pop(sid, None) or CostAccumulator(settings.prices)
         ordered = [name for _, name in sorted(shown.get(sid, []))[:MAX_MODELS]]
 
         reported = None
@@ -637,27 +638,30 @@ def agent_values(
     if not head:
         return [], False
     ids = [r[0] for r in head]
-    marks = _marks(len(ids))
-    counters: dict[str, tuple[int, int, int, int]] = {
-        row[0]: (row[1], row[2], row[3], row[4])
+    counters: dict[str, tuple[int, int, int, int]] = {}
+    models: dict[str, dict[str, TokenSums]] = {}
+    # The IN lists are chunked so a statement never binds more than AGENT_CHUNK + 1 parameters
+    # (SQLite builds before 3.32 allow 999); agents are disjoint across chunks.
+    for start in range(0, len(ids), AGENT_CHUNK):
+        chunk = ids[start : start + AGENT_CHUNK]
+        marks = _marks(len(chunk))
         for row in conn.execute(
             "SELECT agent_id, SUM(kind = 'tool_call'), SUM(kind = 'tool_error'), "
             "SUM(kind = 'denial'), SUM(kind = 'interruption') FROM events "
             f"WHERE counted = 1 AND session_id = ? AND agent_id IN ({marks}) GROUP BY agent_id",
-            (session_id, *ids),
-        )
-    }
-    models: dict[str, dict[str, TokenSums]] = {}
-    for row in conn.execute(
-        "SELECT agent_id, model, SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens), "
-        "SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens) FROM events "
-        f"WHERE counted = 1 AND kind = 'message' AND session_id = ? AND agent_id IN ({marks}) "
-        "GROUP BY agent_id, model",
-        (session_id, *ids),
-    ):
-        name = UNKNOWN_MODEL if row[1] is None else row[1]
-        per = models.setdefault(row[0], {})
-        per[name] = per.get(name, TokenSums()) + TokenSums(*row[2:])
+            (session_id, *chunk),
+        ):
+            counters[row[0]] = (row[1], row[2], row[3], row[4])
+        for row in conn.execute(
+            "SELECT agent_id, model, SUM(input_tokens), SUM(output_tokens), "
+            "SUM(cache_read_tokens), SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens) "
+            "FROM events WHERE counted = 1 AND kind = 'message' AND session_id = ? "
+            f"AND agent_id IN ({marks}) GROUP BY agent_id, model",
+            (session_id, *chunk),
+        ):
+            name = UNKNOWN_MODEL if row[1] is None else row[1]
+            per = models.setdefault(row[0], {})
+            per[name] = per.get(name, TokenSums()) + TokenSums(*row[2:])
     out: list[AgentValues] = []
     for agent_id, parent, agent_type in head:
         per = models.get(agent_id, {})

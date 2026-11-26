@@ -1037,7 +1037,7 @@ def test_agent_values_clamps_limit_to_the_documented_cap(env: Env) -> None:
             f"INSERT INTO agents ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
             [values[c] for c in names],
         )
-    env.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 1002)
+    env.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
     agents, truncated = agent_values(env.conn, SESSION_A, limit=10**6)
     assert len(agents) == 1000 and truncated
     assert agent_values(env.conn, SESSION_A, limit=-1)[0] == []
