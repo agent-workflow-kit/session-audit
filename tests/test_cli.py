@@ -25,6 +25,7 @@ from typing import Any, cast
 import pytest
 
 from session_audit import __version__, errors
+from session_audit.args import not_implemented
 from session_audit.cli import main
 from session_audit.command import Command, Context, Output, StdoutFailed
 from session_audit.commands import COMMANDS
@@ -811,7 +812,11 @@ def test_ambiguous_prints_its_matches_on_stderr(capsys: pytest.CaptureFixture[st
 def test_an_unimplemented_command_validates_then_reports_an_internal_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, err = run(capsys, ["validate", "--json"], commands=COMMANDS)
+    def pending(ctx: Context, args: argparse.Namespace) -> int:
+        raise not_implemented()
+
+    stub = Command(("later",), "x", lambda p: None, lambda c, a: None, pending)
+    code, out, err = run(capsys, ["later", "--json"], commands=(stub,))
     assert code == 1
     assert envelope(out)["code"] == "internal"
     assert_golden(json.loads(out), "error-internal-not-implemented")

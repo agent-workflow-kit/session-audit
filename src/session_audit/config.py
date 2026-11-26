@@ -768,8 +768,9 @@ class Settings(_Model):
     ``retro.permission_profile``) are still applied here.
     """
 
-    # todo(#33): commands that execute harness/hooks (validate --probe, retro run) must not
-    # honor exec-bearing keys while ctx.config_issues is non-empty
+    # A command that executes these keys must not honor them while ctx.config_issues is
+    # non-empty: the commands that change something (``retro run`` among them) refuse an unsafe
+    # config (exit 20), and ``validate`` runs the default claude-session command and no probe.
 
     transcript_roots: Annotated[tuple[str, ...], BeforeValidator(_roots)] = ()
     time_zone: Annotated[str, BeforeValidator(_zone)] = "UTC"
@@ -880,7 +881,7 @@ def profile_issues(gateway: Gateway, path: str, home: str) -> list[ConfigIssue]:
     (checked before a launch; a missing file is the caller's concern)."""
     # Called by retro.check_config (step 2) and again by retrolaunch.run_launch just before the
     # row is inserted (the file may change between the two).
-    # todo(#33): validate reports profile_issues
+    # ``validate`` reports it too (the ``permission_profile`` check).
     uid = gateway.uid()
     path = os.path.normpath(path)
     issues: list[ConfigIssue] = []
