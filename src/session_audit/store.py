@@ -242,6 +242,8 @@ def _check_side_files(gateway: Gateway, db_path: str) -> None:
             info = gateway.lstat(db_path + suffix)
         except FileNotFoundError:
             continue
+        if info.st_nlink == 0:
+            continue  # unlinked by another connection's close while we looked: same as missing
         _check_file(info, gateway.uid(), DB_NAME + suffix)
 
 
