@@ -4,7 +4,8 @@
 Everything claude-session prints is untrusted data. Documents are parsed with ``strict_loads``
 (no duplicate keys, no ``NaN`` or ``Infinity``, a depth the parser bounds; the gateway already
 caps the size), every field the tool reads is checked by type and grammar, and a document that
-fails is ``Invalid``: the caller maps that to ``claude_session_error`` (never exit 1, never a crash).
+fails is ``Invalid``: the caller maps that to ``claude_session_error`` (never exit 1, never a
+crash).
 No text of a document (messages, hints, warnings) is kept: only ids, numbers and tokens.
 
 ``map_exec`` is the Outcome mapping table for the adopting ``exec``: the rows are tried in the
