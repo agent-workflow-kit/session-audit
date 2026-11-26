@@ -23,7 +23,11 @@ no log line, no ``meta`` change, no store when there is none yet.
    writes one snapshot first, without the lease, then reads that snapshot's transcripts when the
    lease is free (``files_deferred`` otherwise).
 
-TODO(#25): fire the ``post-attention`` hook with ``ingest_failing_due``'s result.
+5. A full ingest that fails (exit 1 or 12) counts in ``meta`` and, when ``ingest_failing_due``
+   says so, fires the ``post-attention`` hook ``ingest_failing`` (``fire_ingest_failing``): after
+   the lease is released and with no write lock held, best effort, and never a change to the
+   run's exit code or output. A full ingest that exits 0 resets the counters, so nothing is ever
+   due after one; a partial run never counts.
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .. import args as a
-from .. import errors, harness
+from .. import errors, harness, hooks
 from ..command import Command, Context
 from ..csversion import Presence, check_version
 from ..eventstore import FileResult, WriteGuard, read_file
@@ -549,7 +553,7 @@ def ingest_failing_due(
 ) -> dict[str, Any] | None:
     """The ``post-attention`` details of ``ingest_failing`` when it is due (``fail_count`` has
     reached ``ingest.fail_threshold`` and the last firing is over 24 h ago), else None. It does not
-    set ``meta.last_fired_at``: the caller that fires the hook does (TODO(#25))."""
+    set ``meta.last_fired_at``: ``fire_ingest_failing`` does, in the same transaction."""
     count = _meta_int(conn, "fail_count") or 0
     if count < threshold or count < 1:
         return None
@@ -583,6 +587,28 @@ def _exit_code(exc: Exception) -> int:
     return exc.exit_code if isinstance(exc, errors.CliError) else 1
 
 
+def fire_ingest_failing(ctx: Context, store: Store) -> None:
+    """Fire ``post-attention`` ``ingest_failing`` when it is due. The rule check and
+    ``meta.last_fired_at`` are one write transaction, so two failing runs fire once; the hooks run
+    after it commits. Nothing is claimed when no entry is configured. Best effort: whatever goes
+    wrong here (an unwritable store, a hook) is never the ingest's error."""
+    if not ctx.settings.hooks.post_attention:
+        return
+    try:
+        now = _now_ms(ctx)
+        with store.transaction() as conn:
+            details = ingest_failing_due(conn, ctx.settings.ingest.fail_threshold, now)
+            if details is None:
+                return
+            _set_meta(conn, "last_fired_at", now)
+        payload = hooks.ingest_failing_payload(ctx.gateway, details)
+        outcome = hooks.run_hooks(ctx.gateway, ctx.settings.hooks, payload)
+        for line in hooks.warning_text(outcome, hooks.POST_ATTENTION):
+            ctx.note(line)
+    except Exception:  # noqa: BLE001 - best effort, never changes the ingest's result
+        return
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     if ctx.dry_run:
         report = run_dry(ctx, args)
@@ -596,6 +622,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         except Exception as exc:
             if is_full(args) and _exit_code(exc) in (1, 12):
                 record_failure(store, _now_ms(ctx))
+                fire_ingest_failing(ctx, store)
             raise
     print_report(ctx, report)
     return 0
@@ -873,8 +900,6 @@ def _locked(
             complete=tally.complete,
             full=is_full(args),
         )
-    # TODO(#25): fire the post-attention hook when ingest_failing_due(...) returns details
-    # (nothing calls it before then).
     return report
 
 
