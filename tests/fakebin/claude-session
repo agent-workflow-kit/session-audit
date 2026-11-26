@@ -16,7 +16,9 @@ past the last repeat the last step. A step is {"stdout": <json or text>, "stderr
 "exit": int, "sleep": seconds (before printing), "sleep_after": seconds (after printing and flushing, before the
 call is logged as done: a call killed here has printed), "ignore_term": bool, "stdin": bool (read
 and log stdin), "pid_file": path, "outcome_file": text (written to the path after
-``--outcome-file`` before anything is printed)}.
+``--outcome-file`` before anything is printed), "remove_paths": [paths] (removed, files or whole
+directories, before anything is printed: what a real ``forget --purge`` does to the session
+directory and the private directory)}.
 
 ``status`` also takes the key ``status <csession id>``: its steps answer only calls for that id
 (counted separately), so a test scripts a different document per session.
@@ -39,6 +41,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -243,6 +246,11 @@ def main(argv):
     if step.get("outcome_file") is not None and "--outcome-file" in argv:
         with open(argv[argv.index("--outcome-file") + 1], "w", encoding="utf-8") as handle:
             handle.write(step["outcome_file"])
+    for path in step.get("remove_paths", []):
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
     sys.stdout.write(text)
     sys.stdout.flush()
     sys.stderr.write(step.get("stderr", ""))

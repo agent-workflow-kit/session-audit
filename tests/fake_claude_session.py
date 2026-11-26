@@ -539,12 +539,14 @@ def step(
     ignore_term: bool = False,
     read_stdin: bool = False,
     pid_file: Path | None = None,
+    remove_paths: list[Path | str] | None = None,
     schema: str | None = None,
     unvalidated: bool = False,
 ) -> dict[str, Any]:
     """One scripted call. ``schema`` overrides the schema chosen from the key. ``sleep_after``
     keeps the call alive after it printed; ``outcome_file`` is written to the path given after
-    ``--outcome-file`` before anything is printed."""
+    ``--outcome-file`` before anything is printed; ``remove_paths`` are removed before anything is
+    printed (a ``forget --purge`` that purges the session and private directories)."""
     out: dict[str, Any] = {"stdout": stdout, "exit": exit}
     if stderr:
         out["stderr"] = stderr
@@ -560,6 +562,8 @@ def step(
         out["stdin"] = True
     if pid_file is not None:
         out["pid_file"] = str(pid_file)
+    if remove_paths:
+        out["remove_paths"] = [str(p) for p in remove_paths]
     if schema:
         out["schema"] = schema
     if unvalidated:

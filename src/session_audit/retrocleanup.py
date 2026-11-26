@@ -107,10 +107,13 @@ def load_session_row(store: Store, csession_id: str) -> SessionRow | None:
     return None if row is None else SessionRow(*row)
 
 
-def call(ctx: Context, *argv: str, timeout: float = CALL_TIMEOUT) -> CallResult:
-    """One claude-session call: its own process group, a timeout, a capped output."""
+def call(ctx: Context, *argv: str, timeout: float | None = None) -> CallResult:
+    """One claude-session call: its own process group, a timeout (``CALL_TIMEOUT``), a capped
+    output."""
     return ctx.gateway.run(
-        [ctx.settings.harness.claude_session_cmd, *argv], timeout=timeout, stdout_limit=OUTPUT_LIMIT
+        [ctx.settings.harness.claude_session_cmd, *argv],
+        timeout=CALL_TIMEOUT if timeout is None else timeout,
+        stdout_limit=OUTPUT_LIMIT,
     )
 
 
@@ -223,18 +226,27 @@ def _config_dir(env: Mapping[str, str]) -> str:
 
 
 def _remove_session_env(gateway: Gateway, config_dir: str, ids: list[str]) -> bool:
-    """``<config dir>/session-env/<id>`` for each id. True when all are gone."""
-    root = open_root_checked(gateway, config_dir, set())
-    if root.handle is None:
-        return root.reason == "missing"  # no config directory: nothing of ours is in it
+    """``<config dir>/session-env/<id>`` for each id. True when all are gone. The config directory
+    and ``session-env`` must be the user's own directories (no mode rule: the walk checks every
+    entry it removes, and a symlink at either name is never entered)."""
     try:
+        root = gateway.open_root(config_dir)
+    except FileNotFoundError:
+        return True  # no config directory: nothing of ours is in it
+    except OSError:
+        return False
+    try:
+        if root.stat().st_uid != gateway.uid():
+            return False
         try:
-            env_dir = root.handle.open_dir(b"session-env")
+            env_dir = root.open_dir(b"session-env")
         except FileNotFoundError:
             return True
         except OSError:
             return False  # a symlink or a file there: never entered
         try:
+            if env_dir.stat().st_uid != gateway.uid():
+                return False
             clean = True
             for session in ids:
                 try:
@@ -245,7 +257,7 @@ def _remove_session_env(gateway: Gateway, config_dir: str, ids: list[str]) -> bo
         finally:
             env_dir.close()
     finally:
-        root.handle.close()
+        root.close()
 
 
 def remove_run_transcripts(ctx: Context, project_dir: str) -> bool:
