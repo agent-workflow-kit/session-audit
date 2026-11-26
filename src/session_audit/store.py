@@ -357,11 +357,13 @@ class Store:
         directory: str,
         conn: sqlite3.Connection,
         version: int,
+        migrations: Sequence[Migration] = MIGRATIONS,
     ) -> None:
         self.gateway = gateway
         self.directory = directory
         self.conn = conn
         self.version = version
+        self.migrations = migrations
         self.log = LogWriter(gateway, directory)
 
     @contextlib.contextmanager
@@ -402,6 +404,11 @@ class Store:
                 "from disk; try again",
                 retryable=True,
             )
+
+    def reopen(self) -> Store:
+        """A second ``Store`` on the same directory with its own connection, for another thread
+        (a ``Store`` is for one thread; the lease renewal thread writes through its own)."""
+        return open_store(self.gateway, self.directory, migrations=self.migrations)
 
     def close(self) -> None:
         with contextlib.suppress(sqlite3.Error):
@@ -444,7 +451,7 @@ def open_store(
                 raise
     except (OSError, sqlite3.Error) as exc:
         raise storage_error(exc) from None
-    return Store(gateway, directory, conn, version)
+    return Store(gateway, directory, conn, version, migrations)
 
 
 def _open_connection(

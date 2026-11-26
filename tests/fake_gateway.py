@@ -71,6 +71,8 @@ class FakeGateway:
         self.reads: list[str] = []
         self.calls: list[dict[str, object]] = []
         self.crontab = ""
+        self.pid_value = 4242
+        self.process_starts: dict[int, str] = {4242: "boot-4242"}  # pid -> start token (running)
         self._rules: list[tuple[tuple[str, ...], list[CallResult]]] = []
 
     def on(self, prefix: Sequence[str], *results: CallResult) -> None:
@@ -102,6 +104,12 @@ class FakeGateway:
 
     def sleep(self, seconds: float) -> None:
         self.clock.advance(seconds)
+
+    def pid(self) -> int:
+        return self.pid_value
+
+    def process_start(self, pid: int) -> str | None:
+        return self.process_starts.get(pid)
 
     # --- the file tree -------------------------------------------------------------------------
     def add_dir(self, path: str, *, uid: int | None = None, mode: int = 0o700) -> None:
