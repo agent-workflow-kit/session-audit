@@ -24,6 +24,8 @@ from ..grammar import (
     parse_session_prefix,
 )
 
+# The hook points of steps 4 and 5 (TODO(#24), TODO(#27)); tests replace them.
+STEPS: retro.Steps = retro.NoSteps()
 MAX_SESSION_FLAGS = 1000
 SCOPE_FLAGS = ("session", "label", "project", "since", "until", "kind", "outcome")
 
@@ -102,7 +104,7 @@ def _print_reused(ctx: Context, retro_object: dict[str, object]) -> None:
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
-    prepared = retro.prepare(ctx, args)
+    prepared = retro.prepare(ctx, args, steps=STEPS)
     for warning in prepared.warnings:
         ctx.note(f"session-audit: warning: {warning}")
     if prepared.reuse is not None:
