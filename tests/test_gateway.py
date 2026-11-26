@@ -534,3 +534,130 @@ def test_a_posix_tz_string_falls_through_to_the_machine_files(
     zone_file.write_text("Not/AZone\n", encoding="utf-8")
     link.unlink()
     assert gw.machine_time_zone({"TZ": "garbage"}) is None
+
+
+# --- the state directory (the store's own files) ----------------------------------------------
+
+
+def test_umask_is_set_for_the_block_and_restored(tmp_path: Path) -> None:
+    gateway = SystemGateway()
+    before = os.umask(0o022)
+    try:
+        with gateway.umask(0o077):
+            assert os.umask(0o077) == 0o077
+        assert os.umask(0o022) == 0o022
+        with pytest.raises(RuntimeError), gateway.umask(0o077):
+            raise RuntimeError
+        assert os.umask(0o022) == 0o022
+    finally:
+        os.umask(before)
+
+
+@pytest.mark.parametrize("mask", [0o000, 0o022, 0o277, 0o777])
+def test_mkdir_gives_exactly_the_mode_whatever_the_umask(tmp_path: Path, mask: int) -> None:
+    before = os.umask(mask)
+    try:
+        SystemGateway().mkdir(tmp_path / "d", 0o700)
+    finally:
+        os.umask(before)
+    assert stat.S_IMODE(os.lstat(tmp_path / "d").st_mode) == 0o700
+
+
+def test_mkdir_refuses_an_existing_path_including_a_symlink(tmp_path: Path) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    for name in ("real", "link"):
+        with pytest.raises(FileExistsError):
+            SystemGateway().mkdir(tmp_path / name, 0o700)
+    with pytest.raises(FileNotFoundError):
+        SystemGateway().mkdir(tmp_path / "no" / "parent", 0o700)
+
+
+@pytest.mark.parametrize("mask", [0o000, 0o022, 0o277])
+def test_open_private_creates_with_the_exact_mode(tmp_path: Path, mask: int) -> None:
+    before = os.umask(mask)
+    try:
+        handle = SystemGateway().open_private(tmp_path / "f", create=True)
+        handle.close()
+    finally:
+        os.umask(before)
+    assert stat.S_IMODE(os.lstat(tmp_path / "f").st_mode) == 0o600
+
+
+def test_open_private_keeps_an_existing_file_as_it_is(tmp_path: Path) -> None:
+    path = tmp_path / "f"
+    path.write_bytes(b"abc")
+    path.chmod(0o640)
+    handle = SystemGateway().open_private(path, create=True)
+    handle.close()
+    assert path.read_bytes() == b"abc" and stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_open_private_without_create_does_not_create(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        SystemGateway().open_private(tmp_path / "f", create=False)
+    assert not (tmp_path / "f").exists()
+
+
+def test_open_private_never_follows_a_final_symlink(tmp_path: Path) -> None:
+    (tmp_path / "t").write_bytes(b"")
+    (tmp_path / "l").symlink_to(tmp_path / "t")
+    for create in (False, True):
+        with pytest.raises(OSError):
+            SystemGateway().open_private(tmp_path / "l", create=create)
+
+
+def test_open_private_does_not_block_on_a_fifo(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / "p", 0o600)
+    handle = SystemGateway().open_private(tmp_path / "p", create=True)
+    try:
+        assert not stat.S_ISREG(os.fstat(handle.fileno()).st_mode)
+    finally:
+        handle.close()
+
+
+def test_append_mode_writes_at_the_end_whatever_the_position(tmp_path: Path) -> None:
+    path = tmp_path / "f"
+    path.write_bytes(b"one\n")
+    handle = SystemGateway().open_private(path, create=True, append=True)
+    handle.seek(0)
+    handle.write(b"two\n")
+    handle.close()
+    assert path.read_bytes() == b"one\ntwo\n"
+
+
+def test_lock_exclusive_waits_then_gives_up_and_releases_on_close(tmp_path: Path) -> None:
+    gateway = SystemGateway()
+    first = gateway.open_private(tmp_path / "l", create=True)
+    second = gateway.open_private(tmp_path / "l", create=True)
+    assert gateway.lock_exclusive(first, 1.0)
+    started = time.monotonic()
+    assert not gateway.lock_exclusive(second, 0.2)
+    assert 0.15 <= time.monotonic() - started < 3
+    first.close()
+    assert gateway.lock_exclusive(second, 1.0)
+    second.close()
+
+
+def test_open_private_read_only_opens_a_file_the_user_cannot_write(tmp_path: Path) -> None:
+    path = tmp_path / "f"
+    path.write_bytes(b"data")
+    path.chmod(0o400)
+    gateway = SystemGateway()
+    if os.geteuid() != 0:
+        with pytest.raises(PermissionError):
+            gateway.open_private(path, create=False)
+    handle = gateway.open_private(path, create=False, read_only=True)
+    try:
+        assert handle.read() == b"data"
+        with pytest.raises(OSError):
+            handle.write(b"x")
+    finally:
+        handle.close()
+
+
+def test_open_private_read_only_refuses_create_and_append(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        SystemGateway().open_private(tmp_path / "f", create=True, read_only=True)
+    with pytest.raises(ValueError):
+        SystemGateway().open_private(tmp_path / "f", create=False, append=True, read_only=True)

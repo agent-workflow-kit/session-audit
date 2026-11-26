@@ -8,6 +8,7 @@ replaces the module's ``run`` (and extends ``check``) and touches no other file 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from .textsafe import dumps_json, show, write_stderr
 if TYPE_CHECKING:
     from .config import ConfigIssue, Settings
     from .errors import CliError
+    from .store import Store
 
 
 class StdoutFailed(Exception):
@@ -86,6 +88,28 @@ class Context:
     settings: Settings = field(default_factory=_default_settings)
     config_issues: tuple[ConfigIssue, ...] = ()
     config_error: CliError | None = None
+    # The state directory; None means the standard location (``store.state_dir``). Tests and
+    # embedders may set it; nothing else does.
+    state_directory: str | None = None
+    _store: Store | None = field(default=None, init=False, repr=False)
+
+    def store(self) -> Store:
+        """The store, opened on first use (migrations applied) and closed by ``close``. Opening
+        can raise ``CliError`` (``store_unwritable``, ``store_newer``); a command that never calls
+        this (``--version``, ``validate``, usage errors) never touches the store."""
+        if self._store is None:
+            from .config import home_dir  # lazy: config imports args, which imports this module
+            from .store import open_store, state_dir
+
+            directory = self.state_directory or state_dir(os.environ, home_dir(os.environ))
+            self._store = open_store(self.gateway, directory)
+        return self._store
+
+    def close(self) -> None:
+        """Close the store if it was opened. Safe to call twice."""
+        if self._store is not None:
+            self._store.close()
+            self._store = None
 
     def emit_json(self, document: Any) -> None:
         """Print one ``--json`` document (ASCII, lone surrogates fixed, no NaN) and a newline."""

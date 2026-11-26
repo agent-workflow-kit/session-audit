@@ -328,9 +328,12 @@ def _dispatch(
     if command is None:
         raise errors.usage("A command is required", hint=HELP_HINT)
     ctx = _context(namespace, command, gateway, out, tty)
-    command.check(ctx, namespace)
-    _check_config(ctx, command)
-    return command.run(ctx, namespace)
+    try:
+        command.check(ctx, namespace)
+        _check_config(ctx, command)
+        return command.run(ctx, namespace)
+    finally:
+        ctx.close()
 
 
 def main(
