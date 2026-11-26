@@ -75,11 +75,11 @@ def _remove_dir(
         opened = handle.stat()
         if opened.st_dev != parent.stat().st_dev or opened.st_uid != gateway.uid():
             return False
-        if not apply and opened.st_mode & 0o300 != 0o300:
-            return False  # planning: an owner without write and search on it cannot empty it
         names, more = handle.entries(MAX_ENTRIES)
         if more:
             return False
+        if names and not apply and opened.st_mode & 0o300 != 0o300:
+            return False  # planning: an owner without write and search on it cannot empty it
         for child in names:
             try:
                 child_info = handle.lstat(child)
