@@ -789,3 +789,42 @@ def test_a_140_mb_file_reads_in_one_pass_within_the_stated_bound(scratch: Path) 
     assert run.checkpoint().offset == size
     assert elapsed < 60, f"read took {elapsed:.1f}s"
     path.unlink()
+
+
+@pytest.mark.parametrize("bad", ["no", 2, -1, 1.5])
+def test_a_stored_skip_flag_that_is_not_0_or_1_is_reread_without_raising(
+    f: Path, tmp_path: Path, bad: object
+) -> None:
+    write(f, lines_of(3))
+    _, run = read(f)
+    with open_store(ClockedGateway(), str(tmp_path / "state")) as store:
+        with store.transaction() as conn:
+            inc.save_progress(conn, bytes(f), run.checkpoint())
+            conn.execute("UPDATE files SET skip_to_lf = ?", (bad,))
+        stored = inc.load_progress(store.conn, bytes(f))
+    append(f, b"more\n")
+    lines, again = read(f, stored)
+    assert again.reason.reread
+    assert len(lines) == 4
+
+
+def test_a_stored_skip_flag_of_1_loads_as_true_and_0_continues(f: Path, tmp_path: Path) -> None:
+    write(f, lines_of(3))
+    _, run = read(f)
+    with open_store(ClockedGateway(), str(tmp_path / "state")) as store:
+        with store.transaction() as conn:
+            inc.save_progress(conn, bytes(f), run.checkpoint())
+        append(f, b"more\n")
+        _, again = read(f, inc.load_progress(store.conn, bytes(f)))
+        assert again.reason is Reason.CONTINUE
+        with store.transaction() as conn:
+            conn.execute("UPDATE files SET skip_to_lf = 1")
+        loaded = inc.load_progress(store.conn, bytes(f))
+        assert loaded is not None and loaded.skip_to_lf is True
+
+
+def test_signed_id_maps_unsigned_64_bit_ids_to_sqlite_integers() -> None:
+    assert inc.signed_id(5) == 5
+    assert inc.signed_id(2**63 - 1) == 2**63 - 1
+    assert inc.signed_id(2**63) == -(2**63)
+    assert inc.signed_id(2**64 - 1) == -1

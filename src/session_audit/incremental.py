@@ -108,9 +108,9 @@ def decode_line(line: bytes) -> str:
     return line.decode("utf-8", errors="replace")
 
 
-def _signed(n: int) -> int:
+def signed_id(n: int) -> int:
     """An unsigned 64-bit id as SQLite's signed INTEGER holds it (st_dev and st_ino can be
-    2**63 or more); stored and live values are both mapped, so they stay comparable."""
+    2**63 or more); consumers comparing listed ids to stored ids must apply it."""
     return n - 2**64 if n >= 2**63 else n
 
 
@@ -183,7 +183,7 @@ class IncrementalRead:
             return Reason.HEAD  # an inconsistent stored row is reread, never trusted
         if prev.rules_version < self._rules:
             return Reason.RULES
-        if (prev.dev, prev.inode) != (_signed(self._info.st_dev), _signed(self._info.st_ino)):
+        if (prev.dev, prev.inode) != (signed_id(self._info.st_dev), signed_id(self._info.st_ino)):
             return Reason.IDENTITY
         offset = prev.offset
         if offset < 0 or self._info.st_size < offset:
@@ -212,8 +212,8 @@ class IncrementalRead:
         """The progress after everything consumed so far (the lines yielded, any record skipped
         and any pending skip). Call between two iterations."""
         return Progress(
-            dev=_signed(self._info.st_dev),
-            inode=_signed(self._info.st_ino),
+            dev=signed_id(self._info.st_dev),
+            inode=signed_id(self._info.st_ino),
             size=max(self._info.st_size, self._pos),
             offset=self._pos,
             head_len=len(self._head),
@@ -314,7 +314,8 @@ def load_progress(conn: sqlite3.Connection, path: bytes) -> Progress | None:
         head_sha=row[5],
         tail_sha=row[6],
         rules_version=row[7],
-        skip_to_lf=bool(row[8]),
+        # Exactly 0/1 is a flag; anything else stays raw so _well_typed rejects it.
+        skip_to_lf=bool(row[8]) if type(row[8]) is int and row[8] in (0, 1) else row[8],
     )
 
 
