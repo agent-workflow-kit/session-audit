@@ -21,11 +21,13 @@ The API is defined here once; later modules extend it only when they need a new 
   discarded (the hook keeps running) instead of failing the call. A member that left the group
   with ``setsid`` is out of reach: a documented residual risk.
 
-todo(#28): ``run`` is the only way to start a program, and it returns when the program is gone.
-The hooks and the retro need a spawn/handle API instead: start the program, hand back its exact
-child PID (to signal that process, not the group), wait up to a given time (30 s for the retro),
-then stop it, with a ``kill_grace`` per call rather than per gateway. Add it with #28, together
-with a matching fake in ``tests/fake_gateway.py``.
+``run`` takes two optional per-call arguments for the retro's long ``exec`` call (issue #26):
+``kill_grace`` (seconds between the SIGTERM and the SIGKILL of the child's group, instead of the
+gateway's) and ``on_start`` (called with the exact child PID right after the spawn, before the
+call waits: a signal handler of #28 records it there, to signal that one process, and an
+exception it raises ends the child's group and propagates). The child leads its own process group
+(pgid == pid), so the PID is also the group id. todo(#28): the signal matrix (forward once to the
+PID, wait 30 s, ``stop``) is built on these two; the hooks keep using ``run_hook``.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -174,6 +176,8 @@ class Gateway(Protocol):
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        kill_grace: float | None = None,
+        on_start: Callable[[int], None] | None = None,
     ) -> CallResult: ...
 
     def run_hook(
@@ -295,6 +299,12 @@ class Gateway(Protocol):
         it exists, even as a symlink). A parent that is missing is an error."""
         ...
 
+    def writable(self, path: str | os.PathLike[str]) -> bool:
+        """``access(W_OK)`` (the effective user): whether the file can be opened for writing,
+        decided without opening a descriptor on it (closing one would drop the SQLite locks of
+        the process; see ``store._check_db_file``)."""
+        ...
+
     def open_private(
         self,
         path: str | os.PathLike[str],
@@ -303,12 +313,14 @@ class Gateway(Protocol):
         append: bool = False,
         mode: int = 0o600,
         read_only: bool = False,
+        exclusive: bool = False,
     ) -> BinaryIO:
         """Open a regular file read-write (read-only with ``read_only``, which excludes ``create``
         and ``append``), unbuffered, never following a final symlink and never blocking on a FIFO.
         With ``create`` a missing file is created with exactly ``mode`` whatever the umask; an
-        existing one is opened as it is. With ``append`` every write goes to the end. The caller
-        checks what it opened (``os.fstat`` on the handle)."""
+        existing one is opened as it is, unless ``exclusive`` (with ``create``), which raises
+        ``FileExistsError`` instead of opening it. With ``append`` every write goes to the end. The
+        caller checks what it opened (``os.fstat`` on the handle)."""
         ...
 
     def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
@@ -338,9 +350,18 @@ class SystemGateway:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        kill_grace: float | None = None,
+        on_start: Callable[[int], None] | None = None,
     ) -> CallResult:
         return self._run(
-            argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, stdout_limit=stdout_limit
+            argv,
+            timeout=timeout,
+            stdin=stdin,
+            env=env,
+            cwd=cwd,
+            stdout_limit=stdout_limit,
+            kill_grace=kill_grace,
+            on_start=on_start,
         )
 
     def run_hook(
@@ -377,6 +398,8 @@ class SystemGateway:
         reap_group: bool = False,
         discard_excess: bool = False,
         cancel: threading.Event | None = None,
+        kill_grace: float | None = None,
+        on_start: Callable[[int], None] | None = None,
     ) -> CallResult:
         """``run``; with ``escape`` the bytes that are not UTF-8 survive a round trip: output is
         decoded and stdin encoded with ``surrogateescape`` (the crontab, which holds the user's
@@ -387,6 +410,13 @@ class SystemGateway:
             raise ValueError("timeout must be a finite positive number")
         if stdout_limit <= 0:
             raise ValueError("stdout_limit must be positive")
+        if kill_grace is not None and (
+            isinstance(kill_grace, bool)
+            or not isinstance(kill_grace, (int, float))
+            or not math.isfinite(kill_grace)
+            or kill_grace <= 0
+        ):
+            raise ValueError("kill_grace must be a finite positive number")
         if env is not None:
             for name, value in env.items():
                 if (
@@ -419,8 +449,25 @@ class SystemGateway:
             )
         except OSError as exc:
             return CallResult(CallStatus.SPAWN_FAILED, detail=f"{type(exc).__name__}: {exc}")
+        if on_start is not None:
+            try:
+                on_start(popen.pid)
+            except BaseException:
+                self._end_group(popen, kill_grace)
+                for stream in (popen.stdin, popen.stdout, popen.stderr):
+                    if stream is not None:
+                        stream.close()
+                raise
         return self._supervise(
-            popen, data, timeout, stdout_limit, escape, reap_group, discard_excess, cancel
+            popen,
+            data,
+            timeout,
+            stdout_limit,
+            escape,
+            reap_group,
+            discard_excess,
+            cancel,
+            kill_grace,
         )
 
     def _supervise(
@@ -433,6 +480,7 @@ class SystemGateway:
         reap_group: bool = False,
         discard_excess: bool = False,
         cancel: threading.Event | None = None,
+        kill_grace: float | None = None,
     ) -> CallResult:
         deadline = time.monotonic() + timeout
         ended = False
@@ -476,7 +524,7 @@ class SystemGateway:
                     break
             if failure is not None:
                 ended = True
-                self._end_group(popen)
+                self._end_group(popen, kill_grace)
                 return CallResult(
                     failure,
                     stdout=_text(out[:stdout_limit], escape),
@@ -486,7 +534,7 @@ class SystemGateway:
             if reap_group:
                 # The leader exited on its own: whatever it left in its group is ended now.
                 ended = True
-                self._end_group(popen)
+                self._end_group(popen, kill_grace)
             code = popen.returncode
             text = _text(out[:stdout_limit], escape), _text(err[:stdout_limit])
             if len(out) > stdout_limit and not discard_excess:
@@ -507,7 +555,7 @@ class SystemGateway:
             if not ended and (reap_group or popen.poll() is None):
                 # Never leave a child (or, for a hook, a group the leader left) behind on an
                 # unexpected error or an interrupt.
-                self._end_group(popen)
+                self._end_group(popen, kill_grace)
 
     @staticmethod
     def _feed(
@@ -554,19 +602,21 @@ class SystemGateway:
             if room > 0:
                 buffer.extend(chunk[:room])
 
-    def _end_group(self, popen: subprocess.Popen[bytes]) -> None:
-        """SIGTERM the child's process group, wait ``kill_grace`` for the leader, SIGKILL the
+    def _end_group(self, popen: subprocess.Popen[bytes], grace: float | None = None) -> None:
+        """SIGTERM the child's process group, wait ``grace`` (default: the gateway's
+        ``kill_grace``) for the leader, SIGKILL the
         group (the SIGKILL runs even when the SIGTERM or the wait is interrupted). The group id
         is the leader's pid. Once the leader is reaped the id is no longer held for us: it could
         be reused only by a new group leader after a pid wrap within milliseconds, an accepted
         window (the group cannot be told apart from a reused one by any check that does not
         use the same id)."""
         pgid = popen.pid
+        wait = self._kill_grace if grace is None else grace
         try:
-            deadline = time.monotonic() + self._kill_grace
+            deadline = time.monotonic() + wait
             _signal_group(pgid, signal.SIGTERM)
             try:
-                popen.wait(timeout=self._kill_grace)
+                popen.wait(timeout=wait)
             except subprocess.TimeoutExpired:
                 pass
             # The leader may exit on TERM at once while other members still clean up: they get
@@ -732,6 +782,9 @@ class SystemGateway:
         finally:
             os.close(fd)
 
+    def writable(self, path: str | os.PathLike[str]) -> bool:
+        return os.access(path, os.W_OK, effective_ids=True)
+
     def open_private(
         self,
         path: str | os.PathLike[str],
@@ -740,6 +793,7 @@ class SystemGateway:
         append: bool = False,
         mode: int = 0o600,
         read_only: bool = False,
+        exclusive: bool = False,
     ) -> BinaryIO:
         if read_only and (create or append):
             raise ValueError("a read-only open cannot create or append")
@@ -754,7 +808,8 @@ class SystemGateway:
                 fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, mode)
                 created = True
             except FileExistsError:
-                pass
+                if exclusive:
+                    raise
         try:
             if fd < 0:
                 fd = os.open(path, flags)

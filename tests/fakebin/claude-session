@@ -13,8 +13,10 @@ Scenario: {"<key>": [step, ...]} where key is the subcommand (``list``, ``status
 ``exec``, ``forget``, ``stop``...), ``start --dry-run`` or ``exec --dry-run`` when --dry-run is
 given, or ``--version`` (also after a subcommand). The nth call with a key gets step n; calls
 past the last repeat the last step. A step is {"stdout": <json or text>, "stderr": text,
-"exit": int, "sleep": seconds, "ignore_term": bool, "stdin": bool (read and log stdin),
-"pid_file": path}.
+"exit": int, "sleep": seconds (before printing), "sleep_after": seconds (after printing and flushing, before the
+call is logged as done: a call killed here has printed), "ignore_term": bool, "stdin": bool (read
+and log stdin), "pid_file": path, "outcome_file": text (written to the path after
+``--outcome-file`` before anything is printed)}.
 
 ``status`` also takes the key ``status <csession id>``: its steps answer only calls for that id
 (counted separately), so a test scripts a different document per session.
@@ -238,10 +240,15 @@ def main(argv):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if step.get("sleep"):
         time.sleep(step["sleep"])
+    if step.get("outcome_file") is not None and "--outcome-file" in argv:
+        with open(argv[argv.index("--outcome-file") + 1], "w", encoding="utf-8") as handle:
+            handle.write(step["outcome_file"])
     sys.stdout.write(text)
     sys.stdout.flush()
     sys.stderr.write(step.get("stderr", ""))
     sys.stderr.flush()
+    if step.get("sleep_after"):
+        time.sleep(step["sleep_after"])
     append(log_path, {"done": call_id, "printed": {"stdout": text, "exit": step.get("exit", 0)}})
     return step.get("exit", 0)
 

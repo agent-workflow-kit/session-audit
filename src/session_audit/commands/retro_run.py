@@ -3,7 +3,9 @@
 ``check`` holds the usage errors (Order of checks step 1). ``run`` does steps 2 to 10 through
 ``retro.prepare`` (the order, the skill preflight of step 4, the digest, the key, reuse and
 ``already_running``) and prints a reused retro; then step 11 (``launchplan.plan_check``) and, with
-``--dry-run``, step 12 (the plan, never any digest text). TODO(#26): the launch (steps 13 to 16).
+``--dry-run``, step 12 (the plan, never any digest text); then ``retrolaunch.run_launch`` (steps 13
+to 16: the row, ``pre-retro``, the files, ``start``, the adopting ``exec``, the outcome mapping,
+cleanup and the post hooks).
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 from typing import Any
 
 from .. import args as a
-from .. import errors, fencing, launchplan, plugins, retro
+from .. import errors, fencing, launchplan, plugins, retro, retrolaunch, retrostate
 from ..command import Command, Context
 from ..grammar import (
     MAX_TURNS_RANGE,
@@ -137,15 +139,7 @@ def plan_document(
     )
     return {
         "dry_run": True,
-        "scope": {
-            "sessions": list(prepared.explicit_sessions),
-            "labels": list(dict.fromkeys(args.label or [])),
-            "project": args.project,
-            "since": args.since,
-            "until": args.until,
-            "kind": args.kind,
-            "outcome": args.outcome,
-        },
+        "scope": retrostate.scope_object(args, prepared),
         "matched": [s.session_id for s in result.sections][:PLAN_LIST_MAX],
         "matched_total": prepared.kept,
         "skipped": [
@@ -208,7 +202,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         timeout=args.timeout,
         max_turns=args.max_turns,
     )
-    launchplan.plan_check(  # step 11: nothing is stored, nothing is spent
+    plan = launchplan.plan_check(  # step 11: nothing is stored, nothing is spent
         ctx.gateway,
         ctx.settings.harness.claude_session_cmd,
         launch,
@@ -217,14 +211,10 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     if ctx.dry_run:  # step 12
         _print_plan(ctx, plan_document(ctx, args, prepared, launch))
         return 0
-    # TODO(#26): steps 13 to 16 (the row, the hooks, the launch) from ``prepared``. The hook
-    # runner is ``hooks.run_hooks`` (#25): ``hooks.pre_retro_payload`` after the row exists (never
-    # in a dry run, never with a write lock held, the lease renewed meanwhile; the outcome's
-    # ``decision`` maps to exit 0, 13 or 11 and ``decision_ids`` and ``output_ignored`` go in the
-    # ``retro_state`` log entry); ``hooks.post_retro_payload`` once when the retro reaches a final
-    # state, ``hook_vetoed`` included, after cleanup; ``hooks.retro_failed_payload`` when it ends
-    # ``failed``.
-    raise a.not_implemented()
+    # Steps 13 to 16: the row, the hooks, the files, start, exec, the mapping and the cleanup.
+    return retrolaunch.run_launch(
+        ctx, args, prepared, launch, plan, on_reused=lambda found: _print_reused(ctx, found)
+    )
 
 
 COMMANDS = (

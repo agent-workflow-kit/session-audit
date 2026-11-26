@@ -111,6 +111,8 @@ class FakeGateway:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        kill_grace: float | None = None,
+        on_start: Callable[[int], None] | None = None,
     ) -> CallResult:
         self.calls.append({"argv": list(argv), "stdin": stdin, "timeout": timeout, "cwd": cwd})
         for prefix, results in self._rules:
@@ -331,6 +333,9 @@ class FakeGateway:
     def mkdir(self, path: str | os.PathLike[str], mode: int) -> None:
         raise NotImplementedError("state directory access is tested against real directories")
 
+    def writable(self, path: str | os.PathLike[str]) -> bool:
+        raise NotImplementedError("state directory access is tested against real directories")
+
     def open_private(
         self,
         path: str | os.PathLike[str],
@@ -339,6 +344,7 @@ class FakeGateway:
         append: bool = False,
         mode: int = 0o600,
         read_only: bool = False,
+        exclusive: bool = False,
     ) -> BinaryIO:
         raise NotImplementedError("state directory access is tested against real directories")
 

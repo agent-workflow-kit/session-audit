@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import BinaryIO
 
 import pytest
 
@@ -851,18 +850,8 @@ def test_the_real_registry_is_valid() -> None:
 class WriteDenied(ClockedGateway):
     """A file system where state.db can be read but not opened for writing (read-only mount)."""
 
-    def open_private(
-        self,
-        path: str | os.PathLike[str],
-        *,
-        create: bool,
-        append: bool = False,
-        mode: int = 0o600,
-        read_only: bool = False,
-    ) -> BinaryIO:
-        if not read_only:
-            raise PermissionError(13, "denied", os.fspath(path))
-        return super().open_private(path, create=create, append=append, mode=mode, read_only=True)
+    def writable(self, path: str | os.PathLike[str]) -> bool:
+        return False
 
 
 def test_inspect_reads_a_database_that_cannot_be_opened_for_writing(tmp_path: Path) -> None:
@@ -938,3 +927,85 @@ def test_open_read_only_refuses_a_newer_store(tmp_path: Path) -> None:
     with pytest.raises(CliError) as caught:
         open_read_only(ClockedGateway(), directory)
     assert caught.value.details["reason"] == "store_newer"
+
+
+READER = (
+    "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]);"
+    " print(c.execute(sys.argv[2]).fetchall()); c.close()"
+)
+
+
+def _other_process(path: str, sql: str) -> str:
+    done = subprocess.run(
+        [sys.executable, "-c", READER, path, sql],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    return done.stdout.strip()
+
+
+def test_a_second_open_does_not_drop_the_locks_of_the_first_connection(tmp_path: Path) -> None:
+    """Closing any descriptor on state.db drops the process's SQLite locks (POSIX advisory locks);
+    another process could then checkpoint and unlink the -wal under a live writer and the commit
+    would be lost."""
+    directory = state_path(tmp_path)
+    db = f"{directory}/state.db"
+    first = open_store(ClockedGateway(), directory)
+    first.conn.execute("CREATE TABLE probe (n INTEGER)")
+    first.conn.execute("INSERT INTO probe VALUES (7)")
+    second = open_store(ClockedGateway(), directory)  # checks state.db again
+    try:
+        assert _other_process(db, "SELECT count(*) FROM probe") == "[(1,)]"
+        first.conn.execute("INSERT INTO probe VALUES (8)")
+        assert os.path.exists(db + "-wal")
+        assert _other_process(db, "SELECT n FROM probe ORDER BY n") == "[(7,), (8,)]"
+    finally:
+        first.close()
+        second.close()
+
+
+def test_reopen_does_not_drop_the_locks_either(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    db = f"{directory}/state.db"
+    first = open_store(ClockedGateway(), directory)
+    first.conn.execute("CREATE TABLE probe (n INTEGER)")
+    other = first.reopen()
+    try:
+        assert _other_process(db, "SELECT count(*) FROM probe") == "[(0,)]"
+        first.conn.execute("INSERT INTO probe VALUES (9)")
+        assert _other_process(db, "SELECT n FROM probe") == "[(9,)]"
+    finally:
+        first.close()
+        other.close()
+
+
+def test_losing_the_creation_race_never_opens_the_existing_database(tmp_path: Path) -> None:
+    directory = state_path(tmp_path)
+    open_store(ClockedGateway(), directory).close()
+    db_path = f"{directory}/state.db"
+
+    class Racing(ClockedGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.opened_existing: list[str] = []
+            self._hid = False
+
+        def lstat(self, path):  # type: ignore[no-untyped-def]
+            if os.fspath(path) == db_path and not self._hid:
+                self._hid = True  # another thread has not created it yet, as far as we can see
+                raise FileNotFoundError(path)
+            return super().lstat(path)
+
+        def open_private(self, path, **kwargs):  # type: ignore[no-untyped-def]
+            existed = os.path.exists(path)
+            handle = super().open_private(path, **kwargs)  # an exclusive create raises instead
+            if existed:
+                self.opened_existing.append(os.fspath(path))
+            return handle
+
+    gateway = Racing()
+    open_store(gateway, directory).close()
+    assert gateway.opened_existing == []  # an open and close would drop the other thread's locks

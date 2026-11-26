@@ -17,15 +17,15 @@
 9. the digest of the LAST build is the one used (one read snapshot, one redactor), and the key is
    computed from its section hashes: ``fencing.section_hashes`` needs no nonce, retro id or run
    token, so the key is known here, before any row exists. ``fencing.finish_digest`` (nonce,
-   fence, manifest) runs after step 10, when the retro id exists (TODO(#26));
+   fence, manifest) runs after step 13, when the retro id exists (``retrolaunch``);
 10. reuse of a ``done`` retro with the key (no ``--again``), ``already_running`` for a non-final
     retro with the key and a live lease.
 
-Nothing is written before step 13 of the Order of checks (the row insert, #26) except the
+Nothing is written before step 13 of the Order of checks (the row insert, ``retrostate``) except the
 refresh, which is an ingest run. A dry run writes nothing at all: it reads and ingests a private
 in-memory copy of the store (``store.open_memory_copy``, ``Context.memory``) to the current end of
 every file, so its key is the key of a real run over the same bytes. ``Prepared`` is what
-``commands/retro_run`` (steps 11 and 12) and #26 (steps 13 to 16) continue from.
+``commands/retro_run`` (steps 11 and 12) and ``retrolaunch`` (steps 13 to 16) continue from.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ from .plugins import PluginChoice
 from .retrokey import retro_key
 from .retroscope import Refresher, Resolved, refused, resolve_scope
 from .retroview import load_retro
-from .sessionquery import read_store, snapshot_index
+from .sessionquery import Filters, read_store, snapshot_index
 from .store import open_memory_copy
 
 __all__ = ["KeyState", "NoSteps", "Prepared", "Steps", "lookup_key", "prepare"]
@@ -122,6 +122,7 @@ class Prepared:
     plugin_dirs: tuple[str, ...] = ()  # the ``--plugin-dir`` values of step 4
     bundled_plugin: str | None = None  # the bundled plugin directory (the default profile's home)
     daily_remaining: int = 0  # for the dry-run plan; the binding check is step 13's
+    filters: Filters | None = None  # the resolved scope filters (``scope_resolved`` of the row)
 
     @property
     def kept(self) -> int:
@@ -386,4 +387,5 @@ def _prepare_rest(
         plugin_dirs=() if plugins is None else plugins.dirs,
         bundled_plugin=None if plugins is None else plugins.bundled,
         daily_remaining=remaining,
+        filters=resolved.filters,
     )

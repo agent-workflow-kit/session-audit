@@ -878,7 +878,8 @@ def _directory_issues(
 def profile_issues(gateway: Gateway, path: str, home: str) -> list[ConfigIssue]:
     """The ownership rule for ``retro.permission_profile``: the file and every directory above it
     (checked before a launch; a missing file is the caller's concern)."""
-    # todo(#26): call profile_issues before launching the retro with a permission profile
+    # Called by retro.check_config (step 2) and again by retrolaunch.run_launch just before the
+    # row is inserted (the file may change between the two).
     # todo(#33): validate reports profile_issues
     uid = gateway.uid()
     path = os.path.normpath(path)

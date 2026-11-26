@@ -2,6 +2,8 @@
 
 Autouse fixtures:
 
+- (A test marked ``live`` runs with the real tools: no tripwires and no guard, but the private
+  environment below still applies. Such a test is deselected by default and never runs in CI.)
 - ``_private_environment``: ``HOME``, ``XDG_*`` and the state directory point into the test's
   own temporary directory, so no test reads or writes the user's real home, config or state,
   and ``XDG_RUNTIME_DIR`` and ``CLAUDE_CONFIG_DIR`` are unset. ``PATH`` gets a directory of
@@ -141,6 +143,7 @@ def guard_argv(
 
 @pytest.fixture(autouse=True)
 def _private_environment(
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[Path]:
@@ -160,8 +163,11 @@ def _private_environment(
         monkeypatch.delenv(name, raising=False)
     for name in [n for n in os.environ if n.startswith("SESSION_AUDIT_")]:
         monkeypatch.delenv(name)
-    tripwire = tripwire_dir(tmp_path_factory)
-    monkeypatch.setenv("PATH", f"{tripwire}{os.pathsep}{os.environ.get('PATH', os.defpath)}")
+    if request.node.get_closest_marker("live") is None:
+        tripwire = tripwire_dir(tmp_path_factory)
+        monkeypatch.setenv("PATH", f"{tripwire}{os.pathsep}{os.environ.get('PATH', os.defpath)}")
+    # A ``live`` test (never in CI) runs the real claude-session in this private home: the
+    # tripwires would shadow it, and the process guard below is off for it too.
     yield home
 
 
@@ -185,8 +191,13 @@ def tripwire_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(autouse=True)
 def _process_guard(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[list[subprocess.Popen[Any]]]:
+    if request.node.get_closest_marker("live") is not None:
+        yield []
+        return
     base = tmp_path_factory.getbasetemp()
     tripwire = tripwire_dir(tmp_path_factory)
     real_popen = subprocess.Popen

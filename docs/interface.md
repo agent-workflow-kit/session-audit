@@ -831,7 +831,7 @@ project_dir_name(cwd) = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd))   # 
 
 The names are claude-session's `schemas/cli/exec-dry-run.json` and `kinds.json#/$defs/profile` names. A user or per-repo claude-session config that changes any safety setting of the `audit` kind makes every retro exit 12 `launch_settings_mismatch` until it is removed; `model`, `timeout` and `max_turns` from that config are not safety settings (the tool passes `--timeout` and `--max-turns`, and `--model` when set); every other key of `origins`, including a safety field claude-session adds later, must be `builtin`, `flag` or `flag-implied`, so an unknown field fails closed, and every key of the settings the check reads (`tools`, `implicit_done`, `reads_third_party`, `sandbox`, `setting_sources`, `mcp`, `env.inherit`, `env.set_names`, `env.path_prepend`, `write_dirs`, `notes_context`, `claude_args`, `permission_profile`, `cwd`) must be present, so a missing key fails closed too. The check also refuses a launch whose session directory path holds a non-ASCII character (how Claude Code encodes such a character in a project directory name is unverified) and one whose transcript project directory name would exceed 200 characters, so self-exclusion never depends on how Claude Code shortens or encodes names, and the tool's guarantee never depends on claude-session's config.
 
-**2. Files.** At step 15 the tool writes `digest.md` and `manifest.json` under `digests/<retro_id>/` and the prompt file under `prompts/<retro_id>/`. `run_token = secrets.token_urlsafe(24)` (32 characters), stored on the retro row with `digest_sha256`.
+**2. Files.** At step 15 the tool writes `digest.md` and `manifest.json` under `digests/<retro_id>/` and the prompt file under `prompts/<retro_id>/`. `run_token = secrets.token_urlsafe(24)` (32 characters), stored on the retro row with `digest_sha256`. Each directory is created 0700 and each file 0600, never through a symlink (an existing retro directory or a symlinked parent is refused, never followed), and a file is written to a temporary name and replaced atomically. A file that cannot be written ends the retro `failed` with reason `session_not_started`, exit 12 `store_unwritable` (`retryable` is true for a full disk or a read-only file system), removes what the step created and refunds the start.
 
 **3. Start.** The tool runs `claude-session start --json` with the per-call settings below (all launch flags go to `start`; `exec --session-id` accepts none of them) and records the session before anything can write a transcript (copy):
 
@@ -848,7 +848,7 @@ with a valid csid, in one transaction: retro.csid = csid; insert retro_sessions(
     private_dir=dirname(sessions_root)/"private"/csid, project_dir=project_dir, cleanup="pending", created_at=now)
 rc == 12 launch_failed: final failed/session_not_started (end_reason from the envelope); cleanup; exit 12
 any other rc, a timeout or a signal: final failed/claude_session_error; cleanup when an id was recorded; exit 12
-rc == 0: run out.argv plus --outcome-file <state>/outcomes/<retro_id>.json and --json
+rc == 0: run out.argv plus --outcome-file <state>/outcomes/<retro_id>.json and --json    # the tool builds it from the validated id and run: out.argv[1:] must be exactly exec --session-id <id> --run <n>, else claude_session_error and the session is cleaned up
 ```
 
 An id the tool never saw (a crash before it was stored, or none in the output) is not recoverable by the tool: it never scans or looks a session up by label (see Residual risks). `start` stages copies of the prompt and inputs, so the tool's own files are never read by the session. The adopting `exec` runs with the tool's own environment, which must hold the names `start --json` lists in `required_env_names` (Claude's login variables); from cron they come from `--env-file`.
@@ -870,16 +870,16 @@ An id the tool never saw (a crash before it was stored, or none in the output) i
 
 ```text
 deadline = the time the adopting exec is spawned + retro.timeout (or --timeout) + 10 min
-at the deadline: SIGTERM to the exec child PID; wait 30 s; cs("stop", csid, "--grace", "5s", "--json");
+at the deadline: SIGTERM to the exec child's process group; wait 30 s; SIGKILL to the group if it still runs, then stop; cs("stop", csid, "--grace", "5s", "--json");
     collect; final failed/claude_session_error; cleanup; post-retro; exit 12   (first Outcome mapping row)
 gateway call timeouts: --version 10 s; list, status, forget, stop 60 s; start --dry-run and start 120 s
     a call past its timeout gets SIGTERM, 5 s, SIGKILL on its own process group and counts as a failed call
     (never 0 or 10); every claude-session child runs in its own process group
 ```
 
-Every parse of claude-session output uses the guard of Retro validation: an exception is `claude_session_error` (in capture: `harness.errors`).
+Every parse of claude-session output uses the guard of Retro validation: an exception is `claude_session_error` (in capture: `harness.errors`). An `exec` that exits 14 to 18 with an outcome that does not parse or does not agree with the exit is `claude_session_error`, not `session_failed`. An `exec` whose outcome does not parse (a non-zero exit, a bad document) keeps the start counted against the daily limit; only an outcome with `phase: launch` that agrees with the exit (11, 12 or 13) refunds it.
 
-**7.** The retro's `cost_usd`, `num_turns` and `sandbox_active` (from `status --json` `run.sandbox_active`, boolean or null) are stored on the retro and are not part of the usage store (the transcript is self-excluded). When `retro.sandbox` is `required`, a run whose `status` shows `run.sandbox_active` other than true is `failed` with `claude_session_error` and its artifact is not stored.
+**7.** The retro's `cost_usd`, `num_turns` and `sandbox_active` (from `status --json` `run.sandbox_active`, boolean or null) are stored on the retro and are not part of the usage store (the transcript is self-excluded). When `retro.sandbox` is `required`, a run that reached the session phase and ended `done`, `blocked` or `needs-input` (exit 0 or 13) and whose collected `status` shows `run.sandbox_active` other than true is `failed` with `claude_session_error` and its artifact is not stored. The rule does not apply to a run that ended with exit 14 to 18 (those keep their own rows), to a launch-phase outcome, or to a run whose `status` could not be collected (a `done` run is then `claude_session_error` by the last row; `blocked` and `needs-input` stay `escalated`).
 
 The prompt file holds only: the retro id, the run token, the digest hash and the input paths relative to the session directory (`inputs/1/digest.md`, `inputs/1/manifest.json`); the skill joins them with the absolute session directory claude-session's bootstrap prompt and context line give it. It carries no transcript text.
 
@@ -892,13 +892,13 @@ Every claude-session result maps to one retro state, reason and exit (Exit codes
 | the tool's own deadline was reached (item 6) | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
 | exit 15, or `launch_interrupted`, after the tool forwarded a signal | `canceled` | `interrupted` | 129, 130, 143 |
 | `start` exit 12 `launch_failed` | `failed` | `session_not_started` | 12 `session_not_started`, `details.end_reason` from the envelope, `retryable` |
-| `start` any other result (exit 1, 2, 20, unparseable, timeout, signal); an id found in its output is recorded and cleaned up | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
+| `start` any other result (exit 1, 2, 20, unparseable, including an exit 0 whose document does not parse, timeout, signal); an id found in its output is recorded and cleaned up | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
 | adopting `exec` with `phase: launch` (exit 11, 12, 13) | `failed` | `session_not_started` | 12 `session_not_started`, `details.end_reason`, `retryable` |
 | exit 0, outcome `done` | validated: `done`, or `failed` | null, or a validation reason | 0, or 22 with the reason |
 | exit 13, session phase, outcome `blocked` / `needs-input` | `escalated` | `session_blocked` / `session_needs_input` | 13 `needs_human` |
 | exit 14, 16, 17, 18 | `failed` | `session_failed` (the token is in `outcome`) | passed through, `details.outcome` |
 | exit 15 not caused by the tool | `failed` | `session_failed` | 15 |
-| exit 1, 2, 10, 20, 21, an unparseable outcome, or `status` failing at collection | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
+| exit 1, 2, 10, 20, 21, an unparseable or disagreeing outcome, `status` failing at collection for a `done` run, or the sandbox rule of item 7 | `failed` | `claude_session_error` | 12 `claude_session_error`, retryable false |
 
 ```text
 retryable(end_reason) = end_reason in {"launch_interrupted", "never_adopted"}   # every other launch end reason: false
@@ -1269,9 +1269,11 @@ Linux and WSL (Ubuntu) are tested. macOS is expected to work: the roots, `flock`
 - When an event owner's session is pruned, its remaining copies are not re-evaluated until a file holding them is read again, and a copy beyond the 8 best of a key was never stored, so it cannot take over.
 - A key with more than 8 copies: the owner file (hence its session and agent attribution), the owner's timestamp (hence its 15-minute slot), which copies are stored, and the `line_offset` of a copy can depend on chunk and run boundaries (for example, the owner can be one file with timestamp 20 in one split and another with timestamp 10 in another). A file's first line of a message may be dropped (8 better copies exist) while a later line of the same message, read in a later chunk, enters as a new copy with that later line's offset and timestamp. The total stays one counted event per key, but its attribution and slot can differ from a single-chunk read.
 - An event key is `sha256(kind + NUL + id)` cut to 16 hex characters, with no further domain separation, and the fallback id of an id-less line is its plain text (`file_id:line_offset`, with `:block` for message, tool_call and tool_error). A real id that equals a fallback form, or a planted one, merges counts like a forged copy of a key (see the forged transcript risk above).
+- A `start` that exits 0 with a JSON document the tool cannot use (a missing or malformed field) is cleaned up like any failed `start` when its output holds exactly one claude-session id token, after the usual id, directory and project name checks. The one carve-out: a document whose own `csession_id` is a string that fails the id grammar names an id of its own, so no other token of the output (an `argv` element, say) is taken for it and nothing is recorded or cleaned up.
 - When Claude Code rewrites `sessionId` on copied lines, per-session attribution of a verbatim copy falls back to the file path (totals stay right).
 - A crash or SIGKILL between `start` returning and the id being stored, a `start` that times out or is signaled after allocating without printing its id, and any exit 12 of `start` other than `launch_failed` whose output holds no id leave a pending claude-session session the tool never recorded; it ends `never_adopted` after claude-session's `lost_grace` and claude-session's `reconcile` removes it 30 days later, and until then it keeps the staged copy of the digest (recovery never looks a session up by label or by scanning). When the id was printed, the tool records it and cleans up as for `launch_failed`.
 - Lease liveness is the holder's PID with its start time and nothing stronger: a process in another PID namespace or host that shares the state directory looks dead and its lease is taken over (not supported), and a machine suspend can pass `expires_at` while the holder lives, so the next run recovers a healthy retro and the holder's compare-and-set write stops it.
+- The one distinct claude-session id token the tool picks from the output of a failed `start` (not a parsed document) is validated (id, directory, project directory name) and checked against ids recorded for another retro, then recorded and forgotten, with no check that the session belongs to this launch; a hostile claude-session could name an id it does not own only if the id is not recorded by another retro.
 - The project directory is matched by its exact encoded name; a same-user process that creates another directory encoding to the same name (it needs the random csession id) could have it removed.
 - The cron env-file is sourced by the shell; a file its owner makes writable after install is run as shell code until `validate` reports it.
 - `st_nlink == 1` on the opened descriptor cannot exclude a same-user hard-link-then-unlink race in the window between `openat` and `fstat` (the file then looks like it has one link). The owner check and the kernel's `protected_hardlinks` limit what such a process can point the tool at; the tool only reads the file.
