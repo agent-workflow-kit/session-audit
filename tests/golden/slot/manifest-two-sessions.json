@@ -1,0 +1,74 @@
+{
+  "coverage": {
+    "digest_bytes": 1746,
+    "items_kept": 6,
+    "items_total": 6,
+    "sessions": [
+      {
+        "dropped": {
+          "session_cap": 0,
+          "total_cap": 0
+        },
+        "items_kept": 4,
+        "items_total": 4,
+        "ref": "s1"
+      },
+      {
+        "dropped": {
+          "session_cap": 0,
+          "total_cap": 0
+        },
+        "items_kept": 2,
+        "items_total": 2,
+        "ref": "s2"
+      }
+    ]
+  },
+  "digest_sha256": "6c3245072f8be6327e81f2132263e0b623f08f1bafc6e6174b1193ca22701d44",
+  "finding_categories": [
+    "went_well",
+    "went_badly",
+    "friction",
+    "cost"
+  ],
+  "limits": {
+    "max_candidates": 20,
+    "max_findings": 50,
+    "text_limits": {
+      "detail": 1500,
+      "proposal": 1500,
+      "summary": 2000,
+      "target_hint": 200,
+      "title": 120
+    }
+  },
+  "retro_id": "ra-abcdefgh",
+  "run_token": "tttttttttttttttt-_ZZZZZZZZZZZZZZ",
+  "sessions": [
+    {
+      "csession_id": "cs-abcdefgh",
+      "items": [
+        "s1.i001",
+        "s1.i002",
+        "s1.i003",
+        "s1.i004"
+      ],
+      "ref": "s1"
+    },
+    {
+      "csession_id": null,
+      "items": [
+        "s2.i001",
+        "s2.i002"
+      ],
+      "ref": "s2"
+    }
+  ],
+  "target_classes": [
+    "skill",
+    "instructions_file",
+    "config",
+    "permission_profile",
+    "workflow"
+  ]
+}

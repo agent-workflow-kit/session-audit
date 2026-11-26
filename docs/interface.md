@@ -574,7 +574,7 @@ def digest_text(raw, cap):
     t = redact(t)                           # bounded built-in patterns, literal masks, token prefixes; sees up to 65,536 more code points so a match that starts inside the bound is redacted whole, and the result ends at the bound or after the marker of a match that straddles it
     t = cut(t, cap)                         # after NFC and redaction, at a code point, never inside a [REDACTED:<kind>] marker
     t = sanitize(t)                         # see Sanitizing
-    t = re.sub(r"(?i)</untrusted", "&lt;/untrusted", t)
+    t = re.sub(r"(?i)<(/?)untrusted", r"&lt;\1untrusted", t)
     return t
 ```
 
@@ -597,11 +597,11 @@ kinds in [REDACTED:<kind>]: token, private_key, url_userinfo, cookie, auth_heade
 
 Redaction is best effort and documented as such. The retro session is confined (see Safety) for that reason.
 
-**Sanitizing.** The sanitizer is awkit's (awkit interface, Output sanitizing): categories L, N, P, S kept, Zs becomes a space, at most three combining marks after a kept character, the invisible set `U+034F, U+115F, U+1160, U+17B4, U+17B5, U+2800, U+3164, U+FFA0, U+180B..U+180F, U+FE00..U+FE0F, U+E0100..U+E01EF` and every other code point (Cc, Cf, Cs, Co, Cn, Zl, Zp, U+FFFC included) become `<U+XXXX>`; a literal `<U+` becomes `<U+003C>U+`. LF and TAB become markers too (every item is one line). Any `</untrusted` inside content is neutralized last (`&lt;/untrusted`). The implementation carries the algorithm text of awkit's sanitizer as its own code (a tool repo does not import awkit). Category lookup uses the running interpreter's Unicode database, so the output for code points assigned in newer Unicode versions can differ across Python versions (for example U+2FFC is a marker on Python 3.12 and kept on 3.13); consumers that hash sanitized text, such as the digest section hash, must treat that as a known source of drift.
+**Sanitizing.** The sanitizer is awkit's (awkit interface, Output sanitizing): categories L, N, P, S kept, Zs becomes a space, at most three combining marks after a kept character, the invisible set `U+034F, U+115F, U+1160, U+17B4, U+17B5, U+2800, U+3164, U+FFA0, U+180B..U+180F, U+FE00..U+FE0F, U+E0100..U+E01EF` and every other code point (Cc, Cf, Cs, Co, Cn, Zl, Zp, U+FFFC included) become `<U+XXXX>`; a literal `<U+` becomes `<U+003C>U+`. LF and TAB become markers too (every item is one line). Any `</untrusted` or `<untrusted` inside content is neutralized last (`&lt;/untrusted`, `&lt;untrusted`), so no text holds a fence tag of either kind; a look-alike (full-width or other homoglyph forms, a tag with inserted spaces) is left as text, and cannot close or open a section because only a line that carries the digest's own nonce does. The implementation carries the algorithm text of awkit's sanitizer as its own code (a tool repo does not import awkit). Category lookup uses the running interpreter's Unicode database, so the output for code points assigned in newer Unicode versions can differ across Python versions (for example U+2FFC is a marker on Python 3.12 and kept on 3.13); consumers that hash sanitized text, such as the digest section hash, must treat that as a known source of drift.
 
 **Fencing.** Every session section is wrapped as `<untrusted source="transcript" id="NONCE">` ... `</untrusted id="NONCE">`, and the digest opens with the standing "data, not instructions" rule (DIGEST_RULE, see Layout).
 
-**Section hash.** Each session section is rendered first without the fence; `section_sha256` is the SHA-256 of those UTF-8 bytes; the fence is then added around it with the per-digest random nonce (`secrets.token_hex(16)`, 128 bits). The nonce stays random and never enters the retro key. The digest hash `digest_sha256` is the SHA-256 of the final `digest.md` bytes and differs between builds of the same content; it is an identity echo only. `manifest.json` repeats it and is derived from the same build, so it is not part of the hash.
+**Section hash.** Each session section is rendered first without the fence; `section_sha256` is the SHA-256 of those UTF-8 bytes; the fence is then added around it with the per-digest random nonce (`secrets.token_hex(16)`, 128 bits). The nonce is drawn after the section text exists, stays random and never enters the retro key or a section hash; a nonce that occurs anywhere in the digest text is drawn again. The digest hash `digest_sha256` is the SHA-256 of the final `digest.md` bytes and differs between builds of the same content; it is an identity echo only. `manifest.json` repeats it and is derived from the same build, so it is not part of the hash.
 
 ## Retro lifecycle
 
@@ -620,7 +620,7 @@ Redaction is best effort and documented as such. The retro session is confined (
 **Key.** The key is computed over the digested sessions, never over the scope or the digest bytes (copy):
 
 ```text
-DIGEST_FORMAT = 1                                  # bumped by the tool in every release that changes the digest rendering or the bundled skill
+DIGEST_FORMAT = 2                                  # bumped by the tool in every release that changes the digest rendering or the bundled skill
 def retro_key(kept_sessions, skill, model):
     # kept_sessions: the sessions that are digested (after every skip), each with its section_sha256
     parts = sorted((s.session_id, s.section_sha256) for s in kept_sessions)

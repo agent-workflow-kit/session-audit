@@ -28,6 +28,7 @@ import fcntl
 import math
 import os
 import re
+import secrets
 import selectors
 import signal
 import stat as statmod
@@ -170,6 +171,11 @@ class Gateway(Protocol):
         ...
 
     def monotonic(self) -> float: ...
+
+    def token_hex(self, nbytes: int) -> str:
+        """``nbytes`` random bytes from the system's secure source as ``2 * nbytes`` lowercase hex
+        characters (the digest fence nonce); tests substitute fixed values."""
+        ...
 
     def sleep(self, seconds: float) -> None:
         """Wait ``seconds`` (a bounded poll between retries)."""
@@ -504,6 +510,9 @@ class SystemGateway:
 
     def monotonic(self) -> float:
         return time.monotonic()
+
+    def token_hex(self, nbytes: int) -> str:
+        return secrets.token_hex(nbytes)
 
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)

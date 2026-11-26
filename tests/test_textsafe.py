@@ -269,8 +269,18 @@ def test_untrusted_closing_tag_is_neutralized(raw: str) -> None:
     assert "&lt;/untrusted" in out
 
 
+@pytest.mark.parametrize(
+    "raw", ["<untrusted", "<UNTRUSTED", '<Untrusted source="transcript" id="x">', "a<untrusted>b"]
+)
+def test_untrusted_opening_tag_is_neutralized(raw: str) -> None:
+    out = neutralize_untrusted(raw)
+    assert "<untrusted" not in out.lower()
+    assert "&lt;untrusted" in out
+
+
 def test_neutralize_leaves_other_text() -> None:
-    assert neutralize_untrusted("a </b> <untrusted> c") == "a </b> <untrusted> c"
+    assert neutralize_untrusted("a </b> <untrust> <b> c") == "a </b> <untrust> <b> c"
+    assert neutralize_untrusted("<</untrusted<untrusted") == "<&lt;/untrusted&lt;untrusted"
 
 
 def test_sanitized_text_cannot_hide_a_closing_fence_behind_an_invisible_character() -> None:

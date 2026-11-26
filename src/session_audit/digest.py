@@ -2,9 +2,9 @@
 
 ``build_digest(ctx, scope, env=...)`` builds, with no model, the sessions of a retro scope as
 sections of ``digest.md`` (``docs/interface.md``, Digest and Freshness). Fencing, the section
-hashes, the nonce and the manifest are #22: the result gives each session as a ``SessionSection``
-(the lines between its two fence lines) and ``DigestResult.render`` takes the fence from the
-caller.
+hashes, the nonce and the manifest are ``fencing.finish_digest`` (#22): the result gives each
+session as a ``SessionSection`` (the lines between its two fence lines) and
+``DigestResult.render`` takes the fence from the caller.
 
 Flow, all inside ONE read transaction of the store (``sessionquery.read_store``):
 
@@ -502,9 +502,6 @@ def _render_text(raw: _Raw, caps: _Caps, redactor: redact.Redactor) -> str:
         name = redact.digest_text(raw.tool or "unknown", NAME_CAP, redactor) or "unknown"
         summary = redact.digest_text(raw.text, caps.arg, redactor) if raw.text else ""
         return f"{name} {summary}" if summary else name
-    # todo(#22): digest_text neutralizes only closing ``</untrusted`` tags; an opening fence text
-    # ``<untrusted source=... id=...>`` inside item text is not neutralized. Deferred to the fence
-    # work of #22 (the fence and nonce are its seam), not changed here.
     cap = {
         DigestKind.PROMPT: caps.prompt,
         DigestKind.ASSISTANT: caps.assistant,
