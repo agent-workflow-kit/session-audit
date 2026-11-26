@@ -28,6 +28,7 @@ from .fake_claude_session import (
     step,
     version_step,
 )
+from .golden import assert_golden
 from .ingesthelp import (
     S1,
     S2,
@@ -447,6 +448,7 @@ def test_ingest_captures_after_the_file_reads_and_reports_the_counts(
     assert fake.calls()[2]["argv"][2:] == ["--json"]
     assert set(snapshots(_private_environment)) == {CS1, CS2}
     assert meta(_private_environment)["last_complete_ingest_at"]
+    assert_golden(run.doc, "ingest-harness")
 
 
 def test_calls_are_newest_first_by_updated_at_then_id_descending(
