@@ -1,10 +1,11 @@
 """Harness enrichment: claude-session snapshots (interface, Harness enrichment).
 
 ``ingest`` lists claude-session sessions over a fixed window (``list --json --since <n>d``),
-fetches ``status --json`` for every one whose ``updated_at`` differs from the stored snapshot
-(newest first, at most ``CAP_PER_RUN`` a run) and stores one ``harness_runs`` row per claude-session
-id. Sessions join to snapshots only through the Claude Code session ids claude-session recorded
-(``sessionquery.snapshot_index``); this module never guesses from paths or names.
+fetches ``status --json`` for every one whose ``updated_at`` is newer than the stored snapshot's
+(as an instant; newest first, at most ``CAP_PER_RUN`` a run) and stores one ``harness_runs`` row per
+claude-session id. Sessions join to snapshots only through the Claude Code session ids
+claude-session recorded (``sessionquery.snapshot_index``); this module never guesses from paths or
+names.
 
 Everything claude-session prints is untrusted. Documents are parsed strictly (no duplicate keys, no
 ``NaN``, nesting and sizes bounded by the gateway's output caps and the parser), every field is
@@ -38,6 +39,12 @@ LIST_TIMEOUT = 60.0
 LIST_OUTPUT_LIMIT = 16 * 1024 * 1024
 STATUS_TIMEOUT = 60.0
 STATUS_OUTPUT_LIMIT = 1024 * 1024
+# A call is not started with less than this left of the run budget, and its timeout is the smaller
+# of its own limit and what is left.
+MIN_CALL_SECONDS = 1.0
+# An ``updated_at`` further than this after the run's clock is refused (it would pin a row: only a
+# newer value replaces it).
+FUTURE_SLACK = timedelta(days=1)
 MAX_CLAUDE_IDS = 64
 MAX_LABELS = 64
 # Column bounds (migration 800): names 128, repo 4096; the interface caps strings at 256, so the
@@ -83,7 +90,7 @@ def strict_loads(text: str) -> Any:
         return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
     except Invalid:
         raise
-    except (ValueError, RecursionError, MemoryError):
+    except (ValueError, RecursionError, MemoryError, OverflowError):
         raise Invalid("not a JSON document") from None
 
 
@@ -143,10 +150,11 @@ class HarnessRun:
         return format_timestamp(self.updated_at)
 
 
-def parse_list(text: str) -> tuple[list[ListEntry], int]:
+def parse_list(text: str, *, now: datetime) -> tuple[list[ListEntry], int]:
     """The valid entries of a ``list --json`` document (one per claude-session id, the newest
-    ``updated_at``) and how many entries were malformed. A document that is not an object with a
-    ``sessions`` array is ``Invalid``."""
+    ``updated_at``) and how many entries were malformed (an ``updated_at`` more than a day after
+    ``now`` is malformed). A document that is not an object with a ``sessions`` array is
+    ``Invalid``."""
     doc = strict_loads(text)
     if not isinstance(doc, dict) or not isinstance(doc.get("sessions"), list):
         raise Invalid("not a list document")
@@ -155,7 +163,7 @@ def parse_list(text: str) -> tuple[list[ListEntry], int]:
     for item in doc["sessions"]:
         cid = item.get("csession_id") if isinstance(item, dict) else None
         moment = parse_instant(item.get("updated_at")) if isinstance(item, dict) else None
-        if not is_csession_id(cid) or moment is None:
+        if not is_csession_id(cid) or moment is None or moment > now + FUTURE_SLACK:
             bad += 1
             continue
         assert isinstance(cid, str)
@@ -195,7 +203,10 @@ def _optional_cost(value: object) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise Invalid("not a number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:  # an integer too large for a float
+        raise Invalid("not a finite non-negative number") from None
     if not math.isfinite(number) or number < 0:
         raise Invalid("not a finite non-negative number")
     return number
@@ -240,15 +251,18 @@ def dump_list(items: list[str] | tuple[str, ...]) -> str:
     return json.dumps(list(items), separators=(",", ":"))
 
 
-def parse_status(text: str, expected: str) -> HarnessRun:
+def parse_status(text: str, expected: str, *, now: datetime) -> HarnessRun:
     """A ``status --json`` document as a ``HarnessRun``; ``Invalid`` when it is not an object, is
-    about another session, or any field breaks its grammar."""
+    about another session, its ``updated_at`` is more than a day after ``now`` or any field breaks
+    its grammar."""
     doc = strict_loads(text)
     if not isinstance(doc, dict) or doc.get("csession_id") != expected:
         raise Invalid("not the requested session")
     moment = parse_instant(doc.get("updated_at"))
     if moment is None:
         raise Invalid("updated_at is not a timestamp")
+    if moment > now + FUTURE_SLACK:
+        raise Invalid("updated_at is in the future")
     run = doc.get("run")
     if run is None:
         run = {}
@@ -339,15 +353,22 @@ class Fetched:
     row: HarnessRun | None = None
 
 
-def fetch_status(gateway: Gateway, command: str, csession_id: str) -> Fetched:
+def fetch_status(
+    gateway: Gateway,
+    command: str,
+    csession_id: str,
+    *,
+    timeout: float = STATUS_TIMEOUT,
+) -> Fetched:
     """``status <id> --json``: exit 10 is a session forgotten since the list; a failed call, any
     other exit or a document that does not parse is an error. ``csession_id`` must already match
-    the claude-session id grammar (it goes into argv)."""
+    the claude-session id grammar (it goes into argv); a document dated more than a day after
+    the gateway's clock is an error."""
     if not is_csession_id(csession_id):
         raise ValueError("csession_id must be a claude-session id")
     result = gateway.run(
         [command, "status", csession_id, "--json"],
-        timeout=STATUS_TIMEOUT,
+        timeout=timeout,
         stdout_limit=STATUS_OUTPUT_LIMIT,
     )
     if result.exit_is(10):
@@ -355,7 +376,7 @@ def fetch_status(gateway: Gateway, command: str, csession_id: str) -> Fetched:
     if not result.ok:
         return Fetched(Fetch.ERROR)
     try:
-        return Fetched(Fetch.ROW, parse_status(result.stdout, csession_id))
+        return Fetched(Fetch.ROW, parse_status(result.stdout, csession_id, now=gateway.now()))
     except Invalid:
         return Fetched(Fetch.ERROR)
 
@@ -388,6 +409,15 @@ def _stored_updated(store: Store) -> dict[str, datetime | None]:
     }
 
 
+_MISSING: Any = object()
+
+
+def _newer(listed: datetime, stored: datetime | None) -> bool:
+    """Whether ``listed`` beats the stored snapshot: no row at all, a stored value that is not a
+    timestamp, or a strictly later instant."""
+    return stored is _MISSING or stored is None or listed > stored
+
+
 def capture(
     gateway: Gateway,
     store: Store,
@@ -399,34 +429,38 @@ def capture(
     """The capture of one ingest (after its file reads). Never raises for anything claude-session
     does; a store that cannot be written raises its ``CliError``."""
     counts = Counts()
-    if gateway.monotonic() >= deadline:
+    remaining = deadline - gateway.monotonic()
+    if remaining < MIN_CALL_SECONDS:
         counts.warnings.append("harness_capture_skipped: the budget was used by the file reads")
         return counts
     listed = gateway.run(
         [command, "list", "--json", "--since", f"{days}d"],
-        timeout=LIST_TIMEOUT,
+        timeout=min(LIST_TIMEOUT, remaining),
         stdout_limit=LIST_OUTPUT_LIMIT,
     )
     if not listed.ok:
         counts.errors += 1
         return counts
     try:
-        entries, bad = parse_list(listed.stdout)
+        entries, bad = parse_list(listed.stdout, now=gateway.now())
     except Invalid:
         counts.errors += 1
         return counts
     counts.errors += bad
     stored = _stored_updated(store)
-    todo = [
-        e for e in entries if e.csession_id not in stored or stored[e.csession_id] != e.updated_at
-    ]
+    # Only a listed instant newer than the stored one is worth a call (a stored value that is not
+    # a timestamp ranks lowest), so a row the list cannot beat is not fetched again and again.
+    todo = [e for e in entries if _newer(e.updated_at, stored.get(e.csession_id, _MISSING))]
     counts.matched = len(todo)
     todo.sort(key=lambda e: (e.updated_at, e.csession_id), reverse=True)
     for entry in todo[:CAP_PER_RUN]:
-        if gateway.monotonic() >= deadline:
+        remaining = deadline - gateway.monotonic()
+        if remaining < MIN_CALL_SECONDS:
             counts.warnings.append("harness_capture_partial: the budget ended the capture")
             break
-        fetched = fetch_status(gateway, command, entry.csession_id)
+        fetched = fetch_status(
+            gateway, command, entry.csession_id, timeout=min(STATUS_TIMEOUT, remaining)
+        )
         if fetched.kind is Fetch.FORGOTTEN:
             continue
         if fetched.row is None:

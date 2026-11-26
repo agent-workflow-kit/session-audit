@@ -188,8 +188,10 @@ def test_the_fake_needs_only_a_plain_python3() -> None:
         ["list", "--json", "--state"],  # a missing value
         ["list", "--json", "--state", "--live"],  # the value is a flag
         ["start", "--json", "--tools"],  # --tools needs at least one name
-        ["list", "--", "--json"],  # -- is not part of the grammar
-        ["status", "--json", "--", "cs-aaaaaaab"],
+        ["list", "--", "--json"],  # list has no positionals: -- is refused
+        ["list", "--json", "--"],
+        ["status", "--", "cs-aaaaaaab", "--json"],  # after -- a flag is a second positional
+        ["status", "--json", "--"],  # -- does not supply the id
         ["exec", "--json", "--grace", "5"],  # a flag of another command
         [],
     ],
@@ -236,6 +238,8 @@ def test_a_refused_call_consumes_no_step(tmp_path: Path) -> None:
         ["exec", "--session-id", "cs-aaaaaaab", "--run", "2", "--json"],
         ["status", "cs-aaaaaaab", "--json", "--run", "2"],
         ["status", "--json", "cs-aaaaaaab"],
+        ["status", "--json", "--", "cs-aaaaaaab"],  # -- ends the options (argparse)
+        ["status", "cs-aaaaaaab", "--"],
         ["stop", "cs-aaaaaaab", "--grace", "5s", "--dry-run", "--json"],
         ["list", "--config", "c.yaml", "--verbose", "--yes", "--json", "--state", "running"],
         ["list", "--json", "--limit", "5", "--live", "--report-status", "done"],

@@ -37,17 +37,26 @@ def test_the_minimum_is_0_45_2() -> None:
     ("text", "expected"),
     [
         ("claude-session 0.45.3\n", (0, 45, 3)),
-        ("0.100.0", (0, 100, 0)),
-        ("claude-session version 12.0.7 (tag v12.0.7)\nignored 9.9.9", (12, 0, 7)),
-        ("name 1.2.3.4", (1, 2, 3)),
-        ("v0.45.2-rc1", (0, 45, 2)),
+        ("claude-session 0.100.0", (0, 100, 0)),
+        ("claude-session 12.0.7 (tag v12.0.7)\nignored 9.9.9", (12, 0, 7)),
+        ("claude-session 1.2.3.4", (1, 2, 3)),
+        ("claude-session 0.45.2-rc1", (0, 45, 2)),
         ("", None),
         ("claude-session\n0.45.3", None),  # only the first line counts
-        ("1.2", None),
-        ("v1.2.x", None),
-        ("a.b.c", None),
-        ("٣.٤.٥", None),  # not ASCII digits
-        ("1234567890.1.1", None),  # more digits than any real version
+        ("claude-session 1.2", None),
+        ("claude-session v1.2.x", None),
+        ("claude-session a.b.c", None),
+        ("claude-session ٣.٤.٥", None),  # not ASCII digits
+        ("claude-session 1234567890.1.1", None),  # more digits than any real version
+        # the first line must start with the program name and a space, then the version
+        ("0.100.0", None),
+        ("0.45.3\n", None),
+        ("other-tool 0.45.3", None),
+        ("claude-session version 12.0.7", None),
+        ("claude-session  0.45.3", None),
+        ("claude-sessions 0.45.3", None),
+        (" claude-session 0.45.3", None),
+        ("Claude-Session 0.45.3", None),
     ],
 )
 def test_parse_version(text: str, expected: tuple[int, int, int] | None) -> None:
@@ -56,7 +65,8 @@ def test_parse_version(text: str, expected: tuple[int, int, int] | None) -> None
 
 def test_a_version_with_a_hostile_first_line_never_crashes() -> None:
     assert parse_version("x" * 100_000 + " 0.45.3") is None
-    assert parse_version("\x00\x1b[31m0.45.3") == (0, 45, 3)
+    assert parse_version("claude-session " + "x" * 100_000 + " 0.45.3") is None
+    assert parse_version("\x00\x1b[31mclaude-session 0.45.3") is None
 
 
 def test_integer_tuple_comparison_not_text() -> None:
@@ -67,10 +77,10 @@ def test_integer_tuple_comparison_not_text() -> None:
 
 
 def test_the_minimum_itself_is_accepted_and_one_below_is_not() -> None:
-    assert check(exited(0, "0.45.2"))[0].ok
-    assert check(exited(0, "0.45.1"))[0].presence is Presence.TOO_OLD
-    assert check(exited(0, "0.44.99"))[0].presence is Presence.TOO_OLD
-    assert check(exited(0, "1.0.0"))[0].ok
+    assert check(exited(0, "claude-session 0.45.2"))[0].ok
+    assert check(exited(0, "claude-session 0.45.1"))[0].presence is Presence.TOO_OLD
+    assert check(exited(0, "claude-session 0.44.99"))[0].presence is Presence.TOO_OLD
+    assert check(exited(0, "claude-session 1.0.0"))[0].ok
 
 
 def test_a_program_that_cannot_start_is_missing() -> None:
@@ -81,6 +91,8 @@ def test_a_program_that_cannot_start_is_missing() -> None:
 def test_output_without_a_version_is_unparsable_and_not_missing() -> None:
     result, _ = check(exited(0, "hello\n"))
     assert result.presence is Presence.UNPARSABLE
+    # a bare version is not what claude-session prints: some other program
+    assert check(exited(0, "0.45.3\n"))[0].presence is Presence.UNPARSABLE
 
 
 @pytest.mark.parametrize(
@@ -101,7 +113,7 @@ def test_a_failed_call_is_failed_never_read_as_a_version(failure: CallResult) ->
 
 
 def test_the_call_is_argv_only_with_a_ten_second_timeout() -> None:
-    _, gw = check(exited(0, "0.45.3"))
+    _, gw = check(exited(0, "claude-session 0.45.3"))
     [call] = gw.calls
     assert call["argv"] == ["claude-session", "--version"]
     assert call["timeout"] == VERSION_TIMEOUT == 10.0

@@ -1,14 +1,14 @@
 """The claude-session version check (interface, Retro launch: ``MIN_CS``).
 
-``claude-session --version`` runs through the gateway (10 s timeout). The first
-``\\d+.\\d+.\\d+`` token of the first line is the version; versions compare as integer tuples
-(``0.100.0`` is higher than ``0.45.2``). The outcomes are distinct and none is read from an exit
-code of a failed call:
+``claude-session --version`` runs through the gateway (10 s timeout). The first line must be
+``claude-session `` followed by a ``\\d+.\\d+.\\d+`` version (anything may follow it); versions
+compare as integer tuples (``0.100.0`` is higher than ``0.45.2``). The outcomes are distinct and
+none is read from an exit code of a failed call:
 
 - ``OK``: the program ran, printed a version and it is at least ``MIN_CS``;
 - ``MISSING``: the program could not be started;
 - ``TOO_OLD``: a version below ``MIN_CS``;
-- ``UNPARSABLE``: the program exited 0 but printed no version;
+- ``UNPARSABLE``: the program exited 0 but printed no ``claude-session <version>`` first line;
 - ``FAILED``: the call timed out, was killed, or exited non-zero (it may be a program that is
   not claude-session at all).
 
@@ -28,6 +28,7 @@ MIN_CS = (0, 45, 2)
 VERSION_TIMEOUT = 10.0
 VERSION_OUTPUT_LIMIT = 64 * 1024
 _FIRST_LINE_MAX = 512
+_PREFIX = "claude-session "
 # ASCII digits only, and bounded, so a hostile first line cannot make a huge integer.
 _VERSION = re.compile(r"(?<![0-9])([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(?![0-9])", re.ASCII)
 
@@ -52,9 +53,12 @@ class VersionCheck:
 
 
 def parse_version(text: str) -> tuple[int, int, int] | None:
-    """The first version token of the first line of ``text``, or None."""
+    """The version of the first line of ``text``, which must start with ``claude-session <version>``
+    (what argparse prints for the real program), or None."""
     first = text.split("\n", 1)[0][:_FIRST_LINE_MAX]
-    found = _VERSION.search(first)
+    if not first.startswith(_PREFIX):
+        return None
+    found = _VERSION.match(first, len(_PREFIX))
     if found is None:
         return None
     return (int(found.group(1)), int(found.group(2)), int(found.group(3)))

@@ -22,8 +22,8 @@ past the last repeat the last step. A step is {"stdout": <json or text>, "stderr
 Grammar: the commands start, exec, status, stop, list and forget follow claude-session's real
 argument grammar (argparse, no abbreviations): the global flags (--json, --config, --verbose,
 --quiet, --yes) are accepted only after the subcommand; only --version and -h/--help come
-before it; a flag the command does not have, a missing value, a missing or extra positional or
-``--`` is exit 2 with ``claude-session: error: ...`` on stderr (and the error envelope on stdout
+before it; ``--`` ends the options of a command with positionals (``status -- <id>``); a flag the command does not have, a missing value, a missing or extra positional or
+``--`` on a command without positionals is exit 2 with ``claude-session: error: ...`` on stderr (and the error envelope on stdout
 when --json is anywhere in argv); ``start`` without --json is exit 2. A refused call is logged
 under the key ``<usage>`` and consumes no step. Other commands are not checked.
 
@@ -110,7 +110,10 @@ def grammar_error(argv):
     while index < len(rest):
         token = rest[index]
         if token == "--":
-            return "unrecognized arguments: --"
+            if most == 0:
+                return "unrecognized arguments: --"
+            positionals.extend(rest[index + 1 :])  # argparse: everything after -- is positional
+            break
         if not is_option(token):
             positionals.append(token)
             index += 1

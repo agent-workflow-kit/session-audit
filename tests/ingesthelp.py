@@ -38,9 +38,12 @@ class TickGateway(ClockedGateway):
         return now
 
     def run(self, argv: Any, **kwargs: Any) -> Any:
-        """Every program is missing here (claude-session included): a real ingest finds no
-        harness and goes on; a test asserts ``runs`` to see what was asked."""
+        """claude-session is missing here: a real ingest finds no harness and goes on; a test
+        asserts ``runs`` to see what was asked. Any other program is a bug of the test or of
+        ingest, so it fails loudly instead of looking like a missing tool."""
         self.runs.append(list(argv))
+        if Path(str(argv[0])).name != "claude-session":
+            raise AssertionError(f"ingest must not start a process: {list(argv)!r}")
         return CallResult(CallStatus.SPAWN_FAILED, detail="FileNotFoundError: scripted missing")
 
 
