@@ -24,7 +24,8 @@ Bounds. A line is at most 8 MiB (the reader). Nesting is limited by the JSON sca
 ``RecursionError`` is an error line); an integer literal of more than 64 digits is read as a huge
 value (never converted, so the integer digit limit cannot raise) and fails every numeric rule; a
 line with more than ``MAX_BLOCKS`` content blocks is an error line, so one line yields a bounded
-number of events and items. Every string kept is cut after ``fix_surrogates``.
+number of events and items. Every string kept is cut to its cap first, then fixed with
+``fix_surrogates``.
 """
 
 from __future__ import annotations
@@ -125,9 +126,9 @@ class Event:
 
 @dataclass(frozen=True, slots=True)
 class DigestItem:
-    """A digest-only fact. ``text`` is conversation content: never store it, never log it
-    (``repr`` hides it). Cut to ``TEXT_CAP`` (``ARG_CAP`` for a tool argument) after
-    ``fix_surrogates``."""
+    """A digest-only fact. ``text`` is conversation content: it is excluded from ``repr`` only,
+    so never persist or log it and never use ``dataclasses.asdict`` on it.
+    Cut to ``TEXT_CAP`` (``ARG_CAP`` for a tool argument), then fixed with ``fix_surrogates``."""
 
     kind: DigestKind
     block: int
@@ -177,6 +178,14 @@ def _ident(v: object) -> str | None:
     if type(v) is not str or not v or len(v) > ID_CAP:
         return None
     return fix_surrogates(v)
+
+
+def _ident128(v: object) -> str | None:
+    """A session or agent id: a non-empty string of at most ``NAME_CAP`` characters, else missing
+    (never truncated, so two long ids cannot collide)."""
+    if type(v) is not str or len(v) > NAME_CAP:
+        return None
+    return _text(v)
 
 
 def _count(d: dict[str, object], key: str) -> int:
@@ -323,11 +332,10 @@ def _cost_state(
 ) -> LineResult:
     if not context.main:  # only the main file's cost-state lines count (Counting rules 2)
         return LineResult(Status.OK, **common)  # type: ignore[arg-type]
-    value = obj.get("totalCostUSD")
-    if value is None:
+    if "totalCostUSD" not in obj:  # an absent key is ignored quietly; null is a wrong type
         return LineResult(Status.OK, **common)  # type: ignore[arg-type]
     try:
-        cost = _cost(value)
+        cost = _cost(obj["totalCostUSD"])
     except _Invalid:
         return LineResult(Status.ERROR, cost_invalid=True)
     return LineResult(Status.OK, cost_usd=cost, **common)  # type: ignore[arg-type]
@@ -343,8 +351,8 @@ class _Line:
         self.uuid = _ident(obj.get("uuid"))
         msg = obj.get("message")
         self.message: dict[str, object] = msg if isinstance(msg, dict) else {}
-        self.session = _text(obj.get("sessionId"))
-        self.agent = _text(obj.get("agentId"))
+        self.session = _ident128(obj.get("sessionId"))
+        self.agent = _ident128(obj.get("agentId"))
         self.events: list[Event] = []
         self.digest: list[DigestItem] = []
 
@@ -366,7 +374,7 @@ class _Line:
 
     def item(self, kind: DigestKind, text: str | None, **fields: object) -> None:
         if not self.want_digest or text is None:
-            return
+            return  # callers pass "" (tool name only) for a tool call without a summary
         base: dict[str, object] = {
             "block": 0,
             "uuid": self.uuid,
@@ -384,10 +392,11 @@ class _Line:
         message_id = _ident(msg.get("id"))
         blocks = _blocks(msg)
         usage = msg.get("usage")
-        if isinstance(usage, dict):
-            counters = self._usage(usage)
-            if model == SYNTHETIC and not any(counters.values()):
-                return  # a synthetic message with zero usage is ignored
+        has_usage = isinstance(usage, dict)
+        counters = self._usage(usage) if isinstance(usage, dict) else {}
+        if model == SYNTHETIC and not any(counters.values()):
+            return  # a synthetic message with zero (or absent) usage is ignored wholly
+        if has_usage:
             self.event(Kind.MESSAGE, dedupe_id=message_id, model=model or "unknown", **counters)
         for index, block in enumerate(blocks):
             if not isinstance(block, dict):
@@ -401,9 +410,10 @@ class _Line:
                     model=model,
                     tool=name,
                 )
+                summary = _tool_arg(name, block.get("input")) if self.want_digest else None
                 self.item(
                     DigestKind.TOOL_CALL,
-                    _tool_arg(name, block.get("input")),
+                    summary or "",
                     block=index,
                     tool=name,
                     message_id=message_id,
@@ -444,7 +454,8 @@ class _Line:
                 tool_use_id = _ident(block.get("tool_use_id"))
                 self.event(Kind.TOOL_ERROR, dedupe_id=tool_use_id, ref_id=tool_use_id, block=index)
         decision = obj.get("permissionDecision")
-        denied = obj.get("toolDenialKind") is not None or (
+        denial_kind = obj.get("toolDenialKind")
+        denied = (type(denial_kind) is str and denial_kind != "") or (
             isinstance(decision, dict) and decision.get("decision") == "reject"
         )
         if denied:

@@ -77,6 +77,14 @@ def test_message_tokens_with_split():
     assert (r.ts, r.cwd, r.entrypoint, r.version) == (TS_MS, None, None, None)
 
 
+def test_session_and_agent_ids_over_128_chars_are_missing():
+    r = parse(assistant({"output_tokens": 1}, sessionId="s" * 129, agentId="a" * 129))
+    (e,) = r.events
+    assert (e.line_session_id, e.agent_id) == (None, None)
+    r = parse(assistant({"output_tokens": 1}, sessionId="s" * 128, agentId="a" * 128))
+    assert (r.events[0].line_session_id, r.events[0].agent_id) == ("s" * 128, "a" * 128)
+
+
 def test_message_without_split_counts_all_creation_as_5m():
     (e,) = parse(assistant({"cache_creation_input_tokens": 7})).events
     assert (e.cache_write_5m_tokens, e.cache_write_1h_tokens) == (7, 0)
@@ -102,6 +110,16 @@ def test_assistant_without_usage_has_no_message_event():
 def test_synthetic_message_with_zero_usage_is_ignored_wholly():
     obj = assistant({"input_tokens": 0}, [{"type": "tool_use", "id": "t", "name": "Bash"}])
     obj["message"]["model"] = "<synthetic>"
+    r = parse(obj, DCTX)
+    assert (r.status, r.events, r.digest) == (Status.OK, (), ())
+
+
+@pytest.mark.parametrize("usage", [None, "x", [1], {"output_tokens": None}])
+def test_synthetic_message_with_absent_or_unusable_usage_is_zero_usage(usage):
+    obj = assistant(None, [{"type": "tool_use", "id": "t", "name": "Bash"}])
+    obj["message"]["model"] = "<synthetic>"
+    if usage is not None:
+        obj["message"]["usage"] = usage
     r = parse(obj, DCTX)
     assert (r.status, r.events, r.digest) == (Status.OK, (), ())
 
@@ -193,6 +211,10 @@ def test_denial_and_error_on_one_line_are_two_events():
         {"permissionDecision": "reject"},
         {"permissionDecision": None},
         {"toolDenialKind": None},
+        {"toolDenialKind": False},
+        {"toolDenialKind": 0},
+        {"toolDenialKind": ""},
+        {"toolDenialKind": {"a": 1}},
     ],
 )
 def test_no_denial(extra):
@@ -284,10 +306,14 @@ def test_cost_state_invalid_is_ignored_and_flagged(text):
     assert r.status is Status.ERROR and r.cost_invalid and r.cost_usd is None
 
 
-def test_cost_state_without_value_or_null_is_ignored_quietly():
-    for obj in ({"type": "cost-state"}, {"type": "cost-state", "totalCostUSD": None}):
-        r = parse(obj)
-        assert (r.status, r.cost_usd, r.cost_invalid) == (Status.OK, None, False)
+def test_cost_state_without_the_key_is_ignored_quietly():
+    r = parse({"type": "cost-state"})
+    assert (r.status, r.cost_usd, r.cost_invalid) == (Status.OK, None, False)
+
+
+def test_cost_state_with_a_null_value_is_invalid():
+    r = parse({"type": "cost-state", "totalCostUSD": None})
+    assert (r.status, r.cost_usd, r.cost_invalid) == (Status.ERROR, None, True)
 
 
 def test_cost_state_in_an_agent_file_is_ignored():
@@ -591,11 +617,13 @@ def test_tool_call_argument_summaries():
     assert call("Read", {"file_path": "/a/b"}) == ["/a/b"]
     assert call("Grep", {"pattern": "x"}) == ["x"]
     assert call("WebFetch", {"url": "https://example.com:8080/p?q=1"}) == ["example.com"]
-    assert call("WebFetch", {"url": "http://[bad"}) == []
     assert call("Task", {"subagent_type": "Explore"}) == ["Explore"]
     assert call("Skill", {"skill": "s"}) == ["s"]
-    assert call("mcp__x", {"command": "no"}) == []
-    assert call("Bash", "not a dict") == []
+    assert call("mcp__x", {"command": "no"}) == [""]
+    assert call("WebSearch", {"query": "q"}) == [""]
+    assert call("Bash", {}) == [""]
+    assert call("Bash", "not a dict") == [""]
+    assert call("WebFetch", {"url": "http://[bad"}) == [""]
     assert len(call("Bash", {"command": "c" * 10000})[0]) == ARG_CAP
 
 
@@ -709,15 +737,17 @@ def numbers(result) -> list[float]:
     for e in result.events:
         for f in dataclasses.fields(e):
             v = getattr(e, f.name)
-            if f.name == "kind" or v is None or isinstance(v, str):
+            if f.name in ("kind", "ts", "slot") or v is None or isinstance(v, str):
                 continue
             out.append(v)
-    out += [v for v in (result.ts, result.cost_usd) if v is not None]
+    out += [v for v in (result.cost_usd,) if v is not None]
     return out
 
 
 def test_every_output_number_is_finite_and_capped():
     rng = random.Random(7)
+    seen = 0
+    facts = FileFacts()
     weird = [
         0,
         1,
@@ -751,12 +781,22 @@ def test_every_output_number_is_finite_and_capped():
         for obj in (
             assistant(usage),
             {"type": "cost-state", "totalCostUSD": rng.choice(weird)},
-            {"type": "system", "subtype": "turn_duration", "durationMs": rng.choice(weird)},
+            {
+                "type": "system",
+                "subtype": "turn_duration",
+                "durationMs": rng.choice(weird),
+                "timestamp": TS,
+            },
         ):
             r = parse_line(json.dumps(obj).encode(), CTX)  # json.dumps emits NaN/Infinity tokens
             for n in numbers(r):
+                seen += 1
                 assert type(n) is not bool and math.isfinite(n) and 0 <= n <= 2**32 * 1.0 + 1e6
-            json.dumps(dataclasses.asdict(r) if False else numbers(r), allow_nan=False)
+            assert r.ts in (None, TS_MS)
+            for e in facts.add(r):
+                assert e.ts in (None, TS_MS) and e.slot in (None, slot_of(TS_MS))
+            json.dumps(numbers(r), allow_nan=False)
+    assert seen > 0 and facts.min_ts in (None, TS_MS)
 
 
 # --- chunked reads give the same events ----------------------------------------------------------
