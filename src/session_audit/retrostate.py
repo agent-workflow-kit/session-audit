@@ -19,7 +19,7 @@ leaves exactly one of them; the lease columns stay set until ``Retro.release``):
                 being written, a claude-session session maybe launched: ``csession_id`` is set once
                 ``start`` returned (``retro_sessions`` row ``pending`` in the same transaction);
                 recovery stops the run by that id and cleans up, or just deletes the local files.
-``validating``  the session ended and was collected; the artifact check (#29) is running.
+``validating``  the session ended and was collected; the artifact check (``retroartifact``) runs.
 final states    ``done`` (the artifact check), ``failed``, ``escalated``, ``canceled``:
                 ``finished_at`` set. The lease stays held (and renewed) until cleanup and the post
                 hooks are done, then ``release`` clears it.

@@ -25,6 +25,7 @@ import stat as statmod
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from . import errors, redact
@@ -54,9 +55,11 @@ MAX_ARTIFACT_FILE = 262_144  # 256 KB
 MAX_DEPTH = 16
 MAX_DIGITS = 16
 MAX_INTEGER = 2**53
+# todo(#30): marker.txt ships with the skill; until then every bundled run ends marker_mismatch
 MARKER_FILE = "skills/audit/references/marker.txt"
 _MARKER_LINE = re.compile(r"[a-z0-9-]{16,64}", re.ASCII)
 _PATH_MAX = 4096
+_USD4 = Decimal("0.0001")
 
 # Tool-written candidate risk by target class (Retro artifact). Checked against the fixed classes.
 RISK = {
@@ -111,6 +114,7 @@ class ArtifactContext:
 
 
 def bundled_marker(gateway: Gateway, plugin_dir: str) -> str:
+    # todo(#30): marker.txt ships with the skill; until then every bundled run ends marker_mismatch
     """The marker line of the bundled skill, or ``""`` when the file is unusable. ``""`` is a
     marker that exists and that no artifact can equal (the schema needs 1 character), so a bundled
     skill whose marker cannot be read fails closed with ``marker_mismatch``."""
@@ -413,7 +417,7 @@ def _numbers(metrics: Metrics) -> tuple[int | float | None, ...]:
         metrics.output_tokens,
         metrics.cache_read_tokens,
         metrics.cache_write_tokens,
-        float(metrics.estimated),
+        float(metrics.estimated.quantize(_USD4, rounding=ROUND_HALF_UP)),  # as the digest shows
     )
 
 
@@ -433,10 +437,10 @@ def _validate(collected: Collected, context: ArtifactContext) -> Mapped:
     findings, candidates, dropped_f, dropped_c = _references(document, context.manifest)  # 7
     clean = _Text(context.redactor())  # check 8
     stored: dict[str, Any] = {
-        key: document[key]
-        for key in ("retro_id", "run_token", "digest_sha256", "marker")
-        if key in document
+        key: document[key] for key in ("retro_id", "run_token", "digest_sha256") if key in document
     }
+    if "marker" in document:  # equal to the expected marker; a masked secret is not stored in clear
+        stored["marker"] = clean(document["marker"], 256)
     summary = clean(document["summary"], _TEXT_LIMITS["summary"])
     stored["summary"] = summary
     stored["findings"] = [

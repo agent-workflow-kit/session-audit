@@ -72,6 +72,7 @@ from .retrooutcome import (
 )
 from .retrostate import Inserted, Retro, Reused, insert_retro, scope_object
 from .retroview import load_retro
+from .sessionquery import read_store
 
 __all__ = [
     "CLEANUP_BOUND",
@@ -149,13 +150,21 @@ def run_launch(
                 inserted.retro.release()  # compare-and-set; housekeeping may take the row at once
                 raise
         if code == 0 and on_done is not None and inserted.retro.state == "done":
-            with store.transaction() as conn:
-                finished = load_retro(conn, inserted.retro.id)
+            finished = _read_back(ctx, inserted.retro.id)
             if finished is None:
                 ctx.note("session-audit: warning: the stored retro could not be read back")
             else:
                 on_done(finished)
         return code
+
+
+def _read_back(ctx: Context, retro_id: str) -> dict[str, Any] | None:
+    """The stored retro of a run that is already ``done``, read without the write lock. ANY
+    failure is None: it must never change the exit code of a retro that is done."""
+    try:
+        return read_store(ctx, lambda conn: None if conn is None else load_retro(conn, retro_id))
+    except Exception:
+        return None
 
 
 class Launcher:
@@ -538,8 +547,9 @@ class Launcher:
 
     def _done(self, collected: Collected | None, columns: dict[str, Any]) -> Mapped | None:
         """A run that ended ``done``: ``status`` must have answered (the sandbox rule already ran
-        in ``_exec``), then the artifact check (#29) on a retro in state ``validating``. None when
-        a signal is pending right after the validating write: the check never starts."""
+        in ``_exec``), then the artifact check (``retroartifact``) on a retro in state
+        ``validating``. None when a signal is pending right after the validating write: the check
+        never starts."""
         if collected is None:
             return Mapped("failed", "claude_session_error", 12)
         self.row.write("validating", columns=columns)
@@ -560,8 +570,9 @@ class Launcher:
             return settings.retro.skill_marker  # a custom skill: its configured marker, if any
 
         def redactor() -> redact.Redactor:
-            masks = redact.build_masks(os.environ, settings.redaction.mask_env, lambda _m: None)
-            return redact.Redactor(masks, settings.redaction.extra_token_prefixes)
+            # The digest's masks (built once from the env that ``retro.prepare`` got), so the
+            # model text is redacted with exactly the values the digest was.
+            return redact.Redactor(list(prepared.masks), settings.redaction.extra_token_prefixes)
 
         return ArtifactContext(
             gw,

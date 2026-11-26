@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import base64
 import copy
+import dataclasses
 import hashlib
 import json
 import os
 import sqlite3
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -486,17 +488,96 @@ def test_check_4_the_closed_schema(h: Harness, name: str) -> None:
     fails(h.run(BAD_SCHEMA[name]), "artifact_invalid")
 
 
-@pytest.mark.parametrize("name", sorted(BAD_SCHEMA))
-def test_the_hand_check_agrees_with_the_schema_file(name: str) -> None:
-    """Every refused document is refused by schemas/slot/artifact.json too, except the rules the
-    schema cannot say (id uniqueness, the 256 KB cap)."""
-    cannot = {"duplicate finding ids", "duplicate candidate ids", "token newline"}
-    document = BAD_SCHEMA[name]
+_TEXT = LIMITS["text_limits"]
+
+
+GOOD_SCHEMA = {
+    "no marker": {k: v for k, v in artifact().items() if k != "marker"},
+    "empty lists": mutate(findings=[], candidates=[]),
+    "marker 1": mutate(marker="m"),
+    "marker 256": mutate(marker="m" * 256),
+    "token 16": mutate(run_token="x" * 16),
+    "token 128": mutate(run_token="Ab0_-" * 25 + "xyz"),
+    "summary max": mutate(summary="s" * _TEXT["summary"]),
+    "title and detail max": mutate(
+        findings=[finding(title="t" * _TEXT["title"], detail="d" * _TEXT["detail"])]
+    ),
+    "hint and proposal max": mutate(
+        candidates=[
+            candidate(target_hint="h" * _TEXT["target_hint"], proposal="p" * _TEXT["proposal"])
+        ]
+    ),
+    "8 evidence": mutate(
+        findings=[finding(evidence=[{"kind": "item", "ref": f"s1.i{n:03d}"} for n in range(1, 9)])]
+    ),
+    "50 findings": mutate(findings=[finding(n) for n in range(1, 51)], candidates=[]),
+    "20 candidates": mutate(candidates=[candidate(n) for n in range(1, 21)]),
+    "candidate cites 50": mutate(
+        findings=[finding(n) for n in range(1, 51)],
+        candidates=[candidate(findings=[f"f{n}" for n in range(1, 51)])],
+    ),
+    "last ids": mutate(findings=[finding(50)], candidates=[candidate(20, findings=["f50"])]),
+    "every category and severity": mutate(
+        findings=[
+            finding(i + 1, category=c, severity=v)
+            for i, (c, v) in enumerate(
+                zip(FINDING_CATEGORIES, ("low", "medium", "high", "low"), strict=True)
+            )
+        ],
+        candidates=[],
+    ),
+    "every target class": mutate(
+        candidates=[candidate(i + 1, target_class=t) for i, t in enumerate(sorted(TARGET_CLASSES))]
+    ),
+    "longest refs": mutate(
+        findings=[
+            finding(
+                evidence=[
+                    {"kind": "item", "ref": "s500.i999999"},
+                    {"kind": "metric", "ref": "total." + "a" + "b" * 63},
+                    {"kind": "metric", "ref": "s1.a"},
+                ]
+            )
+        ]
+    ),
+}
+
+# Rules the schema cannot say (the hand check is stricter there by design).
+_CANNOT = {"duplicate finding ids", "duplicate candidate ids", "token newline"}
+
+
+def _schema_accepts(document: dict[str, Any]) -> bool:
     try:
         validate(document, "session-audit/slot/artifact.json")
     except Exception:
-        return
-    assert name in cannot
+        return False
+    return True
+
+
+def _hand_accepts(document: dict[str, Any]) -> bool:
+    try:
+        retroartifact._check_schema(copy.deepcopy(document))
+    except retroartifact._Reject:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("name", sorted(BAD_SCHEMA))
+def test_the_hand_check_agrees_with_the_schema_file(name: str) -> None:
+    """Both verdicts over the mutation grid: a refused document is refused by schemas/slot/
+    artifact.json too, except the rules the schema cannot say (id uniqueness, the 256 KB cap)."""
+    document = BAD_SCHEMA[name]
+    assert not _hand_accepts(document)
+    assert not _schema_accepts(document) or name in _CANNOT
+
+
+@pytest.mark.parametrize("name", sorted(GOOD_SCHEMA))
+def test_the_hand_check_accepts_what_the_schema_file_accepts(name: str) -> None:
+    """The boundary variants the schema allows are allowed by the hand check (a stricter hand
+    check would refuse good artifacts) and by the schema (so the variants stay honest)."""
+    document = GOOD_SCHEMA[name]
+    assert _schema_accepts(document)
+    assert _hand_accepts(document)
 
 
 def test_the_good_artifact_is_valid_for_the_schema_file() -> None:
@@ -747,3 +828,70 @@ def test_write_artifact_stores_the_envelope_and_the_figures() -> None:
     assert json.loads(dropped) == {"findings": 1, "candidates": 4} and redacted == 5
     with pytest.raises(sqlite3.IntegrityError):
         retroartifact.write_artifact(conn, RETRO, stored_artifact)
+
+
+# --- review fixes: estimated_usd rounding, the marker's redaction, null metrics ------------------
+
+
+@pytest.mark.parametrize(
+    ("estimated", "expected"),
+    [
+        (Decimal("0.12345"), 0.1235),  # half up (float(Decimal) would keep 0.12345)
+        (Decimal("0.00005"), 0.0001),
+        (Decimal("0.00004"), 0.0),
+        (Decimal("2.5"), 2.5),
+    ],
+)
+def test_the_stored_estimated_usd_is_rounded_half_up_to_four_decimals(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, estimated: Decimal, expected: float
+) -> None:
+    result = digest_result()
+    totals = Metrics(1, 1, 0, 0, 0, 0, 1000, 1, 1, 0, 0, estimated)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "digest_result",
+        lambda: DigestResult(result.sections, result.skipped, 0, 2, totals, (), 100, False),
+    )
+    assert stored(h.run())["metrics"]["total.estimated_usd"] == expected
+
+
+def test_a_marker_equal_to_a_masked_secret_is_stored_redacted_and_counted(h: Harness) -> None:
+    h.masks = [MARKER]
+    result = h.run()
+    envelope = stored(result)
+    assert MARKER not in json.dumps(envelope)
+    assert "[REDACTED:" in envelope["artifact"]["marker"]
+    assert result.artifact is not None and result.artifact.redacted == 1
+
+
+def test_a_marker_that_is_no_secret_is_stored_as_written(h: Harness) -> None:
+    assert stored(h.run())["artifact"]["marker"] == MARKER
+
+
+_REAL_DIGEST = digest_result
+
+
+def _null_active_digest() -> DigestResult:
+    base = _REAL_DIGEST()
+    nulled = tuple(
+        dataclasses.replace(s, metrics=dataclasses.replace(s.metrics, active_ms=None))
+        for s in base.sections
+    )
+    return DigestResult(nulled, base.skipped, 0, 2, base.totals, (), 100, False)
+
+
+def test_a_null_metric_has_no_key_and_a_finding_may_still_cite_it(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from session_audit import retroview
+
+    monkeypatch.setattr(sys.modules[__name__], "digest_result", _null_active_digest)
+    cited = {"kind": "metric", "ref": "s1.active_seconds"}
+    document = artifact(findings=[finding(evidence=[cited])], candidates=[])
+    envelope = stored(h.run(document))
+    assert "s1.active_seconds" not in envelope["metrics"]
+    [kept] = envelope["artifact"]["findings"]
+    assert kept["evidence"] == [cited]
+    # The reader decodes the stored finding and the metrics without the cited key.
+    assert retroview._finding(kept)["evidence"] == [cited]
+    assert "s1.active_seconds" not in retroview._metrics(envelope["metrics"])

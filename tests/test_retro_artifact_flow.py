@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from session_audit import cli, retroartifact, retrolaunch
+from session_audit import retro as retro_mod
 from session_audit.retroview import load_retro
 
 from .fake_claude_session import FakeClaudeSession
@@ -342,3 +343,215 @@ def test_a_done_run_reads_the_frozen_file_before_the_session_is_forgotten(
     monkeypatch.setattr(retrolaunch, "validate_and_store_artifact", spy)
     assert launch(capsys, gw).code == 0
     assert seen == ["before"] and CSID in json.dumps(cs.calls())
+
+
+# --- review fixes: expected marker, masks of the check, read-back ------------------------------
+
+
+def with_custom_skill(corpus: Corpus, tmp_path: Path, retro_extra: str = "") -> Path:
+    from .test_retro_plan import make_plugin
+
+    plugin = make_plugin(tmp_path / "custom", "custom", "review")
+    write_config(
+        corpus.home,
+        f"retro:\n  plugin_dirs:\n    - {plugin}\n{retro_extra}",
+    )
+    return plugin
+
+
+def run_custom(capsys: pytest.CaptureFixture[str], gw: RetroGateway) -> Any:
+    return launch(capsys, gw, "--skill", "custom:review")
+
+
+def test_the_bundled_skill_expects_the_bundled_marker_not_the_configured_one(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path)  # the bundled marker is MARKER; good() writes MARKER
+    write_config(corpus.home, "retro:\n  skill_marker: configured-marker-" + "e" * 8 + "\n")
+    assert launch(capsys, gw).code == 0
+
+
+def test_the_bundled_skill_rejects_the_configured_marker(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    configured = "configured-marker-" + "e" * 8
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path, lambda run: good(run, marker=configured))
+    write_config(corpus.home, f"retro:\n  skill_marker: {configured}\n")
+    error_of(launch(capsys, gw), 22, "marker_mismatch")
+
+
+def test_a_custom_skill_expects_its_configured_marker(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    configured = "custom-marker-" + "d" * 8
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path, lambda run: good(run, marker=configured))
+    with_custom_skill(corpus, tmp_path, f"  skill_marker: {configured}\n")
+    result = run_custom(capsys, gw)
+    assert result.code == 0, result.err
+
+
+def test_a_custom_skill_does_not_use_the_bundled_marker(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path)  # writes the bundled MARKER
+    with_custom_skill(corpus, tmp_path, "  skill_marker: custom-marker-" + "d" * 8 + "\n")
+    error_of(run_custom(capsys, gw), 22, "marker_mismatch")
+
+
+def test_a_custom_skill_without_a_marker_rejects_any_marker(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path)  # a marker is written
+    with_custom_skill(corpus, tmp_path)
+    error_of(run_custom(capsys, gw), 22, "marker_mismatch")
+
+
+def test_a_custom_skill_without_a_marker_accepts_an_artifact_without_one(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(
+        monkeypatch,
+        tmp_path,
+        lambda run: {k: v for k, v in good(run).items() if k != "marker"},
+    )
+    with_custom_skill(corpus, tmp_path)
+    result = run_custom(capsys, gw)
+    assert result.code == 0, result.err
+
+
+SECRET = "s3cr3t-" + "value-9876"
+
+
+def test_a_secret_in_a_mask_env_variable_is_redacted_and_counted_end_to_end(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AUDIT_PLAIN_NAME", SECRET)
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path, lambda run: good(run, summary=f"it leaked {SECRET} here"))
+    write_config(corpus.home, "redaction:\n  mask_env: [AUDIT_PLAIN_NAME]\n")
+    result = launch(capsys, gw)
+    assert result.code == 0, result.err
+    document = json.loads(result.out)
+    assert SECRET not in result.out and "[REDACTED:" in document["summary"]
+    assert the_retro(corpus.home)["redacted"] >= 1
+    stored = rows(corpus.home, "retro_artifacts")[0]["artifact"]
+    assert SECRET not in stored
+
+
+def test_the_check_redacts_with_the_masks_of_the_digest_not_os_environ(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path, lambda run: good(run, summary=f"it leaked {SECRET} here"))
+    real = retro_mod.prepare
+
+    def prepare(*a: Any, **kw: Any) -> Any:
+        return real(*a, **{**kw, "env": {"AUDIT_TOKEN": SECRET}})
+
+    monkeypatch.setattr(retro_mod, "prepare", prepare)
+    result = launch(capsys, gw)
+    assert result.code == 0, result.err
+    assert SECRET not in result.out and "[REDACTED:" in json.loads(result.out)["summary"]
+
+
+def test_a_failing_read_back_of_a_done_retro_only_notes_it(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path)
+
+    def boom(conn: Any, retro_id: str) -> Any:
+        raise RuntimeError("the read-back failed")
+
+    monkeypatch.setattr(retrolaunch, "load_retro", boom)
+    result = launch(capsys, gw)
+    assert result.code == 0 and result.out == ""
+    assert "could not be read back" in result.err
+    assert the_retro(corpus.home)["state"] == "done"
+
+
+def test_the_read_back_does_not_take_the_write_lock(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done", artifact=True)
+    freeze(monkeypatch, tmp_path)
+    real = retrolaunch.load_retro
+    writable: list[bool] = []
+
+    def spy(conn: Any, retro_id: str) -> Any:
+        try:
+            conn.execute("CREATE TABLE probe_write (x)")
+            writable.append(True)
+        except Exception:
+            writable.append(False)
+        return real(conn, retro_id)
+
+    monkeypatch.setattr(retrolaunch, "load_retro", spy)
+    assert launch(capsys, gw).code == 0
+    assert writable == [False]
