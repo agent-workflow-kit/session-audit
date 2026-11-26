@@ -159,6 +159,10 @@ def test_a_crash_at_every_step_of_the_run_then_recovery_ends_in_the_documented_s
     sessions = session_rows(corpus.home)
     assert (CSID in sessions) is has_session
     fired_before = len(payloads(retro_log))
+    need_forget = has_session and (
+        sessions[CSID]["cleanup_state"] in ("pending", "incomplete")
+        and sessions[CSID]["forgotten_at"] is None
+    )
     if has_session and sessions[CSID]["cleanup_state"] == "pending":
         plant_transcripts(corpus, sessions[CSID]["project_dir"])
     expire_lease(corpus.home)  # the holder is dead: its lease runs out
@@ -193,8 +197,8 @@ def test_a_crash_at_every_step_of_the_run_then_recovery_ends_in_the_documented_s
     assert again.recovered == [] and again.cleaned == 0 and not again.deferred
     assert len(cs.calls()) == calls
     assert len(payloads(retro_log)) == fired
-    if has_session:
-        assert "forget" in keys(cs)[before - 1 :] or final
+    forgets = [c for c in cs.calls()[before:] if c["key"] == "forget"]
+    assert len(forgets) == (1 if need_forget else 0)  # exactly the one the row still needed
     cs.assert_outputs_valid()
 
 
@@ -336,3 +340,83 @@ def test_the_patched_names_exist() -> None:
     for name in ("_mark_running", "_after_start", "_record", "_exec", "_collect", "_end"):
         assert callable(getattr(retrolaunch.Launcher, name))
     assert callable(retrorecovery.run_housekeeping)
+
+
+# --- a hard crash (os._exit) -------------------------------------------------------------------
+
+
+def _hard_crash_points() -> dict[str, Any]:
+    """Where a housekeeping child dies without any cleanup (no ``finally``, no ``atexit``)."""
+
+    def die(*_args: Any, **_kwargs: Any) -> Any:
+        os._exit(137)
+
+    def before_write(real: Any) -> Any:
+        return die
+
+    def after_write(real: Any) -> Any:
+        def wrapper(self: Any, state: str, *args: Any, **kwargs: Any) -> Any:
+            real(self, state, *args, **kwargs)
+            if state == "failed":
+                os._exit(137)
+
+        return wrapper
+
+    def after_call(key: str) -> Any:
+        def make(real: Any) -> Any:
+            def wrapper(ctx: Any, *argv: str, **kwargs: Any) -> Any:
+                result = real(ctx, *argv, **kwargs)
+                if argv and argv[0] == key:
+                    os._exit(137)
+                return result
+
+            return wrapper
+
+        return make
+
+    return {
+        "sql_write_after_takeover": (retrostate.Retro, "write", before_write),
+        "after_the_final_state_commit": (retrostate.Retro, "write", after_write),
+        "after_a_status_call": (retrorecovery, "call", after_call("status")),
+        "after_a_forget_call": (retrocleanup, "call", after_call("forget")),
+        "mid_cleanup": (retrocleanup, "set_cleanup_state", before_write),
+    }
+
+
+HARD_CRASHES = _hard_crash_points()
+
+
+@pytest.mark.parametrize("point", list(HARD_CRASHES))
+def test_a_housekeeping_killed_hard_is_converged_by_the_next_one(
+    corpus: Corpus, gw: RetroGateway, cs: FakeClaudeSession, tmp_path: Path, point: str
+) -> None:
+    from .recoveryhelp import hook_settings, orphan, plant_session
+    from .retrohelp import RETRO
+
+    plant_session(corpus.home)
+    orphan(corpus.home, csid=CSID)
+    plant_transcripts(corpus)
+    script_status(cs, live=True)
+    script_cleanup(cs)
+    settings, retro_log, _attention = hook_settings(tmp_path)
+    target, name, wrap = HARD_CRASHES[point]
+    pid = os.fork()
+    if pid == 0:  # the child: patch, run, and never return into pytest
+        try:
+            setattr(target, name, wrap(getattr(target, name)))
+            housekeep(gw, corpus, hooks=settings)
+        finally:
+            os._exit(0)
+    _pid, status = os.waitpid(pid, 0)  # reaped: the child exits by itself
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 137, status
+    expire_lease(corpus.home)
+    housekeep(gw, corpus, hooks=settings)
+    row = retro_rows(corpus.home)[RETRO]
+    assert (row["state"], row["reason"], row["lease_pid"]) == ("failed", "runner_lost", None)
+    session = session_rows(corpus.home)[CSID]
+    assert (session["cleanup_state"], session["forgotten_at"] is not None) == ("done", True)
+    foreign = [c for c in cs.calls() if c["key"] in ("stop", "forget") and c["argv"][1] != CSID]
+    assert foreign == []
+    assert len(payloads(retro_log)) <= 1  # post-retro at most once
+    again = housekeep(gw, corpus, hooks=settings)
+    assert again.recovered == [] and again.cleaned == 0

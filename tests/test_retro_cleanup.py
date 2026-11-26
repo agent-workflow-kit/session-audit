@@ -14,6 +14,7 @@ import pytest
 
 from session_audit import retrocleanup
 from session_audit.command import Context
+from session_audit.errors import CliError
 from session_audit.retrocleanup import cleanup, load_session_row
 
 from .fake_claude_session import (
@@ -32,6 +33,7 @@ from .recoveryhelp import (
     UUIDS,
     keys,
     not_found,
+    orphan,
     plant_local_files,
     plant_session,
     plant_transcripts,
@@ -168,6 +170,41 @@ def test_exit_20_stops_the_session_and_forgets_again(
     assert keys(cs) == ["forget", "stop", "forget"]
     [stop] = [c["argv"] for c in cs.calls() if c["key"] == "stop"]
     assert stop == ["stop", CSID, "--grace", "5s", "--json"]
+
+
+def test_a_forget_answering_20_again_after_the_stop_stays_pending(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    plant_session(corpus.home)
+    plant_transcripts(corpus)
+    script_cleanup(cs)
+    live = step(error_doc("refused", "live", reason="live"), exit=20)
+    cs.script("forget", live, live)
+    assert run_cleanup(gw, corpus)[0] == "pending"
+    assert keys(cs) == ["forget", "stop", "forget"]
+    assert session_rows(corpus.home)[CSID]["forgotten_at"] is None
+    assert (corpus.root / PROJECT).exists()
+
+
+def test_the_forgotten_time_is_not_written_when_the_lease_was_lost_after_the_forget(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    from session_audit.lease import lease_lost
+
+    class Lost:
+        def check_still_holder(self, conn: Any) -> None:
+            raise lease_lost()
+
+    plant_session(corpus.home)
+    script_cleanup(cs)
+    ctx = retro_ctx(gw, corpus)
+    try:
+        with pytest.raises(CliError):
+            retrocleanup.forget_session(ctx, ctx.store(), Lost(), CSID)
+    finally:
+        ctx.close()
+    assert keys(cs) == ["forget"]  # the call went out; the write behind it did not
+    assert session_rows(corpus.home)[CSID]["forgotten_at"] is None
 
 
 @pytest.mark.parametrize(
@@ -385,6 +422,54 @@ def test_a_project_directory_name_that_fails_the_grammar_removes_nothing(
 
 
 @pytest.mark.parametrize(
+    ("project", "directory"),
+    [
+        ("-state-sessions-cs-aaaaaaac-work", None),  # another session's project directory
+        ("-state-sessions-cs-aaaaaaab-work-x", None),  # not ending in the id's own name
+        ("-nonexistent", None),
+        (PROJECT, "/nonexistent/sessions/cs-aaaaaaac"),  # a session directory of another id
+        (PROJECT, "/nonexistent/sessions"),
+    ],
+)
+def test_a_row_whose_paths_do_not_name_its_own_session_is_skipped_without_a_call(
+    gw: RetroGateway,
+    corpus: Corpus,
+    cs: FakeClaudeSession,
+    tmp_path: Path,
+    project: str,
+    directory: str | None,
+) -> None:
+    made = plant_transcripts(corpus, project=project) if project != PROJECT else {}
+    plant_session(corpus.home, project=project, csession_dir=directory)
+    script_cleanup(cs)
+    state, _ = run_cleanup(gw, corpus, verify=True)
+    assert state == "skipped"
+    assert keys(cs) == []
+    assert all(path.exists() for path in made.values())
+
+
+def test_a_row_whose_retro_records_another_session_is_skipped_without_a_call(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    orphan(corpus.home, state="done", csid=OTHER)
+    made = plant_transcripts(corpus)
+    plant_session(corpus.home)
+    script_cleanup(cs)
+    assert run_cleanup(gw, corpus, verify=True)[0] == "skipped"
+    assert keys(cs) == [] and made["project"].exists()
+
+
+def test_a_row_whose_retro_has_no_session_recorded_is_skipped_without_a_call(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    orphan(corpus.home, state="done", csid=None)
+    plant_session(corpus.home)
+    script_cleanup(cs)
+    assert run_cleanup(gw, corpus, verify=True)[0] == "skipped"
+    assert keys(cs) == []
+
+
+@pytest.mark.parametrize(
     "csid", ["cs-../../x", "cs-AAAAAAAA", "../cs-aaaaaaab", "cs-aaaaaaa", "cs-aaaaaaabc", "-rf"]
 )
 def test_a_planted_csession_id_that_fails_the_grammar_is_skipped_without_a_call(
@@ -409,7 +494,7 @@ def test_a_planted_retro_id_that_is_not_an_id_is_skipped_and_no_path_is_built_fr
 
 @pytest.mark.parametrize(
     "directory",
-    ["../../etc", "/etc", "a\x00b", "x" * 4096, "relative/path"],
+    ["../../etc", "/etc", "a\x00b", "x" * 4000, "relative/path"],
 )
 def test_hostile_session_and_private_directories_are_only_looked_at(
     gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession, directory: str, tmp_path: Path
@@ -417,7 +502,7 @@ def test_hostile_session_and_private_directories_are_only_looked_at(
     guarded = tmp_path / "guarded"
     guarded.mkdir()
     (guarded / "file").write_text("keep")
-    plant_session(corpus.home, csession_dir=directory, private_dir=directory)
+    plant_session(corpus.home, csession_dir=f"{directory}/{CSID}", private_dir=directory)
     script_cleanup(cs)
     state, _ = run_cleanup(gw, corpus)
     assert state in ("incomplete", "done")  # claude-session's, observed by lstat, never removed
@@ -430,7 +515,7 @@ def test_a_symlinked_session_directory_is_present_not_followed(
     target = tmp_path / "precious"
     target.mkdir()
     (target / "file").write_text("keep")
-    link = corpus.home / "sessions-link"
+    link = corpus.home / CSID
     link.symlink_to(target)
     plant_session(corpus.home, csession_dir=str(link))
     script_cleanup(cs)

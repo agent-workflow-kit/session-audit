@@ -121,8 +121,11 @@ def run_housekeeping(ctx: Context, *, digests: bool = True) -> Result:
     except CliError:
         return result
     run = _Run(ctx, store, result)
-    run.recover_all()
-    run.retry_cleanups()
+    for phase, step in (("recovery", run.recover_all), ("cleanup", run.retry_cleanups)):
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - housekeeping never fails the command
+            note_failure(ctx, phase, exc)
     run.clear_stale_leases()
     run.expire(digests)
     return result
@@ -143,9 +146,7 @@ class _Run:
         return self.gw.monotonic() - self.started >= BOUND
 
     def defer(self) -> None:
-        if not self.result.deferred:
-            self.ctx.note(f"session-audit: warning: {WARN_DEFERRED}")
-        self.result.deferred = True
+        self.result.deferred = True  # the caller prints the warning once (``Result.warnings``)
 
     def cs_ok(self) -> bool:
         """claude-session is present and at least ``MIN_CS`` (checked once, when first needed;
@@ -211,6 +212,7 @@ class _Run:
         retro.csession_id = csid if is_csession_id(csid) else None  # only a valid id is logged
         retro.cost_usd = cost_usd
         skipped = False
+        verified: str | None = None  # the id whose labels were just checked (or that is gone)
         if csid is not None:
             decision = self._check_session(retro, csid)
             if decision is None:
@@ -218,7 +220,8 @@ class _Run:
                 self.defer()
                 return
             skipped = not decision
-        self._finish(retro, row[4], row[6], skipped=skipped)
+            verified = csid if decision else None
+        self._finish(retro, row[4], row[6], skipped=skipped, verified=verified)
 
     def _check_session(self, retro: Retro, csid: str) -> bool | None:
         """True: the session is the retro's own (a live run is stopped, or it is gone). False: it
@@ -245,7 +248,13 @@ class _Run:
         return True
 
     def _finish(
-        self, retro: Retro, digest_sha256: str | None, warnings: str, *, skipped: bool
+        self,
+        retro: Retro,
+        digest_sha256: str | None,
+        warnings: str,
+        *,
+        skipped: bool,
+        verified: str | None,
     ) -> None:
         gw, state_dir = self.gw, self.ctx.state_path()
         retrofiles.delete_local(gw, state_dir, retro.id)
@@ -259,12 +268,14 @@ class _Run:
         retro.write("failed", "runner_lost", columns=columns)
         if skipped:
             self.result.skipped.append(retro.id)
-        self._cleanup_rows_of(retro)
+        self._cleanup_rows_of(retro, verified)
         retro.post_hooks("failed", "runner_lost")
         retro.release()
         self.result.recovered.append(retro.id)
 
-    def _cleanup_rows_of(self, retro: Retro) -> None:
+    def _cleanup_rows_of(self, retro: Retro, verified: str | None) -> None:
+        """Clean the retro's active rows: only the row of the session ``_check_session`` just
+        verified goes without a second label check; every other row is verified first."""
         marks = ",".join("?" * len(ACTIVE))
         ids = [
             r[0]
@@ -279,7 +290,7 @@ class _Run:
             if session is None:
                 continue
             try:
-                state = cleanup(self.ctx, self.store, session, retro.lease)
+                state = cleanup(self.ctx, self.store, session, retro.lease, verify=csid != verified)
             except CliError:
                 retro.lease.raise_if_lost()
                 self.ctx.note("session-audit: warning: the cleanup did not finish")

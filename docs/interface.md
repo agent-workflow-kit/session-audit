@@ -698,11 +698,16 @@ cs_ok is read the first time an item needs it; a retro_sessions retry (below) is
 the label check also runs before the forget of a cleanup retry whose forgotten time is unset (a pending row of a final retro, or of a deleted one);
     a session claude-session no longer knows (status exit 10) goes on to the forget; a row whose retro is not final, or whose lease is live, is left to recovery or its holder
 cleanup removes session-env/<id> (the ids of <uuid>.jsonl files and <uuid>/ directories of the project directory) BEFORE the project directory
+a session-env/<id> entry that cannot be removed (another owner, an unusable session-env directory) keeps the project directory, and the row stays pending
+after a recovery, only the row of the session whose labels recovery just checked is cleaned without a second check; every other row of that retro
+    goes through cleanup with the label check first (status before any stop or forget)
+the <state>/tmp sweep and every other step of retro run housekeeping need an existing store; with no store nothing is done and nothing is created
+an exception in a whole phase (recovery, cleanup retries, even a failing database read) is a stderr warning naming its type; the later phases still run
 a final retro whose lease ran out (its process died before release) has the lease cleared by housekeeping
 a recovered retro logs retro_state with actor auto:recover; a final retro whose process died before its hooks is not fired for (no outbox)
 ```
 
-Recovery acts only on the `csession_id` stored before launch, after checking its labels; it never looks a session up by label. Recovery takes the retro's lease first, so two processes never recover the same retro. It ignores `harness.enabled` and `--no-harness` (it is the retro's own session). `validate` only warns (`retros_unrecovered`, `cleanup_incomplete`). An orphan can live up to a day when no retro runs; it is bounded by `retro.timeout`, because claude-session ends the run itself, so recovery is bookkeeping and cleanup, not the only stop. Expired digests are also deleted by every housekeeping step, so a user without the cron block keeps no digest past `retention.digests` once any retro runs.
+Recovery acts only on the `csession_id` stored before launch, after checking its labels; it never looks a session up by label. Recovery takes the retro's lease first, so two processes never recover the same retro. It ignores `harness.enabled` and `--no-harness` (it is the retro's own session). `validate` only warns (`retros_unrecovered`, `cleanup_incomplete`). An orphan can live up to a day when no retro runs; it is bounded by `retro.timeout`, because claude-session ends the run itself, so recovery is bookkeeping and cleanup, not the only stop. Expired digests are also deleted by every `retro run` housekeeping step (`prune` does it through its `retention.retros` rule), so a user without the cron block keeps no digest past `retention.digests` once any retro runs.
 
 **Signals.** Handlers for SIGINT, SIGTERM and SIGHUP are installed before step 13 (copy):
 
@@ -928,7 +933,9 @@ def collect(r):                                   # after exec returns; never in
     store r.cost_usd, r.num_turns, r.sandbox_active, r.outcome from st.run; return st   # validation reads st.run.report
 def cleanup(rs):                                  # rs: a retro_sessions row; idempotent; housekeeping repeats it
     if rs.cleanup not in ("pending", "incomplete"): return
+    if not row_binds_its_own_paths(rs): rs.cleanup = "skipped"; return          # nothing is touched
     if rs.forgotten_at is null:
+        if housekeeping and cs("status", ...) shows no owner/retro labels of rs.retro_id: rs.cleanup = "skipped"; return
         out, rc = cs("forget", rs.csession_id, "--purge", "--json")
         if rc == 20: cs("stop", rs.csession_id, "--grace", "5s", "--json"); out, rc = cs("forget", rs.csession_id, "--purge", "--json")
         if rc == 10 or (rc in (0, 12) and out is a forget object whose forgotten list holds rs.csession_id):
@@ -939,8 +946,10 @@ def cleanup(rs):                                  # rs: a retro_sessions row; id
     if retro.remove_run_transcripts and rs.project_dir:
         for root in transcript roots (opened as in Ingest rules 3):
             ids = [n[:-6] for n in names(root/rs.project_dir) if n.endswith(".jsonl") and UUID.fullmatch(n[:-6])]
-            files_ok &= remove_tree(root, rs.project_dir)        # the whole directory: <uuid>.jsonl, <uuid>/, memory/
-            for i in ids: files_ok &= remove_tree(claude_config_dir, "session-env/" + i)
+            for i in ids: files_ok &= remove_tree(claude_config_dir, "session-env/" + i)   # first: the ids are read from the directory
+            if every session-env entry is gone:                  # else the directory stays and the row stays pending
+                files_ok &= remove_tree(root, rs.project_dir)    # the whole directory: <uuid>.jsonl, <uuid>/, memory/
+            else: files_ok = False
     files_ok &= delete_local(rs.retro_id)
     rs.cleanup = "pending" if not files_ok else ("done" if purged else "incomplete")
 def remove_tree(parent, rel):                     # absent: True; fd-based; never follows a symlink
@@ -951,6 +960,9 @@ def remove_tree(parent, rel):                     # absent: True; fd-based; neve
 def delete_local(retro_id): remove prompts/<retro_id>/ and outcomes/<retro_id>.json; return True when both are gone
 claude_config_dir = $CLAUDE_CONFIG_DIR when set and absolute, else ~/.claude
 project_dir must match ^[A-Za-z0-9-]{1,200}$ (it is project_dir_name of the session's work directory, Retro launch item 3); a row that fails it is marked skipped and nothing is removed
+row_binds_its_own_paths(rs) = csession_id and retro_id match their grammars, project_dir ends with "-<csession_id>-work" (the encoding of
+    <sessions root>/<id>/work), the last component of csession_dir is the csession id, and, when the retro still has a row,
+    retros.csession_id == rs.csession_id (a deleted retro has no row: that check is skipped); a row that fails any of it is skipped, no call is made
 ```
 
 `pending` and `incomplete` rows are retried by housekeeping (`retro run` step 5 and `prune`), whether or not the retro row still exists; `incomplete` means only claude-session's own copy remains, and turns `done` once claude-session's `reconcile` has removed it. `skipped` means recovery found a session without the tool's labels and touched nothing. `validate` warns `cleanup_incomplete` while a row is `pending` or `incomplete` for more than a day. With `retro.remove_run_transcripts: false` the Retro object's `warnings` includes `transcripts_kept`.
@@ -1222,7 +1234,7 @@ order of a real run: sessions (ingest lease), harness_runs, retros and digests, 
     entry, wal_checkpoint(TRUNCATE) (a busy checkpoint is exit 12 retryable; it is also attempted when a step failed)
 ```
 
-It reports counts per table. It never touches transcripts, which belong to Claude Code. `retro delete` removes one retro and its files at once. Expired digests are also deleted by every `retro run` housekeeping step.
+It reports counts per table. It never touches Claude Code's transcripts, which belong to Claude Code, except a retro's own project directories, through cleanup. `retro delete` removes one retro and its files at once. Expired digests are also deleted by every `retro run` housekeeping step.
 
 ## Cron
 
@@ -1288,6 +1300,8 @@ Linux and WSL (Ubuntu) are tested. macOS is expected to work: the roots, `flock`
 - A crash or SIGKILL between `start` returning and the id being stored, a `start` that times out or is signaled after allocating without printing its id, and any exit 12 of `start` other than `launch_failed` whose output holds no id leave a pending claude-session session the tool never recorded; it ends `never_adopted` after claude-session's `lost_grace` and claude-session's `reconcile` removes it 30 days later, and until then it keeps the staged copy of the digest (recovery never looks a session up by label or by scanning). When the id was printed, the tool records it and cleans up as for `launch_failed`.
 - Lease liveness is the holder's PID with its start time and nothing stronger: a process in another PID namespace or host that shares the state directory looks dead and its lease is taken over (not supported), and a machine suspend can pass `expires_at` while the holder lives, so the next run recovers a healthy retro and the holder's compare-and-set write stops it.
 - The one distinct claude-session id token the tool picks from the output of a failed `start` (not a parsed document) is validated (id, directory, project directory name) and checked against ids recorded for another retro, then recorded and forgotten, with no check that the session belongs to this launch; a hostile claude-session could name an id it does not own only if the id is not recorded by another retro.
+- Removal never crosses to a different device (`st_dev`), but a bind mount of the same filesystem inside a retro's own project directory looks like an ordinary directory; making one needs root or a user-namespace mount made inside the retro's own tree.
+- A crash after the final-state commit of a recovery but before its log append loses the `runner_lost` log entry for good (a final retro is never recovered again), like the lost `post-retro` and `post-attention` hooks.
 - The project directory is matched by its exact encoded name; a same-user process that creates another directory encoding to the same name (it needs the random csession id) could have it removed.
 - The cron env-file is sourced by the shell; a file its owner makes writable after install is run as shell code until `validate` reports it.
 - `st_nlink == 1` on the opened descriptor cannot exclude a same-user hard-link-then-unlink race in the window between `openat` and `fstat` (the file then looks like it has one link). The owner check and the kernel's `protected_hardlinks` limit what such a process can point the tool at; the tool only reads the file.

@@ -8,8 +8,10 @@ recovery): ``Collected`` or None when the call or the document fails.
 in order (a crash between two of them is repeated from the top; every step is observed, never
 assumed)::
 
-    0 check   the row's csession id, project directory name and retro id are well formed, else the
-              row is ``skipped`` and nothing is touched (a planted or damaged row)
+    0 check   the row's csession id, project directory name and retro id are well formed, the
+              project directory ends with ``-<id>-work``, the session directory is named by the
+              id and the retro's own row (when it has one) records this id, else the row is
+              ``skipped`` and nothing is touched (a planted or damaged row)
     1 verify  (housekeeping only, forgotten time unset) ``status``: a session without the tool's
               owner and retro labels is ``skipped`` and never forgotten; a call that fails defers
     2 forget  ``forget --purge`` (``stop`` and a second ``forget`` on exit 20); the forgotten time
@@ -71,7 +73,7 @@ __all__ = [
 CALL_TIMEOUT = 60.0  # list, status, forget and stop (Retro launch item 6)
 OUTPUT_LIMIT = 1024 * 1024
 PROJECT_DIR = re.compile(r"[A-Za-z0-9-]{1,200}", re.ASCII)
-RETRO_ID = re.compile(r"ra-[a-z2-7]{8}", re.ASCII)
+RETRO_ID = retrofiles.RETRO_ID
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.ASCII)
 OWNER_LABEL = "owner=session-audit"
 ACTIVE = ("pending", "incomplete")
@@ -314,12 +316,24 @@ def remove_run_transcripts(ctx: Context, project_dir: str) -> bool:
 # --- the step list --------------------------------------------------------------------------
 
 
-def _row_is_well_formed(row: SessionRow) -> bool:
-    return (
+def _row_is_well_formed(store: Store, row: SessionRow) -> bool:
+    """The row binds its own paths: the project directory is the encoding of
+    ``<sessions root>/<id>/work`` (so it ends with ``-<id>-work``), the session directory's last
+    component is the id, and the retro it names (when it still has a row) records this id."""
+    if not (
         is_csession_id(row.csession_id)
         and bool(PROJECT_DIR.fullmatch(row.project_dir))
         and bool(RETRO_ID.fullmatch(row.retro_id))
-    )
+    ):
+        return False
+    if not row.project_dir.endswith(f"-{row.csession_id}-work"):
+        return False
+    if os.path.basename(row.csession_dir) != row.csession_id:
+        return False
+    found = store.conn.execute(
+        "SELECT csession_id FROM retros WHERE id = ?", (row.retro_id,)
+    ).fetchone()
+    return found is None or found[0] == row.csession_id  # a deleted retro has no row
 
 
 def set_cleanup_state(store: Store, guard: Guard | None, csession_id: str, state: str) -> None:
@@ -347,7 +361,7 @@ def cleanup(
     as it was). Raises only what a store write or the guard raises (``lease_lost``)."""
     if row.cleanup_state not in ACTIVE:
         return row.cleanup_state
-    if not _row_is_well_formed(row):
+    if not _row_is_well_formed(store, row):
         set_cleanup_state(store, guard, row.csession_id, "skipped")
         return "skipped"
     forgotten = row.forgotten_at is not None

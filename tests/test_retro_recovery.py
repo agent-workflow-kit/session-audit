@@ -6,19 +6,21 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from session_audit import cli, lease, retrorecovery
+from session_audit import cli, lease, retrocleanup, retrorecovery
 from session_audit.lease import identity
 
 from .fake_claude_session import (
     FakeClaudeSession,
     error_doc,
     plan_doc,
+    status_doc,
     step,
     version_step,
 )
@@ -239,6 +241,83 @@ def test_a_session_without_the_tools_labels_is_skipped_and_nothing_is_touched(
     assert json.loads(row["warnings"]) == ["recovery_skipped"]
     assert made["project"].exists()  # not removed: the session is not the tool's own
     assert len(payloads(retro_log)) == 1  # it still reached a final state
+
+
+OTHER_PROJECT = "-state-sessions-cs-aaaaaaac-work"
+
+
+def trust_every_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row check of the cleanup (``retros.csession_id`` names the row) alone already skips a
+    second row; switch it off to test the label check of recovery by itself."""
+    monkeypatch.setattr(retrocleanup, "_row_is_well_formed", lambda store, row: True)
+
+
+def script_status_of(cs: FakeClaudeSession, csid: str, labels: list[str]) -> None:
+    doc = status_doc(csid, outcome="done", labels=labels, sandbox_active=True)
+    cs.script(f"status {csid}", step(doc))
+
+
+def test_a_second_row_of_a_recovered_retro_is_verified_before_any_forget(
+    gw: RetroGateway,
+    corpus: Corpus,
+    cs: FakeClaudeSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trust_every_row(monkeypatch)
+    running_with_session(corpus)
+    plant_session(corpus.home, OTHER, RETRO, project=OTHER_PROJECT)
+    own = ["owner=session-audit", f"retro={RETRO}"]
+    script_status_of(cs, CSID, own)
+    script_status_of(cs, OTHER, own)
+    script_cleanup(cs)
+    housekeep(gw, corpus)
+    calls = [(c["key"].split()[0], c["argv"][1]) for c in cs.calls() if c["key"] != "--version"]
+    assert calls.index(("status", OTHER)) < calls.index(("forget", OTHER))
+    assert calls.index(("status", CSID)) < calls.index(("forget", CSID))
+    assert calls.count(("status", CSID)) == 1  # the recovered session is not asked twice
+
+
+def test_a_second_row_with_foreign_labels_is_skipped_and_never_forgotten(
+    gw: RetroGateway,
+    corpus: Corpus,
+    cs: FakeClaudeSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trust_every_row(monkeypatch)
+    running_with_session(corpus)
+    plant_session(corpus.home, OTHER, RETRO, project=OTHER_PROJECT)
+    script_status_of(cs, CSID, ["owner=session-audit", f"retro={RETRO}"])
+    script_status_of(cs, OTHER, ["owner=someone-else"])
+    script_cleanup(cs)
+    housekeep(gw, corpus)
+    forgotten = [c["argv"][1] for c in cs.calls() if c["key"].startswith("forget")]
+    assert forgotten == [CSID]
+    assert session_rows(corpus.home)[OTHER]["cleanup_state"] == "skipped"
+    assert session_rows(corpus.home)[OTHER]["forgotten_at"] is None
+
+
+def test_a_row_of_a_retro_without_a_recorded_session_is_verified_and_skipped_on_foreign_labels(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trust_every_row(monkeypatch)
+    orphan(corpus.home, csid=None)
+    plant_session(corpus.home, CSID, RETRO)
+    script_status_of(cs, CSID, ["owner=someone-else"])
+    script_cleanup(cs)
+    housekeep(gw, corpus)
+    assert keys(cs) == [f"status {CSID}"]
+    assert session_rows(corpus.home)[CSID]["cleanup_state"] == "skipped"
+
+
+def test_a_row_of_a_retro_without_a_recorded_session_is_skipped_by_the_row_check_without_a_call(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    orphan(corpus.home, csid=None)
+    plant_session(corpus.home, CSID, RETRO)
+    script_cleanup(cs)
+    housekeep(gw, corpus)
+    assert keys(cs) == []
+    assert session_rows(corpus.home)[CSID]["cleanup_state"] == "skipped"
 
 
 @pytest.mark.parametrize("planted", ["no-row", "other-retro", "bad-id"])
@@ -765,6 +844,7 @@ def test_prune_without_claude_session_defers_with_a_warning_and_still_runs_reten
     assert code == 0, err
     validate(doc, "session-audit/cli/prune.json")
     assert doc["warnings"] == ["recovery_deferred"] and doc["recoveries"] == [rid(1)]
+    assert "recovery_deferred" not in err  # prune reports it in `warnings` only (once)
     assert retro_rows(corpus.home)[RETRO]["state"] == "running"
     assert not stale.exists()  # local deletes still run
 
@@ -785,3 +865,81 @@ def test_housekeeping_never_changes_the_exit_code(
     code, doc, err = prune(capsys, gw)
     assert code == 0 and doc["recoveries"] == []
     assert "recovery failed (RuntimeError)" in err and "boom" not in err
+
+
+@pytest.mark.parametrize("phase", ["recover_all", "retry_cleanups"])
+def test_a_database_error_in_a_housekeeping_phase_never_changes_the_exit_code(
+    gw: RetroGateway,
+    corpus: Corpus,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+
+    orphan(corpus.home, state="digesting")
+    tmp = make_tmp(corpus)
+    stale = tmp / "plan-aaaaaaaaaaaaaaaa"
+    stale.mkdir(mode=0o700)
+    touch_old(stale, 7200 + (time.time() - gw.now().timestamp()))
+
+    def explode(self: Any) -> None:
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(retrorecovery._Run, phase, explode)
+    code, doc, err = prune(capsys, gw)
+    assert code == 0 and doc is not None
+    assert "DatabaseError" in err and "malformed" not in err
+    assert not stale.exists()  # the later steps still ran
+
+
+def test_a_failing_claude_session_check_never_changes_the_exit_code(
+    gw: RetroGateway,
+    corpus: Corpus,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    running_with_session(corpus)
+
+    def explode(self: Any) -> bool:
+        raise OSError("no such command")
+
+    monkeypatch.setattr(retrorecovery._Run, "cs_ok", explode)
+    code, _doc, err = prune(capsys, gw)
+    assert code == 0 and "failed (" in err
+
+
+def test_the_recovered_state_fits_the_retro_show_schema(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    """``retro show`` is not wired yet and ``retroview.load_retro`` builds ``done`` retros only,
+    so the document of a recovered retro is a stored ``done`` one with the recovered row's own
+    state, reason, warnings, times and session laid over it."""
+    from session_audit.retroview import load_retro
+
+    from .retrohelp import add_retro
+
+    running_with_session(corpus)
+    script_status(cs, labels=["owner=someone-else"], live=True)  # not the tool's own: skipped
+    script_cleanup(cs)
+    assert housekeep(gw, corpus).skipped == [RETRO]
+    recovered = retro_rows(corpus.home)[RETRO]
+    add_retro(corpus.home, "b" * 64, retro_id=rid(9))
+    conn = connect(corpus.home)
+    try:
+        document = load_retro(conn, rid(9))
+    finally:
+        conn.close()
+    assert document is not None
+    document.update(
+        id=RETRO,
+        state=recovered["state"],
+        reason=recovered["reason"],
+        warnings=json.loads(recovered["warnings"]),
+        finished_at=document["updated_at"],
+        csession_id=recovered["csession_id"],
+    )
+    validate(document, "session-audit/cli/retro-show.json")
+    assert (document["state"], document["reason"]) == ("failed", "runner_lost")
+    assert document["warnings"] == ["recovery_skipped"]
