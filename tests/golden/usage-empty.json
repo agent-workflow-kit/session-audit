@@ -1,0 +1,31 @@
+{
+  "by": [
+    "day"
+  ],
+  "rows": [],
+  "store": {
+    "last_complete_ingest_at": null,
+    "last_ingest_at": null
+  },
+  "totals": {
+    "active_seconds": null,
+    "cost": {
+      "estimated_usd": 0.0,
+      "reported_usd": null,
+      "unknown_tokens": 0
+    },
+    "denials": 0,
+    "flags": [],
+    "interruptions": 0,
+    "sessions": 0,
+    "tokens": {
+      "cache_read": 0,
+      "cache_write": 0,
+      "input": 0,
+      "output": 0
+    },
+    "tool_calls": 0,
+    "tool_errors": 0
+  },
+  "truncated": false
+}
