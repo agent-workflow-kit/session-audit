@@ -29,6 +29,7 @@ from .retrohelp import (
     live_lease,
     mtime_of,
     retro_ctx,
+    rid,
     seed,
     touch,
 )
@@ -258,10 +259,11 @@ def test_a_changed_key_is_not_reused(
     [
         {"summary": None},  # no artifact row
         {"summary": ""},
-        {"scope": "[]"},
-        {"scope": "{}"},
+        {"resolved_scope": "[]"},
+        {"resolved_scope": "{}"},
+        {"resolved_scope": '{"flags": {}, "sessions": [], "since": null, "until": null}'},
         {"session_map": "{}"},
-        {"session_map": '{"sessions": [], "skipped": [], "coverage": {}, "metrics": {}}'},
+        {"session_map": '{"sessions": []}'},
         {"counts": "{}"},
         {"warnings": '["bogus"]'},
         {"warnings": '"x"'},
@@ -556,7 +558,7 @@ def test_prefixes_of_different_lengths_and_case_resolve_to_one_session(
     two(gw, corpus, capsys)
     keys = {
         prepare(gw, corpus, session=[p]).key
-        for p in (S1[:8], S1[:13], S1[:23], S1, S1[:8].upper() if False else S1[:8])
+        for p in (S1[:8], S1[:13], S1[:23], S1, S1[:8].upper(), S1.upper())
     }
     assert len(keys) == 1
 
@@ -588,8 +590,11 @@ def test_property_reusing_a_done_retro_requires_an_identical_key(
         current = key_of(gw, corpus, session=[S1])
         reused = prepare(gw, corpus, session=[S1]).reuse
         assert (reused is not None) == (current == key_of_stored(corpus))
-        if reused is not None:
-            assert reused["key"] == current
+        assert reused is None  # the text differs from the stored one, so the key does
+    seed(corpus, S1, "first")  # the original bytes again: the original key, so the retro is reused
+    ingested(capsys, gw)
+    restored = prepare(gw, corpus, session=[S1]).reuse
+    assert restored is not None and restored["key"] == key_of_stored(corpus)
 
 
 def key_of_stored(corpus: Corpus) -> str:
@@ -598,3 +603,160 @@ def key_of_stored(corpus: Corpus) -> str:
         return str(conn.execute("SELECT key FROM retros").fetchone()[0])
     finally:
         conn.close()
+
+
+# --- review round 1 -------------------------------------------------------------------------------
+
+
+def test_the_summary_of_a_reused_retro_is_one_sanitized_line(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from session_audit import cli
+
+    two(gw, corpus, capsys)
+    summary = "first\nforged: line\rcarriage\x1b[31mred\x1b[0m\ttab"
+    add_retro(corpus.home, key_of(gw, corpus, session=[S1]), summary=summary)
+    capsys.readouterr()
+    code = cli.main(["retro", "run", "--session", S1], gateway=gw, stdin_is_tty=False)
+    out = capsys.readouterr().out
+    lines = out.split("\n")
+    assert code == 0 and len(lines) == 3 and lines[2] == ""  # two lines and the final newline
+    assert lines[1].startswith("summary: first")
+    assert "\r" not in out and "\x1b" not in out and "\t" not in out
+    assert not any(line.startswith("forged") for line in lines)
+
+
+def test_a_forged_running_id_is_never_running_and_a_forged_again_of_never_recorded(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two(gw, corpus, capsys)
+    key = key_of(gw, corpus, session=[S1])
+    add_retro(
+        corpus.home, key, retro_id="ra-ABCDEFGH", state="digesting", lease=live_lease(gw),
+        summary=None,
+    )  # fmt: skip
+    add_retro(
+        corpus.home, key, retro_id="ra-bad!bad!", state="failed", reason="no_artifact",
+        created=50_000, summary=None,
+    )  # fmt: skip
+    dry = prepare(gw, corpus, session=[S1], dry_run=True)
+    assert dry.running_retro is None
+    prepared = prepare(gw, corpus, session=[S1], again=True)  # not refused as already_running
+    assert prepared.again_of is None
+
+
+def test_sixty_newer_dead_leases_do_not_hide_an_older_live_one(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two(gw, corpus, capsys)
+    key = key_of(gw, corpus, session=[S1])
+    add_retro(
+        corpus.home, key, retro_id=rid(1), state="running", lease=live_lease(gw), created=1,
+        summary=None,
+    )  # fmt: skip
+    for n in range(60):
+        add_retro(
+            corpus.home, key, retro_id=rid(100 + n), state="digesting", created=10_000 + n,
+            lease=(2**30 + n, "never-a-start", 4_102_444_800_000), summary=None,
+        )  # fmt: skip
+    result = run_retro(capsys, gw, "--session", S1)
+    assert result.code == 20 and result.doc["error"]["details"] == {
+        "reason": "already_running",
+        "retro_id": rid(1),
+    }
+
+
+def test_sixty_newer_damaged_done_rows_do_not_hide_an_older_valid_one(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two(gw, corpus, capsys)
+    key = key_of(gw, corpus, session=[S1])
+    add_retro(corpus.home, key, retro_id=rid(1), created=1)
+    conn = connect(corpus.home)
+    for n in range(30):  # no artifact row at all
+        conn.execute(
+            "INSERT INTO retros (id, key, state, created_at) VALUES (?, ?, 'done', ?)",
+            (rid(100 + n), key, 10_000 + n),
+        )
+    for n in range(30):  # an id that is not a retro id
+        conn.execute(
+            "INSERT INTO retros (id, key, state, created_at) VALUES (?, ?, 'done', ?)",
+            (f"ra-{n:08d}", key, 20_000 + n),
+        )
+    conn.commit()
+    conn.close()
+    result = run_retro(capsys, gw, "--session", S1)
+    assert result.code == 0 and result.doc["id"] == rid(1)
+
+
+def test_a_done_row_that_did_not_fit_is_counted_in_one_stderr_note(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two(gw, corpus, capsys)
+    key = key_of(gw, corpus, session=[S1])
+    add_retro(corpus.home, key, retro_id=rid(1), resolved_scope="{}")
+    add_retro(corpus.home, key, retro_id=rid(2), resolved_scope="{}", created=2_000)
+    prepared = prepare(gw, corpus, session=[S1])
+    assert prepared.unfit_retros == 2 and prepared.reuse is None
+    result = run_retro(capsys, gw, "--session", S1)
+    assert result.code == 1
+    assert "2 stored retro(s) with this key did not fit and were not reused" in result.err
+    assert "warning: 2 stored" not in result.err and "ra-" not in result.err
+    again = run_retro(capsys, gw, "--session", S1, "--again")
+    assert "did not fit" not in again.err  # the user asked for a new run anyway
+    # A usable retro of the key means no note.
+    add_retro(corpus.home, key, retro_id=rid(3), created=3_000)
+    assert prepare(gw, corpus, session=[S1]).unfit_retros == 0
+    assert "did not fit" not in run_retro(capsys, gw, "--session", S1).err
+
+
+def test_warnings_hold_only_closed_tokens_and_notes_the_free_text(
+    corpus: Corpus,
+    gw: RetroGateway,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dataclasses
+
+    two(gw, corpus, capsys)
+    real = retro.build_digest
+
+    def build(*args: object, **kwargs: object):  # noqa: ANN202
+        result = real(*args, **kwargs)  # type: ignore[arg-type]
+        return dataclasses.replace(result, warnings=("discovery said \x1b[31mred",))
+
+    monkeypatch.setattr(retro, "build_digest", build)
+    held = hold_ingest(gw, corpus)
+    prepared = prepare(gw, corpus, project="/work")
+    held.release()
+    assert prepared.warnings == ("ingest_busy",)
+    assert prepared.notes == ("discovery said \x1b[31mred",)
+    # Free text goes to stderr through the sanitizer.
+    result = run_retro(capsys, gw, "--project", "/work")
+    assert "\x1b" not in result.err and "discovery said" in result.err
+
+
+def test_the_last_batch_may_reach_past_the_kept_sessions_and_over_cap_adds_the_rest(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ids = [f"0000000{n}-0000-4000-8000-000000000000" for n in range(1, 9)]
+    paths = {sid: seed(corpus, sid) for sid in ids}
+    touch(paths[ids[0]], mtime_of(gw, 60))  # the first candidate is live
+    ingested(capsys, gw)
+    prepared = prepare(gw, corpus, project="/work", retro_settings={"max_sessions": 4})
+    # Batches: 4 candidates (3 kept), then 2 more (5 kept: one over the cap, counted by the
+    # build), then the 2 never offered.
+    assert prepared.kept == 4 and prepared.matched_total == 8
+    assert prepared.digest.over_cap == 1 and prepared.over_cap == 1 + 2
+    assert [(s.session_id, s.reason) for s in prepared.skipped] == [(ids[0], "live")]
+
+
+def test_a_stored_retro_is_reported_by_a_dry_run_and_the_explicit_ids_are_carried(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    two(gw, corpus, capsys)
+    add_retro(corpus.home, key_of(gw, corpus, session=[S1]))
+    dry = prepare(gw, corpus, session=[S1[:8]], dry_run=True)
+    assert dry.reused_retro == "ra-abcdefgh" and dry.reuse is None and dry.running_retro is None
+    assert dry.explicit_sessions == (S1,)
+    assert prepare(gw, corpus, project="/work").explicit_sessions == ()

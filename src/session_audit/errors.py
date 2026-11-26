@@ -83,6 +83,7 @@ REASONS: dict[str, set[str]] = {
         "session_not_started",
         "claude_session_error",
         "crontab_unavailable",
+        "ingest_busy",
     },
     "artifact_invalid": {
         "no_artifact",

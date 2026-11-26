@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -49,7 +50,12 @@ from .sessionquery import read_store, snapshot_index
 
 __all__ = ["KeyState", "NoSteps", "Prepared", "Steps", "lookup_key", "prepare"]
 
-LOOKUP_LIMIT = 50  # rows of one state read per key: a store full of one key stays bounded
+LOOKUP_LIMIT = 50  # ``done`` rows read per key: a store full of one key stays bounded
+LEASE_LOOKUP_LIMIT = 1000  # non-final rows with an unexpired lease examined per key
+UNFIT_COUNT_LIMIT = 1000  # ``done`` rows of one key counted for the "did not fit" note
+_RETRO_ID = re.compile(r"ra-[a-z2-7]{8}", re.ASCII)
+# The same shape as a SQL GLOB, so a forged id is filtered before the LIMIT, not after it.
+_ID_GLOB = "ra-" + "[a-z2-7]" * 8
 NON_FINAL = ("digesting", "running", "validating")
 FINAL = ("done", "failed", "escalated", "canceled")
 
@@ -83,6 +89,7 @@ class KeyState:
     reused: dict[str, Any] | None
     running: str | None
     previous: str | None
+    unfit: int = 0  # ``done`` rows with the key when none of them could be reused (0 otherwise)
 
 
 @dataclass(frozen=True)
@@ -99,7 +106,9 @@ class Prepared:
     matched_total: int
     over_cap: int
     skipped: tuple[Skipped, ...]
-    warnings: tuple[str, ...]
+    warnings: tuple[str, ...]  # closed tokens only (``ingest_busy``): what the row stores
+    notes: tuple[str, ...]  # free text for stderr (digest discovery warnings), never stored
+    unfit_retros: int  # stored ``done`` retros with this key that did not fit and were not reused
     projects: int
     again_of: str | None
     reused_retro: str | None  # an id, for the dry-run plan
@@ -130,10 +139,10 @@ def check_config(ctx: Context, env: Mapping[str, str]) -> None:
             details={"reason": "config_unsafe", "field": "retro.permission_profile"},
             hint="Its file and directories must be yours and not group or other writable.",
         )
-    if ctx.dry_run:
-        read_store(ctx, lambda conn: None)  # a newer store is exit 20; nothing is created
-    else:
-        ctx.store()  # opens (and migrates) the store: store_newer, store_unwritable
+    # A newer store is exit 20 for a real run too, and nothing is created: the first writer (a
+    # refresh at step 6 or 8, the row of step 13) creates the store, after every check that can
+    # still fail without storing anything.
+    read_store(ctx, lambda conn: None)
 
 
 def check_claude_session(ctx: Context) -> None:
@@ -158,35 +167,52 @@ def _lease_of(row: tuple[Any, ...]) -> LeaseState | None:
 
 
 def lookup_key(ctx: Context, conn: sqlite3.Connection, key: str) -> KeyState:
-    """The retros with ``key``. A ``done`` row that does not fit the stored layout is skipped (a
-    damaged row is never reused); a lease with the wrong types is not live."""
+    """The retros with ``key``. Rows whose id does not have the shape of a retro id are never
+    looked at (filtered in SQL before every LIMIT, so forged or damaged rows cannot crowd out a
+    real one). A ``done`` row that does not fit the stored layout is skipped (a damaged row is
+    never reused); a lease with the wrong types or an expired lease is not live."""
     reused: dict[str, Any] | None = None
     for (retro_id,) in conn.execute(
-        "SELECT id FROM retros WHERE key = ? AND state = 'done' "
+        "SELECT id FROM retros WHERE key = ? AND state = 'done' AND reason IS NULL "
+        "AND typeof(id) = 'text' AND id GLOB ? "
+        "AND EXISTS (SELECT 1 FROM retro_artifacts a WHERE a.retro_id = retros.id "
+        "AND typeof(a.summary) = 'text' AND length(a.summary) > 0) "
         "ORDER BY created_at DESC, id DESC LIMIT ?",
-        (key, LOOKUP_LIMIT),
+        (key, _ID_GLOB, LOOKUP_LIMIT),
     ).fetchall():
         reused = load_retro(conn, retro_id)
         if reused is not None:
             break
+    unfit = 0
+    if reused is None:
+        unfit = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM retros WHERE key = ? AND state = 'done' LIMIT ?)",
+            (key, UNFIT_COUNT_LIMIT),
+        ).fetchone()[0]
     running: str | None = None
     marks = ",".join("?" for _ in NON_FINAL)
+    now = int(ctx.gateway.now().timestamp() * 1000)
+    # Only a row with a typed, unexpired lease can be live; the newest expiry comes first.
     for retro_id, *lease in conn.execute(
         "SELECT id, lease_pid, lease_start, lease_expires_at FROM retros "
-        f"WHERE key = ? AND state IN ({marks}) ORDER BY created_at DESC, id DESC LIMIT ?",
-        (key, *NON_FINAL, LOOKUP_LIMIT),
+        f"WHERE key = ? AND state IN ({marks}) AND typeof(id) = 'text' AND id GLOB ? "
+        "AND typeof(lease_pid) = 'integer' AND typeof(lease_start) = 'text' "
+        "AND typeof(lease_expires_at) = 'integer' AND lease_expires_at > ? "
+        "ORDER BY lease_expires_at DESC, created_at DESC, id DESC LIMIT ?",
+        (key, *NON_FINAL, _ID_GLOB, now, LEASE_LOOKUP_LIMIT),
     ).fetchall():
         state = _lease_of(tuple(lease))
-        if state is not None and is_live(ctx.gateway, state):
+        if state is not None and _RETRO_ID.fullmatch(retro_id) and is_live(ctx.gateway, state):
             running = retro_id
             break
     marks = ",".join("?" for _ in FINAL)
     row = conn.execute(
         f"SELECT id FROM retros WHERE key = ? AND state IN ({marks}) "
-        "ORDER BY created_at DESC, id DESC LIMIT 1",
-        (key, *FINAL),
+        "AND typeof(id) = 'text' AND id GLOB ? ORDER BY created_at DESC, id DESC LIMIT 1",
+        (key, *FINAL, _ID_GLOB),
     ).fetchone()
-    return KeyState(reused, running, None if row is None else row[0])
+    previous = row[0] if row is not None and _RETRO_ID.fullmatch(row[0]) else None
+    return KeyState(reused, running, previous, unfit)
 
 
 # --- steps 8 and 9 -------------------------------------------------------------------------------
@@ -204,6 +230,9 @@ def _digest(
     order = resolved.order
     attempt = min(len(order), scope_max)
     refreshed = 0
+    # Candidates are refreshed in batches in order: a batch is the deficit (or half again of what
+    # was tried) and may reach past the last candidate that ends up kept. Those candidates count
+    # in ``over_cap`` with the ones never offered (interface, Order of checks step 8).
     while True:
         refresher.refresh(order[refreshed:attempt])
         refreshed = attempt
@@ -221,6 +250,8 @@ def _digest(
 
 
 def _projects(result: DigestResult) -> int:
+    # Counted from the digest headers, which cut a long project name: two long names that share
+    # their first characters count once. A stderr count only (R16: accepted, no behavior change).
     found = set()
     for section in result.sections:
         for line in section.header:
@@ -254,7 +285,7 @@ def prepare(
         raise refused("live_sessions_only" if reasons == {"live"} else "empty_scope")
     hashes = section_hashes(result)  # 9
     key = retro_key(hashes, skill, model)
-    warnings = (*result.warnings, *(("ingest_busy",) if refresher.busy else ()))
+    warnings = ("ingest_busy",) if refresher.busy else ()
 
     def snapshots(conn: sqlite3.Connection | None) -> dict[str, str | None]:
         index = {} if conn is None else snapshot_index(conn)
@@ -289,6 +320,8 @@ def prepare(
         over_cap=result.over_cap + unreached,
         skipped=result.skipped,
         warnings=warnings,
+        notes=tuple(result.warnings),
+        unfit_retros=state.unfit,
         projects=_projects(result),
         again_of=state.previous if args.again else None,
         reused_retro=None if state.reused is None else state.reused["id"],

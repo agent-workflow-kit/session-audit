@@ -2017,6 +2017,7 @@
                 "session_not_started",
                 "claude_session_error",
                 "crontab_unavailable",
+                "ingest_busy",
                 "no_artifact",
                 "artifact_invalid",
                 "identity_mismatch",
@@ -2163,7 +2164,8 @@
                       "launch_settings_mismatch",
                       "session_not_started",
                       "claude_session_error",
-                      "crontab_unavailable"
+                      "crontab_unavailable",
+                      "ingest_busy"
                     ]
                   }
                 }

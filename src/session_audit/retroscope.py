@@ -106,6 +106,13 @@ class Refresher:
             return False
         return True
 
+    def on_disk(self, session_ids: Sequence[str]) -> frozenset[str]:
+        """Which of ``session_ids`` have a transcript file under the roots (Discovery's safe
+        paths only; nothing is read or stored)."""
+        wanted = frozenset(session_ids)
+        with discover(self.ctx, ()) as discovery:
+            return frozenset(c.session_id for c in discovery.candidates() if c.session_id in wanted)
+
 
 @dataclass(frozen=True)
 class Resolved:
@@ -151,9 +158,18 @@ def resolve_scope(
             if ctx.dry_run:
                 # TODO(#24): the dry run reads the file in memory; it cannot ingest it.
                 raise errors.CliError("not_found", "session not found", details={"id": unknown[0]})
-            refresher.refresh(unknown)
+            ingested = refresher.refresh(unknown)
             again, still = _lookup(ctx, unknown)
             if still:
+                if not ingested and refresher.on_disk(still):
+                    # The file is there but the busy lease or the budget kept it out: a retry can
+                    # work, so it is not exit 10.
+                    raise errors.CliError(
+                        "failed",
+                        "the session is on disk but could not be ingested now",
+                        details={"reason": "ingest_busy", "retryable": True, "id": still[0]},
+                        hint="Another ingest holds the lease or the budget ended; retry.",
+                    )
                 raise errors.CliError("not_found", "session not found", details={"id": still[0]})
             found.extend(again)
         explicit = list(dict.fromkeys(found))

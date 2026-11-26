@@ -18,6 +18,12 @@ from session_audit import cli
 from session_audit.command import Context
 from session_audit.gateway import CallResult, CallStatus
 from session_audit.lease import identity
+from session_audit.retroview import (
+    encode_artifact,
+    encode_resolved_scope,
+    encode_session_map,
+    scope_text,
+)
 
 from .digesthelp import OLD, make_ctx, prompt, say, write
 from .ingesthelp import Corpus, Run, TickGateway, connect, ingest
@@ -136,6 +142,7 @@ def add_retro(
     lease: tuple[Any, Any, Any] = (None, None, None),
     summary: str | None = "a summary",
     reason: str | None = None,
+    artifact: str | None = None,
     **overrides: Any,
 ) -> None:
     """A stored retro in the layout of ``retroview`` (a ``done`` one by default)."""
@@ -162,32 +169,26 @@ def add_retro(
                 }
             ],
         }
+        flags = {
+            "labels": [],
+            "project": None,
+            "since": None,
+            "until": None,
+            "kind": None,
+            "outcome": None,
+        }
         values: dict[str, Any] = {
             "id": retro_id,
             "key": key,
             "state": state,
             "reason": reason,
-            "scope": json.dumps(
-                {
-                    "labels": [],
-                    "project": None,
-                    "since": None,
-                    "until": None,
-                    "kind": None,
-                    "outcome": None,
-                }
-            ),
-            "resolved_scope": json.dumps({"sessions": [session], "since": None, "until": None}),
+            "scope": scope_text(flags),
+            "resolved_scope": encode_resolved_scope(flags, [session], None, None),
             "skill": "session-audit:audit",
             "model": None,
             "created_at": created,
-            "session_map": json.dumps(
-                {
-                    "sessions": [{"ref": "s1", "session_id": session, "csession_id": None}],
-                    "skipped": [],
-                    "coverage": coverage,
-                    "metrics": {"total.tool_calls": 0},
-                }
+            "session_map": encode_session_map(
+                [{"ref": "s1", "session_id": session, "csession_id": None}]
             ),
             "counts": json.dumps(counts),
             "dropped": json.dumps({"findings": 0, "candidates": 0}),
@@ -202,7 +203,18 @@ def add_retro(
         if summary is not None:
             conn.execute(
                 "INSERT INTO retro_artifacts (retro_id, artifact, summary) VALUES (?, ?, ?)",
-                (retro_id, json.dumps({"findings": [], "candidates": []}), summary),
+                (
+                    retro_id,
+                    artifact
+                    if artifact is not None
+                    else encode_artifact(
+                        {"findings": [], "candidates": []},
+                        [],
+                        coverage,
+                        {"total.tool_calls": 0},
+                    ),
+                    summary,
+                ),
             )
         conn.commit()
     finally:
@@ -221,3 +233,26 @@ def mtime_of(gw: TickGateway, ago_seconds: int) -> int:
 
 def touch(path: Path, mtime: int = OLD) -> None:
     os.utime(path, (mtime, mtime))
+
+
+def rid(n: int) -> str:
+    """The n-th valid retro id (``ra-`` and eight base32 characters)."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+    return "ra-" + "".join(alphabet[(n >> (5 * i)) % 32] for i in range(8))
+
+
+def ingest_entries(home: Path) -> int:
+    """The ``ingest`` entries of ``log.jsonl`` (0 when there is no log)."""
+    path = home / ".local" / "state" / "session-audit" / "log.jsonl"
+    if not path.exists():
+        return 0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return sum(1 for line in lines if json.loads(line).get("action") == "ingest")
+
+
+def retro_rows(home: Path) -> int:
+    conn = connect(home)
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM retros").fetchone()[0])
+    finally:
+        conn.close()

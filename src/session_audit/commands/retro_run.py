@@ -23,6 +23,7 @@ from ..grammar import (
     parse_int,
     parse_session_prefix,
 )
+from ..sessionquery import one_line, put
 
 # The hook points of steps 4 and 5 (TODO(#24), TODO(#27)); tests replace them.
 STEPS: retro.Steps = retro.NoSteps()
@@ -100,13 +101,18 @@ def _print_reused(ctx: Context, retro_object: dict[str, object]) -> None:
         ctx.emit_json({**retro_object, "reused": True})
         return
     ctx.say(f"retro {retro_object['id']} is done (reused, key {retro_object['key']})")
-    ctx.say(f"summary: {retro_object['summary']}")
+    put(ctx, "summary: " + one_line(retro_object["summary"]))  # model text: one sanitized line
 
 
 def run(ctx: Context, args: argparse.Namespace) -> int:
     prepared = retro.prepare(ctx, args, steps=STEPS)
-    for warning in prepared.warnings:
+    for warning in (*prepared.warnings, *prepared.notes):
         ctx.note(f"session-audit: warning: {warning}")
+    if prepared.unfit_retros and not args.again:
+        ctx.note(
+            f"session-audit: {prepared.unfit_retros} stored retro(s) with this key did not fit "
+            "and were not reused"
+        )
     if prepared.reuse is not None:
         _print_reused(ctx, prepared.reuse)
         return 0

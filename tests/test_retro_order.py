@@ -17,7 +17,16 @@ from session_audit.store import open_store
 
 from .digesthelp import prompt, write
 from .ingesthelp import S1, S2, S3, Corpus, connect, state_dir_of
-from .retrohelp import RetroGateway, retro, seed
+from .retrohelp import (
+    RetroGateway,
+    ingest_entries,
+    ingested,
+    mtime_of,
+    retro,
+    retro_rows,
+    seed,
+    touch,
+)
 from .schemas import validate
 
 
@@ -273,9 +282,7 @@ def test_step_6_an_unknown_prefix_after_a_full_unknown_id_ingests_nothing(
     seed(corpus, S1)  # on disk, not in the store
     result = retro(capsys, gw, "--session", S1, "--session", "99999999")
     expect(result, 10)
-    conn = connect(corpus.home)
-    assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
-    conn.close()
+    assert not state_dir_of(corpus.home).exists()  # nothing ingested, no store created
 
 
 def test_step_6_a_full_id_unknown_to_the_store_is_found_on_disk_and_ingested(
@@ -345,3 +352,129 @@ def test_step_8_live_sessions_only_and_empty_scope(
     expect(retro(capsys, gw, "--session", S1, "--session", S2), 20, "empty_scope")
     live.unlink()
     expect(retro(capsys, gw, "--session", S1), 20, "empty_scope")  # transcript_missing
+
+
+# --- a refused run stores nothing (R4, R15 d) ---------------------------------------------------
+
+
+@pytest.mark.parametrize("dry", [False, True])
+@pytest.mark.parametrize(
+    "version", [None, "claude-session 0.45.1\n", "claude-session 0.45.3 and then\nsomething"]
+)
+def test_a_refusal_at_step_3_creates_no_state_on_a_fresh_home(
+    version: str | None,
+    dry: bool,
+    corpus: Corpus,
+    gw: RetroGateway,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gw.version = version
+    argv = ["--since", "7d", *(["--dry-run"] if dry else [])]
+    result = retro(capsys, gw, *argv)
+    if version is not None and version.startswith("claude-session 0.45.3"):
+        expect(result, 20, "empty_scope")  # passes step 3
+    else:
+        expect(result, 12)
+    assert not state_dir_of(corpus.home).exists()
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_a_failing_skill_preflight_creates_no_state_on_a_fresh_home(
+    dry: bool,
+    corpus: Corpus,
+    gw: RetroGateway,
+    steps: Recorder,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def refuse() -> None:
+        raise errors.CliError(
+            "failed", "no skill", details={"reason": "skill_not_found", "retryable": False}
+        )
+
+    steps.preflight = refuse
+    argv = ["--since", "7d", *(["--dry-run"] if dry else [])]
+    expect(retro(capsys, gw, *argv), 12, "skill_not_found")
+    assert not state_dir_of(corpus.home).exists()
+
+
+def test_a_real_run_on_a_fresh_home_with_an_empty_scope_creates_no_state(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    expect(retro(capsys, gw, "--since", "7d"), 20, "empty_scope")
+    assert not state_dir_of(corpus.home).exists()
+
+
+def refusals_leave_no_trace(
+    corpus: Corpus,
+    capsys: pytest.CaptureFixture[str],
+    gw: RetroGateway,
+    argv: list[str],
+    refreshes: int = 0,
+) -> None:
+    """The run is refused and its log holds only the ``refreshes`` ingest entries that ran."""
+    before = ingest_entries(corpus.home)
+    result = retro(capsys, gw, *argv)
+    assert result.code in (12, 20), result.err
+    assert ingest_entries(corpus.home) == before + refreshes
+    assert retro_rows(corpus.home) == 0
+
+
+def test_early_refusals_leave_no_ingest_entry_and_no_retro_row(
+    corpus: Corpus,
+    gw: RetroGateway,
+    steps: Recorder,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
+) -> None:
+    write_config(_private_environment, "retro:\n  max_sessions: 2\n")
+    paths = {sid: seed(corpus, sid) for sid in (S1, S2, S3)}
+    ingested(capsys, gw)
+    # scope_too_large: every id is known, so nothing is refreshed.
+    refusals_leave_no_trace(corpus, capsys, gw, ["--session", S1, "--session", S2, "--session", S3])
+    refusals_leave_no_trace(corpus, capsys, gw, ["--project", "/nowhere"])  # empty_scope
+    for sid in (S1, S2, S3):
+        touch(paths[sid], mtime_of(gw, 60))
+    # live_sessions_only ran the refresh of the one batch that holds the three candidates (the
+    # cap of 2 and nothing kept: the batch grows to all three, one more refresh of the third).
+    refusals_leave_no_trace(corpus, capsys, gw, ["--project", "/work"], refreshes=2)
+    for sid in (S1, S2, S3):
+        touch(paths[sid])
+    for version in (None, "claude-session 0.1.0\n"):
+        gw.version = version
+        refusals_leave_no_trace(corpus, capsys, gw, ["--project", "/work"])
+    gw.version = "claude-session 0.45.3\n"
+
+    def refuse() -> None:
+        raise errors.CliError(
+            "failed", "no skill", details={"reason": "skill_not_found", "retryable": False}
+        )
+
+    steps.preflight = refuse
+    refusals_leave_no_trace(corpus, capsys, gw, ["--project", "/work"])
+
+
+# --- a full id that is on disk but cannot be ingested now (R5) ----------------------------------
+
+
+def test_step_6_a_full_id_on_disk_with_a_busy_ingest_lease_is_a_retryable_exit_12(
+    corpus: Corpus, gw: RetroGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from session_audit.lease import IngestTarget, acquire
+
+    seed(corpus, S1)
+    store = open_store(gw, str(state_dir_of(corpus.home)))
+    lease = acquire(store, IngestTarget())
+    assert lease is not None
+    try:
+        result = retro(capsys, gw, "--session", S1)
+        expect(result, 12, "ingest_busy")
+        details = json.loads(result.out)["error"]["details"]
+        assert details["retryable"] is True and details["id"] == S1
+        assert sum(gw.sleeps) == 60  # the wait of the retro is spent once
+        expect(retro(capsys, gw, "--session", S3), 10)  # on no disk: still exit 10
+    finally:
+        lease.release()
+        store.close()
+    conn = connect(corpus.home)
+    assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    conn.close()
