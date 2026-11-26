@@ -727,3 +727,44 @@ def test_token_hex_is_random_lowercase_hex_of_twice_the_bytes() -> None:
     first, second = gw.token_hex(16), gw.token_hex(16)
     assert re.fullmatch(r"[0-9a-f]{32}", first) and first != second
     assert len(gw.token_hex(3)) == 6
+
+
+# -- the per-call grace and the child's pid (the retro's exec call, issue #26) ---------------
+
+
+def test_a_per_call_kill_grace_replaces_the_gateways(tmp_path: Path) -> None:
+    pids = tmp_path / "child.pid"
+    script = f"echo $$ > '{pids}'; trap '' TERM; while :; do sleep 0.05; done"
+    started = time.monotonic()
+    result = SystemGateway(kill_grace=30).run(["sh", "-c", script], timeout=0.5, kill_grace=0.3)
+    assert result.status is CallStatus.TIMEOUT
+    assert time.monotonic() - started < 10  # the 0.3 s grace, not the gateway's 30 s
+    assert wait_until_gone(read_pid(pids))
+
+
+@pytest.mark.parametrize("grace", [0, -1, math.nan, math.inf, True])
+def test_a_bad_kill_grace_is_refused(grace: float) -> None:
+    with pytest.raises(ValueError):
+        SystemGateway().run(["true"], timeout=10, kill_grace=grace)
+
+
+def test_on_start_receives_the_exact_child_pid_before_the_call_returns(tmp_path: Path) -> None:
+    seen: list[int] = []
+    pids = tmp_path / "child.pid"
+    result = SystemGateway().run(
+        ["sh", "-c", f"echo $$ > '{pids}'"], timeout=10, on_start=seen.append
+    )
+    assert result.ok
+    assert seen == [read_pid(pids)]
+
+
+def test_a_failing_on_start_ends_the_child_and_propagates(tmp_path: Path) -> None:
+    pids = tmp_path / "child.pid"
+    script = f"echo $$ > '{pids}'; sleep 60"
+
+    def boom(pid: int) -> None:
+        raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError):
+        SystemGateway(kill_grace=1).run(["sh", "-c", script], timeout=30, on_start=boom)
+    assert wait_until_gone(read_pid(pids))

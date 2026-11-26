@@ -111,6 +111,8 @@ class FakeGateway:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
+        kill_grace: float | None = None,
+        on_start: Callable[[int], None] | None = None,
     ) -> CallResult:
         self.calls.append({"argv": list(argv), "stdin": stdin, "timeout": timeout, "cwd": cwd})
         for prefix, results in self._rules:
