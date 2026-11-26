@@ -688,6 +688,20 @@ housekeeping (start of retro run, and prune; never ingest or validate; --dry-run
   an exception in one retro is a warning and housekeeping goes on; housekeeping never changes the command's exit code
 ```
 
+Details of the block above (copy):
+
+```text
+a retro whose recorded csession id has no retro_sessions row of its own (or a malformed id) is not recovered through claude-session:
+    final failed/runner_lost with the warning recovery_skipped; nothing is stopped or forgotten
+a retro with no csession id needs no claude-session: it is recovered (delete_local, its digest removed) even when cs_ok is false
+cs_ok is read the first time an item needs it; a retro_sessions retry (below) is deferred as a whole when it is false
+the label check also runs before the forget of a cleanup retry whose forgotten time is unset (a pending row of a final retro, or of a deleted one);
+    a session claude-session no longer knows (status exit 10) goes on to the forget; a row whose retro is not final, or whose lease is live, is left to recovery or its holder
+cleanup removes session-env/<id> (the ids of <uuid>.jsonl files and <uuid>/ directories of the project directory) BEFORE the project directory
+a final retro whose lease ran out (its process died before release) has the lease cleared by housekeeping
+a recovered retro logs retro_state with actor auto:recover; a final retro whose process died before its hooks is not fired for (no outbox)
+```
+
 Recovery acts only on the `csession_id` stored before launch, after checking its labels; it never looks a session up by label. Recovery takes the retro's lease first, so two processes never recover the same retro. It ignores `harness.enabled` and `--no-harness` (it is the retro's own session). `validate` only warns (`retros_unrecovered`, `cleanup_incomplete`). An orphan can live up to a day when no retro runs; it is bounded by `retro.timeout`, because claude-session ends the run itself, so recovery is bookkeeping and cleanup, not the only stop. Expired digests are also deleted by every housekeeping step, so a user without the cron block keeps no digest past `retention.digests` once any retro runs.
 
 **Signals.** Handlers for SIGINT, SIGTERM and SIGHUP are installed before step 13 (copy):

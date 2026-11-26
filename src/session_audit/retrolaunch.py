@@ -14,8 +14,8 @@ The flow (every state write is a compare-and-set on the lease, ``retrostate.Retr
 16. ``start --json`` (recorded before anything can write a transcript), the adopting ``exec`` with
     ``--outcome-file`` under the overall deadline, ``collect``, the Outcome mapping
     (``retrooutcome``), the sandbox rule, the artifact check (the seam of #29), the final state,
-    ``forget`` of the session (the claude-session half of cleanup; the rest is #27), ``post-retro``
-    and, for ``failed``, ``post-attention``.
+    ``cleanup`` of the recorded session (``retrocleanup``: forget, purge check, transcripts and
+    local files), ``post-retro`` and, for ``failed``, ``post-attention``.
 
 What claude-session printed is parsed strictly; anything outside the mapping is
 ``claude_session_error``. A malformed id or directory records nothing and calls neither ``forget``
@@ -24,7 +24,7 @@ files.
 
 Signals are #28's: no handler matrix here. The PID of the exec child is kept in ``exec_pid``
 (``Gateway.run(on_start=...)``) for it. A process that dies or is interrupted leaves the row in the
-state of its last write; ``retrostate`` lists the states recovery (#27) must handle. On an
+state of its last write; ``retrostate`` lists the states ``retrorecovery`` (#27) handles. On an
 exception that is not a final state the lease is released so recovery can take the row at once.
 """
 
@@ -112,7 +112,7 @@ def run_launch(
             return launcher.run()
         except BaseException:
             if inserted.retro.state not in FINAL_STATES:
-                inserted.retro.release()  # recovery (#27) may take the row at once
+                inserted.retro.release()  # housekeeping may take the row at once
             raise
 
 

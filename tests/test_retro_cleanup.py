@@ -493,3 +493,84 @@ def test_nothing_is_called_for_a_row_that_is_not_active(
     for csid in ("cs-aaaaaaad", "cs-aaaaaaae"):
         assert run_cleanup(gw, corpus, csid)[0] in ("done", "skipped")
     assert keys(cs) == []
+
+
+# --- more hostile cases ------------------------------------------------------------------------
+
+
+class _OtherDevice:
+    """A directory handle that reports another device for every directory below the root: what a
+    project directory (or a subdirectory) on another file system looks like to the walk."""
+
+    def __init__(self, inner: Any, shift: bool = False) -> None:
+        self._inner, self._shift = inner, shift
+
+    def stat(self) -> os.stat_result:
+        info = self._inner.stat()
+        if not self._shift:
+            return info
+        fields = list(info)
+        fields[2] = info.st_dev + 1  # st_dev
+        return os.stat_result(fields)
+
+    def open_dir(self, name: bytes) -> _OtherDevice:
+        return _OtherDevice(self._inner.open_dir(name), True)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def test_a_project_directory_on_another_device_is_left_in_place(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = plant_transcripts(corpus, env=False)
+    plant_session(corpus.home)
+    script_cleanup(cs)
+    real = gw.open_root
+    state_root = str(state_dir_of(corpus.home))
+
+    def open_root(path: Any) -> Any:
+        handle = real(path)
+        return handle if str(path) == state_root else _OtherDevice(handle)
+
+    monkeypatch.setattr(gw, "open_root", open_root)
+    assert run_cleanup(gw, corpus)[0] == "pending"
+    assert (made["project"] / f"{UUIDS[0]}.jsonl").exists()
+
+
+def test_a_forget_that_floods_stderr_is_still_read(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    plant_session(corpus.home)
+    cs.script("forget", step(forget_doc(CSID), stderr="e" * 3_000_000))
+    assert run_cleanup(gw, corpus)[0] == "done"
+
+
+def test_the_transcript_command_is_never_called(
+    gw: RetroGateway, corpus: Corpus, cs: FakeClaudeSession
+) -> None:
+    plant_session(corpus.home)
+    plant_transcripts(corpus)
+    script_cleanup(cs)
+    run_cleanup(gw, corpus)
+    assert "transcript" not in [call["argv"][0] for call in cs.calls() if call["argv"]]
+
+
+def test_a_retro_run_with_remove_run_transcripts_false_stores_transcripts_kept(
+    gw: RetroGateway,
+    corpus: Corpus,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    from .test_retro_launch import launch, prepared_corpus, session_run, the_retro, write_config
+
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "blocked")
+    write_config(corpus.home, "retro:\n  remove_run_transcripts: false\n")
+    launch(capsys, gw)
+    row = the_retro(corpus.home)
+    assert json.loads(row["warnings"]) == ["transcripts_kept"]
+    session = session_rows(corpus.home)[CSID]
+    assert session["cleanup_state"] == "done"  # claude-session's copy is gone; the transcripts stay
