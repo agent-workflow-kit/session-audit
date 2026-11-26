@@ -259,6 +259,8 @@ strings: fix_surrogates, then model, tool, agent_type and version capped at 128 
 
 Tool and model names are stored as read (capped at 128 characters); output lists are capped at query time (Session `models`: 64; `usage` rows: `--limit`).
 
+Details the parser fixes (conservative readings): a line is decoded as UTF-8 only (invalid bytes become U+FFFD); a numeric field that is absent or null is 0; an integer literal of more than 64 digits fails every numeric rule; a timestamp without a zone is missing; a line with more than 1,000 content blocks is an error line; a dedupe id (message id, tool-use id, uuid) longer than 4,096 characters, empty or not a string is missing, and the event then takes the line-offset fallback; `files.last_ts` is the timestamp of the latest line that had one, in file order; a `cost-state` line in an agent file is ignored; the whole of a `<synthetic>` message line with zero usage, or with absent or unusable usage (read as zero usage), is ignored; the cache split is present when either `ephemeral_*` key is non-null (a missing half is 0); a `cost-state` line without the `totalCostUSD` key is ignored without a flag, while a null value is a wrong type (ignored, counted, `cost_invalid`); a non-object `message` or `usage` counts as missing, not as an error line; a `sessionId` or `agentId` longer than 128 characters is missing (never truncated).
+
 `fix_surrogates` replaces each lone surrogate with U+FFFD at every point a string enters the store, a digest, a manifest, an artifact or output.
 
 **6. Progress.** For each file the store keeps what change detection needs and the per-file facts the session values come from (copy):
@@ -300,7 +302,7 @@ From spike A against Claude Code 2.1.284 to 2.1.328; every key is optional.
 | message tokens | `type: assistant` | `message.id`, `message.model`, `message.usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_creation.ephemeral_5m_input_tokens, cache_creation.ephemeral_1h_input_tokens}` |
 | tool call | `type: assistant` | `message.content[]` with `type: tool_use`: `id`, `name`, `input` (summary only, see Digest) |
 | tool error | `type: user` | `message.content[]` with `type: tool_result`, `is_error: true`: `tool_use_id` |
-| denial | `type: user` | `toolDenialKind` present, or `permissionDecision.decision: reject`; tool id: `tool_use_id` of the line's first `tool_result` block (none when the line has no such block) |
+| denial | `type: user` | `toolDenialKind` present (a non-empty string), or `permissionDecision.decision: reject`; tool id: `tool_use_id` of the line's first `tool_result` block (none when the line has no such block) |
 | interruption | `type: user` | `interruptedMessageId` present |
 | rejection (digest item) | `type: user` | `toolDenialKind: user-rejected` |
 | prompt (digest item) | `type: user` | text content, no `tool_result` block, not `isMeta`, not `isCompactSummary` |
