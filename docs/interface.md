@@ -220,6 +220,8 @@ never read: tool-results/, memory/, journal.jsonl, any other name or depth
 scan: project directories in descending mtime order, at most 100,000 entries per root per run (warning scan_capped); files are read in descending mtime order
 ```
 
+The entry cap counts every directory entry listed under a root (the root's own, each project directory, each `subagents` and `workflows` directory); `<uuid>/subagents` and `workflows` are looked up by name, so the other names inside a session directory are never listed. A symlink where a project directory, a session directory, `subagents` or `workflows` is expected counts once in `files.unsafe` and is never entered. A pruned session's unchanged file is skipped without a count of its own.
+
 `<uuid>` must be a lowercase UUID, `<id>` in `agent-<id>` and `<wf>` must match `[A-Za-z0-9_.-]{1,128}`; other names are not transcripts. Paths are stored as raw bytes (`os.fsencode`) and shown through `fix_surrogates` and the sanitizer, so a non-UTF-8 name can be reopened and two names never collide.
 
 **3. Opening and reading.** The mechanics are (copy):
@@ -230,6 +232,7 @@ below the root: every directory opened with openat(O_RDONLY|O_DIRECTORY|O_NOFOLL
     openat(O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC); fstat on the descriptor: S_ISREG, st_nlink == 1, st_uid == me;
     then clear O_NONBLOCK; a FIFO or special file is files.unsafe and never blocks
 --path: resolved by components below a configured root after opening (never a string prefix check); outside -> exit 2
+    (a relative path, any `..` component, a symlinked component below the root, or a path beside or above every root; a component that does not exist matches nothing)
 line read: readline(8 MiB + 1); a longer record is skipped to the next LF in 1 MiB steps, checking the budgets at each step, and counted in lines.oversized
 partial tail: left for the next run; a tail longer than 8 MiB sets the file's skip_to_lf column and the offset moves to EOF
 budgets: ingest.file_budget (default 60 s) per file and --budget per run; checked between lines
