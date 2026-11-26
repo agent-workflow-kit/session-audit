@@ -471,6 +471,25 @@ def test_crontab_goes_through_the_program_named_crontab(
     assert log.read_text(encoding="utf-8").splitlines() == ["-l", "-", "0 * * * * job"]
 
 
+def test_crontab_runs_with_the_c_locale_so_its_messages_can_be_recognised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "log"
+    fake = bindir / "crontab"
+    fake.write_text(
+        f'#!/bin/sh\necho "$LC_ALL:$LANG" >> "{log}"\ncat > /dev/null\n', encoding="utf-8"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    gw = SystemGateway()
+    assert gw.crontab_read().ok and gw.crontab_write("x\n").ok
+    assert log.read_text(encoding="utf-8").splitlines() == ["C:", "C:"]
+
+
 def test_crontab_bytes_that_are_not_utf8_survive_a_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

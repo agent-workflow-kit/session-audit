@@ -76,6 +76,10 @@ def _check_program(
     names = {Path(program).name}
     if os.sep in program:
         names.add(Path(program).resolve().name)
+    else:
+        found = shutil.which(program, path=search)
+        if found is not None:
+            names.add(Path(found).resolve().name)
     if not names & PROTECTED_PROGRAMS:
         return
     if os.sep in program:

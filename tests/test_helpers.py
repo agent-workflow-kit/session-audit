@@ -161,6 +161,17 @@ def test_a_symlink_under_another_name_to_a_protected_program_is_refused(tmp_path
         guard_argv(["sh", "-c", f"'{alias}' -l"], {"PATH": str(tmp_path)}, [tmp_path], [tmp_path])
 
 
+def test_a_bare_name_that_resolves_to_a_protected_program_is_refused(tmp_path: Path) -> None:
+    alias = tmp_path / "harmless-name"
+    os.symlink("/usr/bin/crontab", alias)
+    with pytest.raises(RealToolRefused):
+        guard_argv(["harmless-name", "-l"], {"PATH": str(tmp_path)}, [tmp_path])
+    with pytest.raises(RealToolRefused):
+        guard_argv(
+            ["sh", "-c", "harmless-name -l"], {"PATH": str(tmp_path)}, [tmp_path], [tmp_path]
+        )
+
+
 def test_every_absolute_form_of_the_real_crontab_is_refused_by_the_guard() -> None:
     for path in (
         "/usr/bin/crontab",

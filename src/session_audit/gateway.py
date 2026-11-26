@@ -46,6 +46,14 @@ from zoneinfo import ZoneInfo
 DEFAULT_STDOUT_LIMIT = 8 * 1024 * 1024
 KILL_GRACE_SECONDS = 5.0
 CRONTAB_TIMEOUT_SECONDS = 30.0
+
+
+def _crontab_env() -> dict[str, str]:
+    """The C locale (a localized "no crontab" message must still be recognised) and the
+    inherited ``PATH``."""
+    return {"LC_ALL": "C", "PATH": os.environ.get("PATH", os.defpath)}
+
+
 _POLL_SECONDS = 0.05
 _READ_CHUNK = 65536
 _DRAIN_CHUNKS = 16
@@ -583,10 +591,18 @@ class SystemGateway:
         return None
 
     def crontab_read(self) -> CallResult:
-        return self._run(["crontab", "-l"], timeout=CRONTAB_TIMEOUT_SECONDS, escape=True)
+        return self._run(
+            ["crontab", "-l"], timeout=CRONTAB_TIMEOUT_SECONDS, escape=True, env=_crontab_env()
+        )
 
     def crontab_write(self, text: str) -> CallResult:
-        return self._run(["crontab", "-"], timeout=CRONTAB_TIMEOUT_SECONDS, stdin=text, escape=True)
+        return self._run(
+            ["crontab", "-"],
+            timeout=CRONTAB_TIMEOUT_SECONDS,
+            stdin=text,
+            escape=True,
+            env=_crontab_env(),
+        )
 
     @contextlib.contextmanager
     def umask(self, mask: int) -> Iterator[None]:

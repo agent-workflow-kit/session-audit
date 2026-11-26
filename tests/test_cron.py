@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from session_audit import store as store_module
 from session_audit.cli import main
 from session_audit.commands.cron import (
     END,
@@ -42,6 +43,7 @@ class CronGateway(ClockedGateway):
         self.read_result: CallResult | None = None
         self.write_result: CallResult | None = None
         self.writes: list[str] = []
+        self.after_write: Any = None
 
     def crontab_read(self) -> CallResult:
         if self.read_result is not None:
@@ -55,6 +57,8 @@ class CronGateway(ClockedGateway):
             return self.write_result
         self.writes.append(text)
         self.crontab = text
+        if self.after_write is not None:
+            self.after_write()
         return CallResult(CallStatus.EXITED, 0)
 
 
@@ -159,6 +163,36 @@ def test_golden_with_a_scheduled_retro_and_an_env_file(
         return json.loads(text)
 
     assert_golden(doc(out), "cron-install-retro", normalize=normalize)
+
+
+@pytest.mark.parametrize(
+    ("case", "scope"),
+    [
+        ("retro-minimal", "      since: 7d\n"),
+        ("retro-two-labels", "      since: 30d\n      labels: ['a=b', 'c=d']\n"),
+    ],
+)
+def test_golden_with_a_minimal_retro_and_with_two_labels(
+    case: str,
+    scope: str,
+    gw: CronGateway,
+    bins: Path,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
+) -> None:
+    write_config(_private_environment, "schedule:\n  retro:\n    scope:\n" + scope)
+    code, out, _ = cron(capsys, gw, "install", "--json")
+    assert code == 0
+
+    def normalize(value: Any) -> Any:
+        text = (
+            json.dumps(value)
+            .replace(str(bins), "<tmp>")
+            .replace(str(_private_environment), "<home>")
+        )
+        return json.loads(text)
+
+    assert_golden(doc(out), f"cron-install-{case}", normalize=normalize)
 
 
 def test_uninstall_golden(
@@ -377,6 +411,93 @@ def test_an_env_file_owned_by_someone_else_is_refused(
     assert code == 2 and error(out)["details"]["field"] == "--env-file"
 
 
+def test_the_line_limit_counts_bytes(
+    gw: CronGateway, bins: Path, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    write_config(
+        _private_environment,
+        "schedule:\n  retro:\n    scope:\n      since: 7d\n      project: /" + "é" * 450 + "\n",
+    )
+    code, out, _ = cron(capsys, gw, "install", "--json")
+    assert code == 2 and error(out)["details"]["field"] == "schedule.retro.scope"
+    assert gw.crontab is None
+
+
+def test_a_long_env_file_path_is_blamed_not_the_scope(
+    gw: CronGateway, bins: Path, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    write_config(_private_environment, "schedule:\n  retro:\n    scope:\n      since: 7d\n")
+    deep = bins.joinpath(*("d" * 200 for _ in range(4)))
+    deep.mkdir(parents=True)
+    for directory in (deep, *deep.parents):
+        if directory == bins:
+            break
+        directory.chmod(0o700)
+    env = env_file(deep)
+    code, out, _ = cron(capsys, gw, "install", "--env-file", str(env), "--json")
+    assert code == 2 and error(out)["details"]["field"] == "--env-file"
+    assert gw.crontab is None
+    _, _, err = cron(capsys, gw, "install", "--env-file", str(env))
+    for name in ("schedule.retro.scope", "--env-file", "PATH"):
+        assert name in err
+
+
+def test_an_env_file_in_a_world_writable_directory_is_refused_unless_sticky(
+    tmp_path: Path, gw: CronGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    env = env_file(shared)
+    shared.chmod(0o777)
+    code, out, _ = cron(capsys, gw, "install", "--env-file", str(env), "--json")
+    assert code == 2 and error(out)["details"]["field"] == "--env-file"
+    shared.chmod(0o770)
+    assert cron(capsys, gw, "install", "--env-file", str(env), "--json")[0] == 2
+    shared.chmod(0o1777)
+    assert cron(capsys, gw, "install", "--env-file", str(env), "--json")[0] == 0
+
+
+# --- values: more characters, leading dashes --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["a\x85b", "a\x80b", "a\x9fb", "a\u2028b", "a\u2029b", "a\u202eb", "a\u200fb", "a\u2067b"],
+)
+def test_c1_line_separators_and_bidi_controls_are_refused(bad: str) -> None:
+    with pytest.raises(CliError) as raised:
+        check_line_value(bad, "KEY")
+    assert raised.value.exit_code == 2 and raised.value.details["field"] == "KEY"
+
+
+@pytest.mark.parametrize("flag", ["project", "kind", "outcome"])
+def test_a_scope_value_starting_with_a_dash_is_refused(
+    flag: str,
+    gw: CronGateway,
+    bins: Path,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
+) -> None:
+    write_config(
+        _private_environment,
+        f"schedule:\n  retro:\n    scope:\n      since: 7d\n      {flag}: '-x'\n",
+    )
+    code, out, _ = cron(capsys, gw, "install", "--json")
+    assert code == 2 and error(out)["details"]["field"] == "schedule.retro.scope"
+    assert gw.crontab is None
+
+
+def test_a_label_starting_with_a_dash_is_refused(
+    gw: CronGateway, bins: Path, capsys: pytest.CaptureFixture[str], _private_environment: Path
+) -> None:
+    write_config(
+        _private_environment,
+        "schedule:\n  retro:\n    scope:\n      since: 7d\n      labels: ['-a=b']\n",
+    )
+    code, out, _ = cron(capsys, gw, "install", "--json")
+    assert code == 2 and error(out)["details"]["field"] == "schedule.retro.scope"
+
+
 # --- the block rules and hostile crontabs -----------------------------------------------------
 
 MALFORMED = [
@@ -434,6 +555,18 @@ def test_lines_outside_the_block_are_never_changed(
     assert gw.crontab.startswith(outside) and gw.crontab.endswith("\n")
     assert cron(capsys, gw, "uninstall")[0] == 0
     assert gw.crontab == (outside if outside.endswith("\n") else outside + "\n")
+
+
+@pytest.mark.parametrize("outside", HOSTILE_OUTSIDE)
+def test_uninstall_keeps_the_outside_text_when_the_end_marker_has_no_newline(outside: str) -> None:
+    prefix = outside if outside.endswith("\n") else outside + "\n"
+    new, outcome, removed = uninstall_text(f"{prefix}{START}\nx\n{END}")
+    assert (new, outcome, removed) == (prefix, "removed", [START, "x", END])
+
+
+def test_uninstall_repro_of_a_missing_final_newline() -> None:
+    assert uninstall_text(f"a\n{START}\n{END}")[0] == "a\n"
+    assert uninstall_text(f"{START}\n{END}")[0] == ""
 
 
 def outside_wrap(outside: str, block: str) -> str:
@@ -537,6 +670,43 @@ def test_a_failed_write_is_exit_12_and_records_nothing(
     code, out, _ = cron(capsys, gw, "install", "--json")
     assert code == 12 and error(out)["details"]["reason"] == "crontab_unavailable"
     assert "ingest_interval" not in meta(_private_environment)
+
+
+def test_a_failed_meta_write_after_the_crontab_write_is_exit_12_with_a_hint(
+    gw: CronGateway,
+    bins: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def break_store() -> None:
+        def broken(self: Any) -> Any:
+            raise store_module.unwritable("the disk is full")
+
+        monkeypatch.setattr(store_module.Store, "transaction", broken)
+
+    gw.after_write = break_store
+    code, out, err = cron(capsys, gw, "install", "--json")
+    assert code == 12 and error(out)["details"]["reason"] == "store_unwritable"
+    assert gw.crontab is not None and gw.crontab.startswith(START)
+    assert "already updated" in err and "again" in err
+
+
+def test_a_missing_session_audit_on_the_path_is_a_stderr_note(
+    gw: CronGateway,
+    bins: Path,
+    capsys: pytest.CaptureFixture[str],
+    _private_environment: Path,
+) -> None:
+    code, out, err = cron(capsys, gw, "install", "--json")
+    assert code == 0 and "session-audit" in err and "PATH" in err
+    assert doc(out)["outcome"] == "installed"
+    exe = bins / "bin1" / "session-audit"
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    exe.chmod(0o755)
+    code, out, err = cron(capsys, gw, "install", "--json")
+    assert code == 0 and err == ""
+    code, _, err = cron(capsys, gw, "install", "--dry-run", "--quiet")
+    assert err == ""
 
 
 def test_an_empty_crontab_with_exit_0_is_a_crontab_without_a_block(

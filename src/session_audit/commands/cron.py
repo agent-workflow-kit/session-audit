@@ -68,16 +68,49 @@ def unavailable(result: CallResult | None = None) -> CliError:
 # --- values that reach a cron line ------------------------------------------------------------
 
 
+# Code points the sanitized ``block`` output would show differently from the text written: the
+# line and paragraph separators and the bidirectional controls.
+_UNSAFE_CODE_POINTS = frozenset(
+    {0x2028, 0x2029, 0x061C, 0x200E, 0x200F}
+    | set(range(0x202A, 0x202F))
+    | set(range(0x2066, 0x206A))
+)
+
+
 def check_line_value(value: str, field: str) -> str:
     """Refuse a value that cannot sit in a cron line: ``%``, any control character (newline, CR,
-    NUL, tab, DEL, the C1 range is allowed) or a lone surrogate (it cannot be written)."""
+    NUL, tab, DEL, the C1 range), U+2028/2029, a bidirectional control or a lone surrogate (it
+    cannot be written)."""
     for ch in value:
-        if ch == "%" or ord(ch) < 0x20 or ord(ch) == 0x7F or "\ud800" <= ch <= "\udfff":
+        code = ord(ch)
+        if (
+            ch == "%"
+            or code < 0x20
+            or 0x7F <= code <= 0x9F
+            or code in _UNSAFE_CODE_POINTS
+            or "\ud800" <= ch <= "\udfff"
+        ):
             raise errors.usage(
                 "a value cannot be written into a cron line",
                 field=field,
-                hint="It must not contain %, a newline, NUL or another control character.",
+                hint=(
+                    "It must not contain %, a newline, NUL or another control character, a line "
+                    "separator or a bidirectional control."
+                ),
             )
+    return value
+
+
+def check_scope_value(value: str) -> str:
+    """A ``schedule.retro.scope`` value: writable, and not starting with ``-`` (``retro run``
+    would read it as the next option)."""
+    check_line_value(value, SCOPE_FIELD)
+    if value.startswith("-"):
+        raise errors.usage(
+            "a scope value cannot start with a dash",
+            field=SCOPE_FIELD,
+            hint="A value that starts with - would be read as an option by retro run.",
+        )
     return value
 
 
@@ -88,7 +121,8 @@ def quote(value: str) -> str:
 
 def check_env_file(gateway: Gateway, path: str) -> str:
     """Absolute, a regular file, owned by the user, not group or other writable, not a symlink
-    (checked on the file itself, without following it). Every failure is exit 2 naming
+    (checked on the file itself, without following it), in a directory that is not group or
+    other writable (unless it has the sticky bit). Every failure is exit 2 naming
     ``--env-file``; ``validate`` re-checks it later."""
     field = "--env-file"
     a.check_path(path, field)
@@ -107,6 +141,12 @@ def check_env_file(gateway: Gateway, path: str) -> str:
         raise errors.usage("the env file is not owned by the user", field=field)
     if info.st_mode & 0o022:
         raise errors.usage("the env file is group or other writable", field=field)
+    try:
+        parent = gateway.lstat(os.path.dirname(path) or "/")
+    except OSError:
+        raise errors.usage("the env file's directory cannot be read", field=field) from None
+    if parent.st_mode & 0o022 and not parent.st_mode & stat.S_ISVTX:
+        raise errors.usage("the env file's directory is group or other writable", field=field)
     return path
 
 
@@ -133,6 +173,18 @@ def path_value(gateway: Gateway, env_path: str, home: str) -> str:
     return os.pathsep.join(unique)
 
 
+def on_path(gateway: Gateway, path: str, program: str) -> bool:
+    """Whether a directory of ``path`` holds an executable regular file named ``program``."""
+    for directory in path.split(os.pathsep):
+        try:
+            info = gateway.stat(os.path.join(directory, program))
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_mode & 0o111:
+            return True
+    return False
+
+
 def ingest_schedule(interval: IngestEvery) -> str:
     minutes = interval.minutes
     if minutes < 60:
@@ -154,7 +206,7 @@ def retro_flags(retro: ScheduleRetro) -> list[str]:
         raise errors.from_grammar(exc) from None
     flags: list[str] = []
     for label in scope.labels:
-        flags += ["--label", quote(check_line_value(label, SCOPE_FIELD))]
+        flags += ["--label", quote(check_scope_value(label))]
     pairs = (
         ("--project", scope.project),
         ("--since", scope.since),
@@ -164,8 +216,13 @@ def retro_flags(retro: ScheduleRetro) -> list[str]:
     )
     for flag, value in pairs:
         if value is not None:
-            flags += [flag, quote(check_line_value(value, SCOPE_FIELD))]
+            flags += [flag, quote(check_scope_value(value))]
     return flags
+
+
+def line_bytes(line: str) -> int:
+    """The size of ``line`` in bytes as the crontab holds it (cron's limit is in bytes)."""
+    return len(line.encode("utf-8", "surrogateescape"))
 
 
 def build_block(
@@ -181,15 +238,27 @@ def build_block(
         (f"{PRUNE_SCHEDULE} {prefix} prune --quiet", "PATH"),
     ]
     if retro is not None:
-        command = " ".join([prefix, "retro", "run", *retro_flags(retro)])
-        command += f" --actor {RETRO_ACTOR} --quiet"
+        flags = " ".join(retro_flags(retro))
+        command = f"{prefix} retro run {flags} --actor {RETRO_ACTOR} --quiet"
         if env_file is not None:
             command = f". {quote(env_file)} && {command}"
-        lines.append((f"{RETRO_MINUTE} {retro.hour} * * {retro.weekday} {command}", SCOPE_FIELD))
+        # The line's largest variable part is the one to blame when it is too long.
+        parts = {
+            SCOPE_FIELD: line_bytes(flags),
+            "--env-file": 0 if env_file is None else line_bytes(quote(env_file)),
+            "PATH": line_bytes(path),
+        }
+        field = max(parts, key=lambda name: parts[name])
+        lines.append((f"{RETRO_MINUTE} {retro.hour} * * {retro.weekday} {command}", field))
     for line, field in lines:
-        if len(line) > LINE_MAX:
+        if line_bytes(line) > LINE_MAX:
             raise errors.usage(
-                "a cron line is too long", field=field, hint=f"Keep it under {LINE_MAX} characters."
+                "a cron line is too long",
+                field=field,
+                hint=(
+                    f"A cron line may hold {LINE_MAX} bytes. Shorten {field} (the largest part); "
+                    f"{SCOPE_FIELD}, --env-file and PATH all count toward it."
+                ),
             )
     return [START, *(line for line, _ in lines), END]
 
@@ -248,7 +317,10 @@ def uninstall_text(text: str) -> tuple[str, str, list[str]]:
     split = split_crontab(text)
     if split.block is None:
         return text, "unchanged", []
-    return "\n".join([*split.before, *split.after]), "removed", split.block
+    # Each line before the block keeps its newline (the start line begins a line), so a block whose
+    # end line is the last, unterminated line leaves the text before it complete.
+    head = "".join(f"{line}\n" for line in split.before)
+    return head + "\n".join(split.after), "removed", split.block
 
 
 def read_crontab(gateway: Gateway) -> str:
@@ -323,6 +395,11 @@ def run_install(ctx: Context, args: argparse.Namespace) -> int:
         ctx.note("session-audit: note: --env-file is used only by the retro line; none is set")
     path = path_value(ctx.gateway, os.environ.get("PATH", ""), home_dir(os.environ))
     block = build_block(interval, retro, path, args.env_file)
+    if not on_path(ctx.gateway, path, "session-audit"):
+        ctx.note(
+            "session-audit: note: no directory of the cron PATH holds an executable "
+            "session-audit; the scheduled jobs will not find it"
+        )
     # The store opens first, so an unwritable state directory fails before the crontab changes.
     store = None if ctx.dry_run else ctx.store()
     text = read_crontab(ctx.gateway)
@@ -331,12 +408,26 @@ def run_install(ctx: Context, args: argparse.Namespace) -> int:
         if outcome != "unchanged":
             write_crontab(ctx.gateway, new_text)
         assert store is not None
-        with store.transaction() as conn:
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?, ?) "
-                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                (INTERVAL_KEY, interval.canonical),
-            )
+        try:
+            with store.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    (INTERVAL_KEY, interval.canonical),
+                )
+        except CliError as exc:
+            if outcome == "unchanged":
+                raise
+            raise CliError(
+                exc.code,
+                exc.message,
+                exit_code=exc.exit_code,
+                details=exc.details,
+                hint=(
+                    "The crontab was already updated; run the command again to record the "
+                    "interval. " + (exc.hint or "")
+                ).strip(),
+            ) from None
     report(ctx, "install", outcome, block)
     return 0
 
