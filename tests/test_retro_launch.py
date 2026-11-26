@@ -241,6 +241,9 @@ def test_every_session_row_of_the_outcome_mapping(
     [session] = rows(corpus.home, "retro_sessions")
     assert session["csession_id"] == CSID and session["cleanup_state"] == "pending"
     assert session["forgotten_at"] is not None
+    assert (session["retro_id"], session["csession_dir"]) == (row["id"], f"/state/sessions/{CSID}")
+    assert session["private_dir"] == f"/state/private/{CSID}"
+    assert session["project_dir"] == f"-state-sessions-{CSID}-work"
     assert len(rows(corpus.home, "retro_starts")) == 1  # the run reached the model: no refund
     assert not any(rows(corpus.home, "retro_artifacts"))
 
@@ -619,6 +622,9 @@ def test_start_output_with_a_malformed_directory_is_refused_without_forget_or_st
     assert rows(corpus.home, "retro_sessions") == []
     assert keys(cs) == ["start"]  # no exec, no forget, no stop
     assert rows(corpus.home, "retro_starts") == []
+    state = state_dir_of(corpus.home)  # nothing is left behind for a retro that never ran
+    assert not (state / "prompts" / row["id"]).exists()
+    assert not (state / "digests" / row["id"]).exists()
 
 
 @pytest.mark.parametrize(

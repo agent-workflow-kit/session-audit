@@ -730,3 +730,43 @@ def test_two_retro_run_processes_with_the_same_key_one_runs_the_other_is_already
             if process is not None and process.poll() is None:
                 os.killpg(process.pid, 9)
                 process.wait()
+
+
+# --- the id, the digest check and the recoverable states ----------------------------------------
+
+
+def test_a_retro_id_has_the_grammar_and_a_collision_is_retried() -> None:
+    import re
+
+    from session_audit.gateway import SystemGateway
+
+    for _ in range(50):
+        assert re.fullmatch(r"ra-[a-z2-7]{8}", retrostate.new_retro_id(SystemGateway()))
+
+
+def test_digest_sections_that_changed_after_the_key_are_an_internal_error_with_a_free_lease(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs)
+    real = retrolaunch.fencing.finish_digest
+
+    def altered(*args: Any, **kwargs: Any) -> Any:
+        found = real(*args, **kwargs)
+        return replace(found, section_hashes=found.section_hashes[:1])
+
+    monkeypatch.setattr(retrolaunch.fencing, "finish_digest", altered)
+    result = launch(capsys, gw)
+    assert result.code == 1 and json.loads(result.out)["error"]["code"] == "internal"
+    row = the_retro(corpus.home)
+    # What recovery (#27) finds: a digesting row, no files, no session, a free lease.
+    assert (row["state"], row["csession_id"], row["lease_pid"]) == ("digesting", None, None)
+    assert keys(cs) == [] and rows(corpus.home, "retro_starts") == []
+    state = state_dir_of(corpus.home)
+    assert not (state / "digests").exists() and not (state / "prompts").exists()
