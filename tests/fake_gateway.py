@@ -294,6 +294,9 @@ class FakeGateway:
     def lock_exclusive(self, handle: BinaryIO, timeout: float) -> bool:
         raise NotImplementedError("state directory access is tested against real directories")
 
+    def replace(self, source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        raise NotImplementedError("state directory access is tested against real directories")
+
 
 class _FakeFile(io.BytesIO):
     """What ``FakeDir.open_file`` returns: the bytes, the ``fstat`` taken at open and whether
@@ -358,6 +361,20 @@ class FakeDir:
 
     def stat(self) -> os.stat_result:
         return self._gateway.lstat(self._path)
+
+    def unlink(self, name: bytes) -> None:
+        path = self._child(name)
+        if self._gateway._entry(path).kind == "dir":
+            raise IsADirectoryError(errno.EISDIR, "is a directory", path)
+        del self._gateway.files[path]
+
+    def rmdir(self, name: bytes) -> None:
+        path = self._child(name)
+        if self._gateway._entry(path).kind != "dir":
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", path)
+        if any(posixpath.dirname(p) == path for p in self._gateway.files):
+            raise OSError(errno.ENOTEMPTY, "directory not empty", path)
+        del self._gateway.files[path]
 
     def close(self) -> None:
         self.closed = True
