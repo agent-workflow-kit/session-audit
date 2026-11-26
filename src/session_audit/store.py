@@ -61,6 +61,7 @@ __all__ = [
     "Store",
     "StoreStatus",
     "inspect_store",
+    "open_memory_copy",
     "open_read_only",
     "open_store",
     "state_dir",
@@ -564,6 +565,42 @@ def open_read_only(
         return conn
     except (OSError, sqlite3.Error) as exc:
         raise storage_error(exc) from None
+
+
+def open_memory_copy(
+    gateway: Gateway, directory: str, *, migrations: Sequence[Migration] = MIGRATIONS
+) -> Store:
+    """A ``Store`` on a private in-memory copy of ``state.db`` (an empty, fully migrated one when
+    there is no store), for a dry run that must read to the current end of the transcripts without
+    writing anything: the real store is opened read-only (``open_read_only``: nothing created, no
+    ``-wal`` or ``-shm``, a newer store refused ``store_newer``), copied with SQLite's backup API
+    (one consistent snapshot) and closed; pending migrations are applied to the copy only.
+
+    The copy is as large as the database, in memory. It is not a ``Store`` for writing back: its
+    directory is the real one only so the object has the shape of a ``Store``, and nothing here
+    (the log, ``reopen``) may be used on it. The caller closes it."""
+    validate_registry(migrations)
+    source = open_read_only(gateway, directory, migrations=migrations)
+    memory = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        if source is not None:
+            try:
+                source.backup(memory)
+            finally:
+                source.close()
+        applied = _read_ledger(memory)
+        done, pending, newer = _classify(applied, migrations)
+        if newer:
+            raise store_newer()
+        for migration in pending:
+            _apply(memory, migration, migrations, _epoch_ms(gateway))
+            done = done | {migration.number}
+        return Store(gateway, directory, memory, max(done, default=0), migrations)
+    except BaseException as exc:
+        memory.close()
+        if isinstance(exc, sqlite3.Error):
+            raise storage_error(exc) from None
+        raise
 
 
 def column_names(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:

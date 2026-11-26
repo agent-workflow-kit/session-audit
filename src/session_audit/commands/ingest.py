@@ -40,7 +40,7 @@ from .. import args as a
 from .. import errors, harness
 from ..command import Command, Context
 from ..csversion import Presence, check_version
-from ..eventstore import FileResult, read_file
+from ..eventstore import FileResult, WriteGuard, read_file
 from ..grammar import (
     INGEST_BUDGET_MAX,
     GrammarError,
@@ -276,7 +276,7 @@ class _Reader:
 
 class _Live(_Reader):
     def __init__(
-        self, store: Store, lease: Lease, rules: int, file_budget: timedelta, deadline: float
+        self, store: Store, lease: WriteGuard, rules: int, file_budget: timedelta, deadline: float
     ) -> None:
         self.store, self.lease, self.rules = store, lease, rules
         self.file_budget, self.deadline = file_budget, deadline
@@ -892,6 +892,54 @@ def run_files(
     counters. The report's ``complete`` is false when the budget ended first."""
     args = argparse.Namespace(rebuild=False, path=None, session="files", since=None, dry_run=False)
     return _locked(ctx, args, store, lease, discovery, deadline, None, only=session_ids)
+
+
+class _NoLease:
+    """The ``WriteGuard`` of a run on a private in-memory store: nobody else writes there, so
+    nothing can be lost and nothing needs renewing."""
+
+    expires_ms = 1 << 62
+
+    def check_still_holder(self, conn: sqlite3.Connection) -> None:
+        return None
+
+    def raise_if_lost(self) -> None:
+        return None
+
+    def renew(self, store: Store | None = None) -> bool:
+        return True
+
+
+def run_files_memory(
+    ctx: Context,
+    store: Store,
+    discovery: Discovery,
+    deadline: float,
+    session_ids: frozenset[str],
+) -> bool:
+    """The files of ``session_ids`` read to their current end into ``store``, a private in-memory
+    copy (``store.open_memory_copy``): the dry run of ``retro run`` (Freshness: the same bytes a
+    real run would ingest, with nothing written). No lease, log line or ``meta`` row. True when
+    every file was read to its end within the budgets."""
+    args = argparse.Namespace(rebuild=False, path=None, session="files", since=None, dry_run=False)
+    conn = store.conn
+    rules = current_rules_version(conn)
+    ordered, left_out = plan(discovery, conn, rules, None, session_ids)
+    file_budget = ctx.settings.ingest.file_budget
+    live = _Live(store, _NoLease(), rules, file_budget, deadline)
+    tally = scan(
+        ctx,
+        args,
+        discovery,
+        conn,
+        live,
+        rules=rules,
+        deadline=deadline,
+        file_budget=file_budget,
+        ordered=ordered,
+        left_out=left_out,
+    )
+    return tally.complete
 
 
 COMMANDS = (

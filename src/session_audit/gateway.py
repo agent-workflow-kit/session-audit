@@ -177,6 +177,12 @@ class Gateway(Protocol):
         characters (the digest fence nonce); tests substitute fixed values."""
         ...
 
+    def token_urlsafe(self, nbytes: int) -> str:
+        """``nbytes`` random bytes from the system's secure source as URL-safe base64 without
+        padding (``A-Za-z0-9_-``): the run token. ``nbytes`` is 12 to 96, so the token has 16 to
+        128 characters, the range ``fencing.finish_digest`` accepts. ``ValueError`` outside it."""
+        ...
+
     def sleep(self, seconds: float) -> None:
         """Wait ``seconds`` (a bounded poll between retries)."""
         ...
@@ -513,6 +519,11 @@ class SystemGateway:
 
     def token_hex(self, nbytes: int) -> str:
         return secrets.token_hex(nbytes)
+
+    def token_urlsafe(self, nbytes: int) -> str:
+        if isinstance(nbytes, bool) or not isinstance(nbytes, int) or not 12 <= nbytes <= 96:
+            raise ValueError("a run token is 12 to 96 random bytes (16 to 128 characters)")
+        return secrets.token_urlsafe(nbytes)
 
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)

@@ -1,17 +1,19 @@
 """``retro run``: run one retro (interface, Commands, ``retro run``).
 
 ``check`` holds the usage errors (Order of checks step 1). ``run`` does steps 2 to 10 through
-``retro.prepare`` (the order, the digest, the key, reuse and ``already_running``) and prints a
-reused retro. TODO(#24): the plan check and the dry run's plan (steps 11 and 12).
-TODO(#26): the launch (steps 13 to 16).
+``retro.prepare`` (the order, the skill preflight of step 4, the digest, the key, reuse and
+``already_running``) and prints a reused retro; then step 11 (``launchplan.plan_check``) and, with
+``--dry-run``, step 12 (the plan, never any digest text). TODO(#26): the launch (steps 13 to 16).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+from typing import Any
 
 from .. import args as a
-from .. import errors, retro
+from .. import errors, fencing, launchplan, plugins, retro
 from ..command import Command, Context
 from ..grammar import (
     MAX_TURNS_RANGE,
@@ -25,9 +27,24 @@ from ..grammar import (
 )
 from ..sessionquery import one_line, put
 
-# The hook points of steps 4 and 5 (TODO(#24), TODO(#27)); tests replace them.
-STEPS: retro.Steps = retro.NoSteps()
+
+class Steps(retro.NoSteps):
+    """The real step 4 (the skill preflight). TODO(#27): the housekeeping of step 5."""
+
+    def skill_preflight(self, ctx: Context, skill: str) -> plugins.PluginChoice:
+        return plugins.skill_preflight(
+            ctx.gateway,
+            skill,
+            plugin_dirs=ctx.settings.retro.plugin_dirs,
+            env=os.environ,
+            state_directory=ctx.state_path(),
+        )
+
+
+# The hook points of steps 4 and 5; tests replace them.
+STEPS: retro.Steps = Steps()
 MAX_SESSION_FLAGS = 1000
+PLAN_LIST_MAX = 1000  # the most ids and skip rows of the dry-run plan (the schema's maxItems)
 SCOPE_FLAGS = ("session", "label", "project", "since", "until", "kind", "outcome")
 
 
@@ -104,6 +121,68 @@ def _print_reused(ctx: Context, retro_object: dict[str, object]) -> None:
     put(ctx, "summary: " + one_line(retro_object["summary"]))  # model text: one sanitized line
 
 
+def plan_document(
+    ctx: Context, args: argparse.Namespace, prepared: retro.Prepared, launch: launchplan.Launch
+) -> dict[str, Any]:
+    """The dry-run plan (``schemas/cli/retro-run.json``): ids, counts, enums and the flags; never
+    digest text. ``digest_bytes`` is the size of the ``digest.md`` a real run writes (the digest is
+    fenced here with a placeholder retro id and run token of the same widths, then dropped)."""
+    result = prepared.digest
+    fenced = fencing.finish_digest(
+        result,
+        launchplan.PLACEHOLDER_RETRO_ID,
+        ctx.gateway.token_urlsafe(24),
+        ctx.gateway,
+        prepared.csession_ids,
+    )
+    return {
+        "dry_run": True,
+        "scope": {
+            "sessions": list(prepared.explicit_sessions),
+            "labels": list(dict.fromkeys(args.label or [])),
+            "project": args.project,
+            "since": args.since,
+            "until": args.until,
+            "kind": args.kind,
+            "outcome": args.outcome,
+        },
+        "matched": [s.session_id for s in result.sections][:PLAN_LIST_MAX],
+        "matched_total": prepared.kept,
+        "skipped": [
+            {"session_id": s.session_id, "reason": s.reason}
+            for s in prepared.skipped[:PLAN_LIST_MAX]
+        ],
+        "over_cap": prepared.over_cap,
+        "items": result.items_kept,
+        "items_by_kind": result.items_by_kind,
+        "digest_bytes": len(fenced.digest_bytes),
+        "key": prepared.key,
+        "skill": prepared.skill,
+        "model": prepared.model,
+        "launch_flags": launchplan.plan_flags(launch),
+        "reused_retro": prepared.reused_retro,
+        "running_retro": prepared.running_retro,
+        "daily_remaining": prepared.daily_remaining,
+    }
+
+
+def _print_plan(ctx: Context, plan: dict[str, Any]) -> None:
+    if ctx.json:
+        ctx.emit_json(plan)
+        return
+    ctx.say(f"retro plan (dry run): key {plan['key']}")
+    ctx.say(
+        f"  sessions: {plan['matched_total']} digested, {len(plan['skipped'])} skipped, "
+        f"{plan['over_cap']} over the cap"
+    )
+    ctx.say(f"  items: {plan['items']}, digest bytes: {plan['digest_bytes']}")
+    ctx.say(f"  skill: {plan['skill']}, daily remaining: {plan['daily_remaining']}")
+    if plan["reused_retro"] is not None:
+        ctx.say(f"  a real run would reuse {plan['reused_retro']}")
+    if plan["running_retro"] is not None:
+        ctx.say(f"  a real run would be refused: {plan['running_retro']} is running")
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     prepared = retro.prepare(ctx, args, steps=STEPS)
     for warning in (*prepared.warnings, *prepared.notes):
@@ -120,7 +199,24 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         f"retro: {prepared.kept} sessions kept, {len(prepared.skipped)} skipped, "
         f"{prepared.projects} projects"
     )
-    # TODO(#24): steps 11 and 12 (the launch plan check and the dry run's plan).
+    launch = launchplan.Launch.of(
+        ctx.settings.retro,
+        skill=prepared.skill,
+        plugin_dirs=prepared.plugin_dirs,
+        bundled=prepared.bundled_plugin,
+        model=prepared.model,
+        timeout=args.timeout,
+        max_turns=args.max_turns,
+    )
+    launchplan.plan_check(  # step 11: nothing is stored, nothing is spent
+        ctx.gateway,
+        ctx.settings.harness.claude_session_cmd,
+        launch,
+        state_directory=ctx.state_path(),
+    )
+    if ctx.dry_run:  # step 12
+        _print_plan(ctx, plan_document(ctx, args, prepared, launch))
+        return 0
     # TODO(#26): steps 13 to 16 (the row, the hooks, the launch) from ``prepared``.
     raise a.not_implemented()
 

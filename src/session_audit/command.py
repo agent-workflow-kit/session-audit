@@ -92,21 +92,33 @@ class Context:
     # embedders may set it; nothing else does.
     state_directory: str | None = None
     _store: Store | None = field(default=None, init=False, repr=False)
+    # A dry run of ``retro run`` reads and ingests a private in-memory copy of the store (its
+    # ``open_memory_copy``): when set, every read of the store (``sessionquery.open_reader``,
+    # ``reader.discover``) uses it and the real store is never opened for writing.
+    memory: Store | None = field(default=None, repr=False)
+
+    def state_path(self) -> str:
+        """The state directory: ``state_directory`` or the standard location."""
+        from .config import home_dir  # lazy: config imports args, which imports this module
+        from .store import state_dir
+
+        return self.state_directory or state_dir(os.environ, home_dir(os.environ))
 
     def store(self) -> Store:
         """The store, opened on first use (migrations applied) and closed by ``close``. Opening
         can raise ``CliError`` (``store_unwritable``, ``store_newer``); a command that never calls
         this (``--version``, ``validate``, usage errors) never touches the store."""
         if self._store is None:
-            from .config import home_dir  # lazy: config imports args, which imports this module
-            from .store import open_store, state_dir
+            from .store import open_store
 
-            directory = self.state_directory or state_dir(os.environ, home_dir(os.environ))
-            self._store = open_store(self.gateway, directory)
+            self._store = open_store(self.gateway, self.state_path())
         return self._store
 
     def close(self) -> None:
-        """Close the store if it was opened. Safe to call twice."""
+        """Close the store (and the in-memory copy) if opened. Safe to call twice."""
+        if self.memory is not None:
+            self.memory.close()
+            self.memory = None
         if self._store is not None:
             self._store.close()
             self._store = None

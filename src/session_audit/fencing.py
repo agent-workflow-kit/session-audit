@@ -17,7 +17,8 @@ Text never carries a fence tag of its own: ``redact.digest_text`` neutralizes ``
 ``<untrusted`` in every part, and ``finish_digest`` checks every section again (a section that
 holds a fence tag, a line break inside a line, or the nonce is refused or, for the nonce, drawn
 again, at most ``NONCE_TRIES`` times). The function writes no file: the retro launch writes
-``digest.md`` and ``manifest.json`` (TODO(#24)).
+``digest.md`` and ``manifest.json`` (TODO(#26): after step 13; the run token is
+``gateway.token_urlsafe(24)``).
 """
 
 from __future__ import annotations
