@@ -576,9 +576,9 @@ def digest_text(raw, cap):
 
 1. Secret-shaped strings: well-known token shapes, private-key blocks, URL userinfo (`scheme://user:secret@host`), `Cookie:` and `Set-Cookie:` values, `Authorization`-style headers, `--token X`, `--password X`, `-u user:pass`, JSON or YAML `"password": "x"` style keys, JWTs (three base64url parts starting `eyJ`), and assignments to names containing `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `KEY`, `CREDENTIAL`, `AUTH`.
 2. Literal values of the environment of the `retro run` process: every variable whose name matches the secret-name shapes above and every name in `redaction.mask_env`; a `mask_env` name whose value is shorter than 8 characters is ignored with a stderr warning (not stored), and so is any other value shorter than 8 characters. A scheduled retro sees cron's environment (plus the env-file), so masks are best effort there.
-3. Strings starting with a prefix in `redaction.extra_token_prefixes`: `<prefix>[A-Za-z0-9_-]{8,256}` is redacted.
+3. Strings starting with a prefix in `redaction.extra_token_prefixes`: `<prefix>[A-Za-z0-9_-]{8,}` is redacted (the whole run of those characters after the prefix, so a token longer than 256 characters leaks no tail; the scan consumes the run and stays linear).
 
-Built-in patterns are bounded (no unbounded repetition across a line); they are tested against adversarial inputs (linear time at 64 KiB). Private keys and the kinds are (copy):
+The built-in patterns are package data (`redact_patterns.toml`); `docs/design.md` (Redaction patterns) lists them. Built-in patterns are bounded (no unbounded repetition across a line); they are tested against adversarial inputs (linear time at 64 KiB). Private keys and the kinds are (copy):
 
 ```text
 private key: a header matching -----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY( BLOCK)?----- is redacted through the matching

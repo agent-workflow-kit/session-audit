@@ -1,0 +1,217 @@
+# Built-in redaction patterns (issue #20), shipped as package data and loaded by redact.py.
+#
+# Rules every entry obeys (tests/test_redact.py checks them from the compiled patterns):
+#   * every repetition is bounded ({m,n} or ?), and no repetition sits inside another one
+#     (except an optional group), so there is no nested quantifier;
+#   * a pattern that scans a run of characters starts only at the run's start (a negative
+#     lookbehind on the same class) or at an anchored literal, so overlapping attempts cannot
+#     multiply the work;
+#   * `group` (default: the whole match) names the part that is replaced by the marker, so the
+#     name of a header, flag or key stays readable.
+# The private-key block is not here: it needs str.find for the END line (see redact.py).
+# Kinds: token, url_userinfo, cookie, auth_header, cli_secret, json_secret, jwt, assignment.
+# Literals are TOML literal strings: no escaping, so the regex reads as written.
+
+# ---- well-known token shapes -------------------------------------------------------------------
+
+[[pattern]]
+name = "aws_access_key_id"
+kind = "token"
+regex = '''(?<![A-Za-z0-9])(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA)[A-Z0-9]{16}(?![A-Za-z0-9])'''
+
+[[pattern]]
+name = "github_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36,255}'''
+
+[[pattern]]
+name = "github_fine_grained_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{22,255}'''
+
+[[pattern]]
+name = "gitlab_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,255}'''
+
+[[pattern]]
+name = "slack_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9-])xox[abposr]-[A-Za-z0-9-]{10,255}'''
+
+[[pattern]]
+name = "slack_app_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9-])xapp-[0-9]-[A-Za-z0-9-]{10,255}'''
+
+[[pattern]]
+name = "slack_webhook"
+kind = "token"
+regex = '''hooks\.slack\.com/services/(?P<v>[A-Za-z0-9/]{20,200})'''
+group = "v"
+
+[[pattern]]
+name = "telegram_bot_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9])[0-9]{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])'''
+
+[[pattern]]
+name = "anthropic_api_key"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{20,255}'''
+
+[[pattern]]
+name = "openai_api_key"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_-])sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,255}'''
+
+[[pattern]]
+name = "google_api_key"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}'''
+
+[[pattern]]
+name = "google_oauth_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_-])ya29\.[0-9A-Za-z_-]{20,1024}'''
+
+[[pattern]]
+name = "stripe_key"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,255}'''
+
+[[pattern]]
+name = "stripe_webhook_secret"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_])whsec_[A-Za-z0-9]{16,255}'''
+
+[[pattern]]
+name = "npm_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}'''
+
+[[pattern]]
+name = "pypi_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_-])pypi-[A-Za-z0-9_-]{50,255}'''
+
+[[pattern]]
+name = "huggingface_token"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{30,255}'''
+
+[[pattern]]
+name = "sendgrid_key"
+kind = "token"
+regex = '''(?<![A-Za-z0-9_])SG\.[A-Za-z0-9_-]{16,255}\.[A-Za-z0-9_-]{16,255}'''
+
+# ---- JWT: three base64url parts starting eyJ ---------------------------------------------------
+
+[[pattern]]
+name = "jwt"
+kind = "jwt"
+regex = '''(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,16384}\.[A-Za-z0-9_-]{4,16384}\.[A-Za-z0-9_-]{0,16384}'''
+
+# ---- URL userinfo: scheme://user:secret@host ---------------------------------------------------
+
+[[pattern]]
+name = "url_userinfo"
+kind = "url_userinfo"
+regex = '''(?<=://)(?P<v>[^\s/?#@:]{0,128}:[^\s/?#@]{1,256})(?=@)'''
+group = "v"
+
+# ---- headers -----------------------------------------------------------------------------------
+
+[[pattern]]
+name = "cookie_header"
+kind = "cookie"
+regex = '''(?i)(?<![A-Za-z0-9_-])(?:set-)?cookie[ \t]{0,8}:[ \t]{0,8}(?P<v>[^\r\n"']{1,4096})'''
+group = "v"
+
+[[pattern]]
+name = "authorization_header"
+kind = "auth_header"
+regex = '''(?i)(?<![A-Za-z0-9_-])(?:proxy-authorization|authorization|x-api-key|x-auth-token|x-access-token|x-amz-security-token|x-goog-api-key|x-gitlab-token|x-github-token|private-token|api-key)[ \t]{0,8}["']?[ \t]{0,8}:[ \t]{0,8}["']?(?P<v>[^\r\n"']{1,2048})'''
+group = "v"
+
+# A bare "Bearer <token>": at least 16 token characters, one of them a digit (so prose such as
+# "bearer authentication-mechanism" stays).
+[[pattern]]
+name = "bearer_token"
+kind = "auth_header"
+regex = '''(?i)(?<![A-Za-z0-9_-])bearer[ \t]{1,8}(?P<v>(?=[A-Za-z._~+/=-]{0,2047}[0-9])[A-Za-z0-9._~+/=-]{16,2048})'''
+group = "v"
+
+# ---- command-line secrets ----------------------------------------------------------------------
+
+# --password X, --token=X, --client-secret X (the flag name ends in the keyword, so
+# --password-stdin, --password-file and --tokenizer are left alone).
+[[pattern]]
+name = "cli_long_flag"
+kind = "cli_secret"
+regex = '''(?i)(?<![A-Za-z0-9_-])--[a-z0-9-]{0,32}(?:password|passwd|passphrase|token|secret|api-?key|apikey|access-?key|private-?key|credentials?)(?:=|[ \t]{1,8})(?P<v>"[^"\r\n]{1,512}"?|'[^'\r\n]{1,512}'?|[^\s"'\-][^\s"']{0,511})'''
+group = "v"
+
+# -u user:pass, --user user:pass (a numeric uid:gid is left alone)
+[[pattern]]
+name = "cli_user_pass"
+kind = "cli_secret"
+regex = '''(?<![A-Za-z0-9_-])(?:-u|--user|--proxy-user)[ \t=]{1,8}["']?(?![0-9]{1,10}:[0-9]{1,10}(?![A-Za-z0-9_]))(?P<v>[^\s:"'\-][^\s:"']{0,127}:[^\s"']{1,256})'''
+group = "v"
+
+# -u user -p pass (docker login, mysql and psql style)
+[[pattern]]
+name = "cli_user_then_p"
+kind = "cli_secret"
+regex = '''(?<![A-Za-z0-9_-])(?:-u|--username|--user)[ \t=]{1,8}["']?[^\s"']{1,128}["']?[ \t]{1,8}-p[ \t]{1,8}(?P<v>"[^"\r\n]{1,512}"?|'[^'\r\n]{1,512}'?|[^\s"'\-][^\s"']{0,511})'''
+group = "v"
+
+# ---- JSON and YAML secret keys -----------------------------------------------------------------
+# A key is a run of key characters that ends in one of the words below (so max_tokens,
+# token_type and tokenizer stay). The run is anchored at its start.
+
+[[pattern]]
+name = "json_double_quoted"
+kind = "json_secret"
+regex = '''(?i)(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,40}(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|signing[_-]?key|credentials?|authorization|auth|cookie|session[_-]?key|encryption[_-]?key|master[_-]?key|ssh[_-]?key)"[ \t]{0,8}:[ \t]{0,8}"(?P<v>(?:[^"\\\r\n]|\\.){1,4096})"'''
+group = "v"
+
+# the same document written inside another JSON string: {\"password\": \"x\"}
+[[pattern]]
+name = "json_escaped"
+kind = "json_secret"
+regex = '''(?i)(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,40}(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|signing[_-]?key|credentials?|authorization|auth|cookie|session[_-]?key|encryption[_-]?key|master[_-]?key|ssh[_-]?key)\\"[ \t]{0,8}:[ \t]{0,8}\\"(?P<v>[^"\\\r\n]{1,4096})\\"'''
+group = "v"
+
+# a Python-style dict: {'password': 'x'}
+[[pattern]]
+name = "json_single_quoted"
+kind = "json_secret"
+regex = '''(?i)(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,40}(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|signing[_-]?key|credentials?|authorization|auth|cookie|session[_-]?key|encryption[_-]?key|master[_-]?key|ssh[_-]?key)'[ \t]{0,8}:[ \t]{0,8}'(?P<v>[^'\r\n]{1,4096})\''''
+group = "v"
+
+# YAML: a key at the start of a line (after indentation or "- "), a quoted value of any length or
+# a bare value of at least 6 characters.
+[[pattern]]
+name = "yaml_key"
+kind = "json_secret"
+regex = '''(?im)^[ \t]{0,32}(?:-[ \t]{1,4})?[A-Za-z0-9_.-]{0,40}(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|signing[_-]?key|credentials?|authorization|auth|cookie|session[_-]?key|encryption[_-]?key|master[_-]?key|ssh[_-]?key)[ \t]{0,2}:[ \t]{1,8}(?P<v>"[^"\r\n]{1,512}"?|'[^'\r\n]{1,512}'?|[^\s"'#,{}\[\]][^\s"'#,]{5,511})'''
+group = "v"
+
+# ---- assignments to secret-named variables -----------------------------------------------------
+# The name contains TOKEN, SECRET, PASSWORD, PASSWD, PASSPHRASE, KEY, CREDENTIAL or AUTH (any
+# case). NAME=value takes a bare value of at least 6 characters (not a $variable, a command
+# substitution, a bracket or a redaction marker) or a quoted one; NAME = "value" takes a quoted
+# value only, so code such as `token = get_token()` stays.
+
+[[pattern]]
+name = "assignment"
+kind = "assignment"
+regex = '''(?i)(?<![A-Za-z0-9_-])[A-Za-z0-9_]{0,40}(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]{0,40}=(?P<v>"[^"\r\n]{1,512}"?|'[^'\r\n]{1,512}'?|[^\s"'$`(){}<>&;,|\\=\[][^\s"'&;,|<>)]{5,511})'''
+group = "v"
+
+[[pattern]]
+name = "assignment_spaced"
+kind = "assignment"
+regex = '''(?i)(?<![A-Za-z0-9_-])[A-Za-z0-9_]{0,40}(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]{0,40}[ \t]{1,2}=[ \t]{1,2}(?P<v>"[^"\r\n]{1,512}"?|'[^'\r\n]{1,512}'?)'''
+group = "v"
