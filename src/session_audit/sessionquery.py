@@ -22,7 +22,7 @@ import json
 import os
 import re
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
@@ -510,3 +510,35 @@ def usage_rows(
             }
         )
     return rows, len(ordered) > limit
+
+
+def read_stream[T](
+    ctx: Context, work: Callable[[sqlite3.Connection | None], Iterator[T]]
+) -> Generator[T]:
+    """``read_store`` for a command that streams: the items of ``work`` are yielded as they are
+    produced inside one read transaction. A torn read before the first item reopens the store
+    and retries once (as ``read_store``); after an item was yielded nothing can be retried
+    without repeating output, so any ``sqlite3.Error`` is the store error (exit 12)."""
+    produced = False
+    for attempt in (1, 2):
+        try:
+            with open_reader(ctx) as conn:
+                for item in work(conn):
+                    produced = True
+                    yield item
+                return
+        except sqlite3.DatabaseError as exc:
+            if attempt == 2 or produced:
+                raise storage_error(exc) from None
+        except sqlite3.Error as exc:
+            raise storage_error(exc) from None
+
+
+def derive_day(since: datetime | None, zone: tzinfo) -> tuple[str | None, int | None]:
+    """``export usage --since``: the local day of the instant in ``zone`` (lines on or after it
+    are kept) and a slot bound two days before the instant that lets SQLite skip older events."""
+    if since is None:
+        return None, None
+    local = since.astimezone(zone)
+    day = f"{local.year:04d}-{local.month:02d}-{local.day:02d}"
+    return day, int(since.timestamp()) // derive.SLOT_SECONDS - 2 * 96

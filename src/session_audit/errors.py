@@ -164,6 +164,21 @@ def _check_details(code: str, details: dict[str, Any]) -> None:
         raise ValueError("details: hook is not a hook name")
 
 
+def stderr_lines(error: CliError, *, prog: str = "session-audit") -> list[str]:
+    """The lines an error prints on stderr (the envelope is separate, stdout only)."""
+    head = f"{prog}: error: {error.message}"
+    for key in ("field", "reason"):
+        if key in error.details:
+            head += f" ({error.details[key]})"
+    lines = [head]
+    matches = error.details.get("matches")
+    if matches:
+        lines.append("  matches: " + ", ".join(matches))
+    if error.hint:
+        lines.append(f"  hint: {error.hint}")
+    return lines
+
+
 class CliError(Exception):
     """A failure with its envelope. ``message`` must be a fixed string, never input text."""
 
