@@ -13,6 +13,14 @@ The API is defined here once; later modules extend it only when they need a new 
   (success) or exit 10 (not found, for claude-session).
 - Untrusted or agent-generated text goes in ``stdin`` or in files, never in argv or env.
 
+- ``run_hook`` runs a configured hook command with ``/bin/sh -c`` (the command text is trusted
+  config text, never built from untrusted input), in its own process group, with the caller's
+  extra variables added to the inherited environment and the payload on stdin. Unlike ``run``, the
+  whole group is ended (SIGTERM, ``kill_grace`` seconds, SIGKILL) when the leader exits normally
+  too, so a grandchild the hook left behind never outlives the call, and stdout beyond the cap is
+  discarded (the hook keeps running) instead of failing the call. A member that left the group
+  with ``setsid`` is out of reach: a documented residual risk.
+
 todo(#28): ``run`` is the only way to start a program, and it returns when the program is gone.
 The hooks and the retro need a spawn/handle API instead: start the program, hand back its exact
 child PID (to signal that process, not the group), wait up to a given time (30 s for the retro),
@@ -46,6 +54,8 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_STDOUT_LIMIT = 8 * 1024 * 1024
 KILL_GRACE_SECONDS = 5.0
+HOOK_STDOUT_LIMIT = 64 * 1024 + 1  # a hook's stdout is read to 64 KiB; one byte more marks excess
+HOOK_SHELL = "/bin/sh"
 CRONTAB_TIMEOUT_SECONDS = 30.0
 
 
@@ -165,6 +175,20 @@ class Gateway(Protocol):
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
     ) -> CallResult: ...
+
+    def run_hook(
+        self,
+        command: str,
+        *,
+        timeout: float,
+        stdin: str,
+        env_extra: Mapping[str, str],
+        stdout_limit: int = HOOK_STDOUT_LIMIT,
+    ) -> CallResult:
+        """Run ``command`` with ``/bin/sh -c`` (see the module text). ``stdout`` holds at most
+        ``stdout_limit`` characters, bytes beyond it are dropped, so a result longer than
+        ``stdout_limit - 1`` bytes means the hook printed more than the caller reads."""
+        ...
 
     def now(self) -> datetime:
         """The current time, timezone-aware UTC."""
@@ -316,6 +340,25 @@ class SystemGateway:
             argv, timeout=timeout, stdin=stdin, env=env, cwd=cwd, stdout_limit=stdout_limit
         )
 
+    def run_hook(
+        self,
+        command: str,
+        *,
+        timeout: float,
+        stdin: str,
+        env_extra: Mapping[str, str],
+        stdout_limit: int = HOOK_STDOUT_LIMIT,
+    ) -> CallResult:
+        return self._run(
+            [HOOK_SHELL, "-c", command],
+            timeout=timeout,
+            stdin=stdin,
+            env={**os.environ, **env_extra},
+            stdout_limit=stdout_limit,
+            reap_group=True,
+            discard_excess=True,
+        )
+
     def _run(
         self,
         argv: Sequence[str],
@@ -326,6 +369,8 @@ class SystemGateway:
         cwd: str | None = None,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
         escape: bool = False,
+        reap_group: bool = False,
+        discard_excess: bool = False,
     ) -> CallResult:
         """``run``; with ``escape`` the bytes that are not UTF-8 survive a round trip: output is
         decoded and stdin encoded with ``surrogateescape`` (the crontab, which holds the user's
@@ -368,7 +413,9 @@ class SystemGateway:
             )
         except OSError as exc:
             return CallResult(CallStatus.SPAWN_FAILED, detail=f"{type(exc).__name__}: {exc}")
-        return self._supervise(popen, data, timeout, stdout_limit, escape)
+        return self._supervise(
+            popen, data, timeout, stdout_limit, escape, reap_group, discard_excess
+        )
 
     def _supervise(
         self,
@@ -377,6 +424,8 @@ class SystemGateway:
         timeout: float,
         stdout_limit: int,
         escape: bool = False,
+        reap_group: bool = False,
+        discard_excess: bool = False,
     ) -> CallResult:
         deadline = time.monotonic() + timeout
         out = bytearray()
@@ -406,12 +455,9 @@ class SystemGateway:
                     else:
                         stream, buffer = key.data
                         self._drain(stream, selector, buffer, stdout_limit)
-                if len(out) > stdout_limit:
+                if len(out) > stdout_limit and not discard_excess:
                     failure = CallStatus.OUTPUT_LIMIT
                     break
-                # todo(#25): when the leader exits normally the rest of its group is left running
-                # (only a failed call ends the group). The hooks (``sh -c``) must kill the
-                # remaining group members after a normal leader exit; add that with #25.
                 if popen.poll() is not None:
                     # The leader is gone: take what is already buffered, then stop reading, so a
                     # grandchild holding a pipe open cannot keep this call waiting.
@@ -428,9 +474,12 @@ class SystemGateway:
                     stderr=_text(err[:stdout_limit]),
                     detail=_detail(failure, timeout, stdout_limit),
                 )
+            if reap_group:
+                # The leader exited on its own: whatever it left in its group is ended now.
+                self._end_group(popen)
             code = popen.returncode
             text = _text(out[:stdout_limit], escape), _text(err[:stdout_limit])
-            if len(out) > stdout_limit:
+            if len(out) > stdout_limit and not discard_excess:
                 return CallResult(
                     CallStatus.OUTPUT_LIMIT,
                     stdout=text[0],

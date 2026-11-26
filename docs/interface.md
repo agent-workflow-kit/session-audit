@@ -1054,7 +1054,7 @@ Entries of one hook run in config order (drop-ins appended in lexical order). `p
 
 The lease is renewed while hooks run (see Retro lifecycle, Leases).
 
-`labels` in every payload is always `{}` (retros have no labels; design guide §8 allows a tool with no labels to send an empty map).
+`labels` in every payload is an array of `key=value` strings (the shape notice-route reads), always `[]` today (retros have no labels).
 
 `post-retro.state` is one of the four final states (`done`, `failed`, `escalated`, `canceled`) and `reason` follows the Retro lifecycle rule. `post-retro` fires once per retro reaching a final state, including `hook_vetoed`; never for `reused`, refusals or dry runs.
 

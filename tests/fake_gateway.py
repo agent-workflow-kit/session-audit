@@ -24,6 +24,7 @@ from typing import BinaryIO
 
 from session_audit.gateway import (
     DEFAULT_STDOUT_LIMIT,
+    HOOK_STDOUT_LIMIT,
     CallResult,
     CallStatus,
     DirHandle,
@@ -115,6 +116,33 @@ class FakeGateway:
             if tuple(argv[: len(prefix)]) == prefix:
                 return results.pop(0) if len(results) > 1 else results[0]
         raise AssertionError(f"unscripted call: {list(argv)}")
+
+    def run_hook(
+        self,
+        command: str,
+        *,
+        timeout: float,
+        stdin: str,
+        env_extra: Mapping[str, str],
+        stdout_limit: int = HOOK_STDOUT_LIMIT,
+    ) -> CallResult:
+        """Scripted like ``run``: match with ``on(["/bin/sh", "-c", command], ...)``. The call is
+        recorded with ``hook`` set and the extra environment."""
+        argv = ["/bin/sh", "-c", command]
+        self.calls.append(
+            {
+                "argv": argv,
+                "stdin": stdin,
+                "timeout": timeout,
+                "cwd": None,
+                "hook": True,
+                "env_extra": dict(env_extra),
+            }
+        )
+        for prefix, results in self._rules:
+            if tuple(argv[: len(prefix)]) == prefix:
+                return results.pop(0) if len(results) > 1 else results[0]
+        raise AssertionError(f"unscripted hook: {command!r}")
 
     def now(self) -> datetime:
         return self.clock.now()
