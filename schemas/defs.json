@@ -2064,6 +2064,15 @@
               "maxItems": 20,
               "uniqueItems": true
             },
+            "deleted": {
+              "type": "array",
+              "items": {
+                "$ref": "defs.json#/$defs/retro_id"
+              },
+              "maxItems": 1000,
+              "uniqueItems": true,
+              "description": "retro delete: the retros that were deleted when a later step failed."
+            },
             "field": {
               "type": "string",
               "minLength": 1,

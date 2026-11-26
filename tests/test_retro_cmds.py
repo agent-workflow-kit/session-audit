@@ -271,6 +271,73 @@ def test_list_skips_a_row_that_does_not_fit_and_counts_nothing_for_it(
     assert result.doc["truncated"] is False
 
 
+BAD_ROWS = {
+    "model": ("model", "bad\x01model"),
+    "warnings": ("warnings", '["nope"]'),
+    "session_map": ("session_map", "{}"),
+    "turns": ("turns", -1),
+    "cost": ("cost_usd", -1.0),
+    "sandbox": ("sandbox", 5),
+    "redacted": ("redacted", -1),
+    "dropped": ("dropped", "{}"),
+    "skill": ("skill", "not a skill"),
+    "outcome": ("outcome", "Not A Token"),
+    "again_of": ("again_of", "nope"),
+}
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_ROWS))
+def test_list_and_show_agree_on_a_row_that_does_not_fit(
+    gw: RetroGateway,
+    corpus: Corpus,
+    store: Path,
+    capsys: pytest.CaptureFixture[str],
+    bad: str,
+) -> None:
+    good, broken = done(corpus.home, 1), done(corpus.home, 2, key=KEY_B)
+    column, value = BAD_ROWS[bad]
+    conn = connect(corpus.home)
+    conn.execute(f"UPDATE retros SET {column} = ? WHERE id = ?", (value, broken))
+    conn.commit()
+    conn.close()
+    listed = run(capsys, gw, "retro", "list", "--json")
+    assert [r["id"] for r in listed.doc["retros"]] == [good]
+    assert run(capsys, gw, "retro", "show", "--json", broken).code == 10
+
+
+def test_list_and_show_agree_on_a_done_retro_without_an_artifact_or_summary(
+    gw: RetroGateway, corpus: Corpus, store: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old = done(corpus.home, 1)
+    no_artifact = done(corpus.home, 2)  # same key, later: would supersede ``old``
+    no_summary = done(corpus.home, 3, key=KEY_B)
+    conn = connect(corpus.home)
+    conn.execute("DELETE FROM retro_artifacts WHERE retro_id = ?", (no_artifact,))
+    conn.execute("UPDATE retro_artifacts SET summary = '' WHERE retro_id = ?", (no_summary,))
+    conn.commit()
+    conn.close()
+    listed = run(capsys, gw, "retro", "list", "--json")
+    assert [(r["id"], r["superseded"]) for r in listed.doc["retros"]] == [(old, False)]
+    for bad in (no_artifact, no_summary):
+        assert run(capsys, gw, "retro", "show", "--json", bad).code == 10
+
+
+def test_list_notes_the_rows_that_did_not_fit_unless_quiet(
+    gw: RetroGateway, corpus: Corpus, store: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    done(corpus.home, 1)
+    broken = done(corpus.home, 2, key=KEY_B)
+    conn = connect(corpus.home)
+    conn.execute("UPDATE retros SET warnings = '[1]' WHERE id = ?", (broken,))
+    conn.commit()
+    conn.close()
+    noted = run(capsys, gw, "retro", "list", "--json")
+    assert "1 stored retro(s) did not fit and were not listed" in noted.err
+    assert len(noted.doc["retros"]) == 1
+    quiet = run(capsys, gw, "retro", "list", "--json", "--quiet")
+    assert quiet.err == ""
+
+
 def test_list_human_output_sanitizes_the_scope_and_prints_rows(
     gw: RetroGateway, corpus: Corpus, store: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -605,8 +672,11 @@ def test_confirmation_flow(
     no_tty = delete(capsys, gw, one, yes=False)
     assert no_tty.code == 2 and asked == []
     assert json.loads(no_tty.out)["error"]["details"] == {"reason": "confirmation_required"}
-    # --yes never asks, with or without a terminal
-    assert delete(capsys, gw, "ra-zzzzzzzz", tty=True).code == 10 and asked == []
+    # --yes never asks, with or without a terminal, with or without --json
+    spare, spare2 = done(corpus.home, 8, key=KEY_B), done(corpus.home, 9, key=KEY_B)
+    assert delete(capsys, gw, spare, tty=True).code == 0 and asked == []
+    human = run(capsys, gw, "retro", "delete", "--yes", spare2, tty=True)
+    assert human.code == 0 and asked == [] and ids_in(corpus.home) == [one]
     # a terminal asks; anything but y / yes deletes nothing
     for _ in range(3):
         refused = delete(capsys, gw, one, tty=True, yes=False)
@@ -652,8 +722,10 @@ def test_ids_outside_the_grammar_are_refused_before_any_path_is_built(
 def test_a_digest_that_cannot_be_removed_keeps_every_retro(
     gw: RetroGateway, corpus: Corpus, store: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    from .recoveryhelp import plant_local_files
+
     one, two = done(corpus.home, 1), done(corpus.home, 2)
-    put_digest(corpus.home, one, "x")
+    first_files = plant_local_files(corpus.home, one)
     stuck = put_digest(corpus.home, two, "x").parent / "sub"
     stuck.mkdir(mode=0o700)
     (stuck / "file").write_text("x")
@@ -667,7 +739,10 @@ def test_a_digest_that_cannot_be_removed_keeps_every_retro(
         "reason": "store_unwritable",
         "retryable": True,
     }
+    assert "no retro was deleted" not in result.out
     assert ids_in(corpus.home) == sorted([one, two])
+    # the planning pass refused before anything was removed: the first retro's files are intact
+    assert all(p.exists() for p in first_files.values())
     conn = connect(corpus.home)
     assert conn.execute("SELECT COUNT(*) FROM retro_artifacts").fetchone()[0] == 2
     conn.close()
@@ -676,6 +751,65 @@ def test_a_digest_that_cannot_be_removed_keeps_every_retro(
         if (store / "log.jsonl").exists()
         else True
     )
+
+
+def test_a_prompt_dir_that_cannot_be_removed_of_a_later_id_keeps_every_file(
+    gw: RetroGateway, corpus: Corpus, store: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from .recoveryhelp import plant_local_files
+
+    one, two = done(corpus.home, 1), done(corpus.home, 2)
+    first_files = plant_local_files(corpus.home, one)
+    second_files = plant_local_files(corpus.home, two)
+    stuck = second_files["prompt"].parent / "sub"
+    stuck.mkdir(mode=0o700)
+    (stuck / "file").write_text("x")
+    stuck.chmod(0o500)
+    try:
+        result = delete(capsys, gw, one, two)
+    finally:
+        stuck.chmod(0o700)
+    assert result.code == 12
+    assert ids_in(corpus.home) == sorted([one, two])
+    assert all(p.exists() for p in [*first_files.values(), *second_files.values()])
+
+
+def test_a_failing_log_entry_after_the_commit_is_exit_12_naming_the_deleted_ids(
+    gw: RetroGateway,
+    corpus: Corpus,
+    store: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from session_audit import errors
+    from session_audit.log import LogWriter
+
+    one, two, three = done(corpus.home, 1), done(corpus.home, 2), done(corpus.home, 3)
+    real = LogWriter.append
+    calls = [0]
+
+    def flaky(self: LogWriter, actor: str, action: str, **fields: Any) -> str:
+        calls[0] += 1
+        if calls[0] == 1:
+            raise errors.CliError(
+                "failed", "log", details={"reason": "store_unwritable", "retryable": True}
+            )
+        return real(self, actor, action, **fields)
+
+    monkeypatch.setattr(LogWriter, "append", flaky)
+    result = delete(capsys, gw, one, two, three)
+    assert result.code == 12
+    details = result.doc["error"]["details"]
+    assert details["deleted"] == [one, two, three]
+    assert "log" in result.doc["error"]["message"]
+    assert ids_in(corpus.home) == []
+    assert calls[0] == 3  # every entry was attempted
+    logged = [
+        json.loads(x)["retro_id"]
+        for x in (store / "log.jsonl").read_text().splitlines()
+        if "retro_delete" in x
+    ]
+    assert logged == [two, three]
 
 
 def test_the_run_files_of_a_retro_go_with_it(
@@ -753,7 +887,7 @@ def test_the_checkpoint_is_attempted_when_the_delete_fails(
     put_digest(corpus.home, one, "x")
     calls: list[str] = []
     monkeypatch.setattr(Store, "checkpoint", lambda self: calls.append("checkpoint"))
-    monkeypatch.setattr(retrofiles, "remove_digest", lambda *a: False)
+    monkeypatch.setattr(retrofiles, "remove_digest", lambda *a, **k: False)
     assert delete(capsys, gw, one).code == 12
     assert calls == ["checkpoint"]
 
@@ -886,6 +1020,23 @@ def test_a_store_error_after_the_first_line_is_exit_12_on_stderr_only(
     assert result.code == 12
     assert len(result.lines) == 1  # stdout holds only data lines
     assert result.err.strip() != "" and "error" not in result.out
+
+
+def test_the_unfit_count_of_export_retros_starts_again_when_the_stream_is_retried(
+    gw: RetroGateway, corpus: Corpus, store: Path
+) -> None:
+    from session_audit.retroquery import export_lines
+
+    done(corpus.home, 1)
+    broken = done(corpus.home, 2, key=KEY_B)
+    conn = connect(corpus.home)
+    conn.execute("UPDATE retros SET warnings = '[1]' WHERE id = ?", (broken,))
+    conn.commit()
+    unfit = [0]
+    for _ in range(2):  # what read_stream does on a retry: call the stream function again
+        assert len(list(export_lines(conn, None, unfit))) == 1
+    conn.close()
+    assert unfit == [1]
 
 
 def test_a_closed_pipe_ends_export_retros_with_exit_1(

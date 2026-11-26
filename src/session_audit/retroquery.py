@@ -32,9 +32,18 @@ MAX_PREFIX_MATCHES = 20
 _ID_GLOB = "ra-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]"
 _PAGE = 200
 
+# A stored artifact row with a summary that fits (``retroview`` checks the same: 1..2000 chars).
+_ARTIFACT_OK = (
+    "EXISTS (SELECT 1 FROM retro_artifacts a WHERE a.retro_id = {r}.id "
+    "AND typeof(a.summary) = 'text' AND length(a.summary) BETWEEN 1 AND 2000)"
+)
+
 # A later ``done`` retro with the same key exists ("later": created later, the id breaks a tie).
+# Only a ``done`` retro with a usable artifact row counts: one that ``retro show`` would refuse
+# never supersedes another.
 SUPERSEDED_SQL = (
     "EXISTS (SELECT 1 FROM retros n WHERE n.key = r.key AND n.state = 'done' "
+    f"AND {_ARTIFACT_OK.format(r='n')} "
     "AND (n.created_at > r.created_at OR (n.created_at = r.created_at AND n.id > r.id)))"
 )
 
@@ -109,7 +118,14 @@ class ListFilters:
 
 _LIST_COLUMNS = (
     "SELECT r.id, r.key, r.state, r.reason, r.created_at, r.started_at, r.finished_at, "
-    f"r.scope, r.resolved_scope, r.counts, {SUPERSEDED_SQL} AS superseded FROM retros r"
+    "r.scope, r.resolved_scope, r.counts, r.skill, r.model, r.session_map, r.warnings, "
+    "r.dropped, r.cost_usd, r.turns, r.sandbox, r.outcome, r.csession_id, r.redacted, "
+    "r.again_of, "
+    f"{SUPERSEDED_SQL} AS superseded, "
+    "EXISTS (SELECT 1 FROM retro_artifacts a WHERE a.retro_id = r.id) AS has_artifact, "
+    "(SELECT a.summary FROM retro_artifacts a WHERE a.retro_id = r.id) AS summary, "
+    "(SELECT s.cleanup_state FROM retro_sessions s WHERE s.csession_id = r.csession_id) "
+    "AS cleanup_state FROM retros r"
 )
 
 
@@ -138,19 +154,22 @@ def _where(filters: ListFilters) -> tuple[str, list[Any]]:
 
 
 def list_rows(
-    conn: sqlite3.Connection, filters: ListFilters, limit: int
+    conn: sqlite3.Connection, filters: ListFilters, limit: int, unfit: list[int]
 ) -> tuple[list[dict[str, Any]], bool]:
     """Up to ``limit`` rows, newest first, and whether more matched. A stored row that does not fit
-    the layout is skipped (it counts toward nothing)."""
+    the layout (``retroview.list_row``: exactly the rows ``load_retro`` would load, the artifact
+    body aside) is skipped and counted in ``unfit[0]``, not toward ``limit``."""
     where, params = _where(filters)
     cursor = conn.execute(
         f"{_LIST_COLUMNS} WHERE {where} ORDER BY r.created_at DESC, r.id DESC", params
     )
+    names = [column[0] for column in cursor.description]
     rows: list[dict[str, Any]] = []
     try:
         for stored in cursor:
-            row = retroview.list_row(tuple(stored))
+            row = retroview.list_row(dict(zip(names, stored, strict=True)))
             if row is None:
+                unfit[0] += 1
                 continue
             if len(rows) == limit:
                 return rows, True
@@ -164,7 +183,9 @@ def export_lines(
     conn: sqlite3.Connection, since_ms: int | None, unfit: list[int]
 ) -> Iterator[dict[str, Any]]:
     """The Retro object (with ``superseded``) of every stored retro, oldest first. ``unfit[0]``
-    counts the rows that did not fit and were left out."""
+    counts the rows that did not fit and were left out (reset here: a retry
+    starts over)."""
+    unfit[0] = 0
     where = "typeof(id) = 'text' AND id GLOB ?"
     params: list[Any] = [_ID_GLOB]
     if since_ms is not None:

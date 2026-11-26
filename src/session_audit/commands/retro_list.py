@@ -64,7 +64,10 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
         )
         since_ms = epoch_ms(since)
 
+    unfit = [0]
+
     def read(conn: sqlite3.Connection | None) -> tuple[list[dict[str, Any]], bool]:
+        unfit[0] = 0  # a retried read starts over
         session = None if args.session is None else _session_id(conn, args.session)
         if conn is None:
             return [], False
@@ -75,9 +78,11 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
             skill=args.skill,
             session_id=session,
         )
-        return list_rows(conn, filters, args.limit)
+        return list_rows(conn, filters, args.limit, unfit)
 
     rows, truncated = read_store(ctx, read)
+    if unfit[0]:
+        ctx.note(f"session-audit: {unfit[0]} stored retro(s) did not fit and were not listed")
     if ctx.json:
         ctx.emit_json({"retros": rows, "truncated": truncated})
         return 0

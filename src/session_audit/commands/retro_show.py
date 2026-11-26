@@ -58,7 +58,7 @@ def run(ctx: Context, args: argparse.Namespace) -> int:
     digest: str | None = None
     if args.digest:
         raw = read_digest(ctx.gateway, ctx.state_path(), retro["id"])
-        digest = None if raw is None else decode_utf8(raw)[:1048576]
+        digest = None if raw is None else decode_utf8(raw)
     if ctx.json:
         ctx.emit_json({**retro, "digest": digest} if args.digest else retro)
         return 0

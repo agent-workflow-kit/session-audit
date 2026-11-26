@@ -401,7 +401,7 @@ def _document(conn: sqlite3.Connection, retro_id: object) -> tuple[dict[str, Any
     return _object(_json(text)), summary
 
 
-def _state(row: sqlite3.Row) -> tuple[str, str | None]:
+def _state(row: Mapping[str, Any] | sqlite3.Row) -> tuple[str, str | None]:
     """The state and reason of a row, coupled as the schema couples them."""
     state, reason = row["state"], row["reason"]
     if state not in _STATES:
@@ -415,7 +415,10 @@ def _state(row: sqlite3.Row) -> tuple[str, str | None]:
     return state, reason
 
 
-def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def _check_row(row: Mapping[str, Any] | sqlite3.Row) -> dict[str, Any]:
+    """The checks of the columns of one ``retros`` row, shared by ``load_retro`` and ``list_row``
+    so that a row is listed exactly when it can be shown (the artifact envelope and the cleanup
+    state of the retro are checked by the caller). Returns the fields both print."""
     state, reason = _state(row)
     _text(row["scope"], 0, SCOPE_TEXT_MAX)  # descriptive only: its content is never used
     resolved = _object(_json(row["resolved_scope"]))
@@ -424,9 +427,66 @@ def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     if set(mapping) != {"sessions"}:
         raise _Bad
     counts = _counts(_json(row["counts"]), _COUNT_KEYS)
+    if counts["findings"] > 50 or counts["candidates"] > 20:
+        raise _Bad
+    warnings = _list(_json(row["warnings"]), 8)
+    if any(w not in _WARNINGS for w in warnings) or len(set(warnings)) != len(warnings):
+        raise _Bad
+    dropped = _counts(_json(row["dropped"]), ("findings", "candidates"))
+    cost = row["cost_usd"]
+    if cost is not None and (
+        isinstance(cost, bool) or not isinstance(cost, (int, float)) or not 0 <= cost < 1e12
+    ):
+        raise _Bad
+    turns = row["turns"]
+    sandbox = row["sandbox"]
+    if sandbox is not None and sandbox not in (0, 1):
+        raise _Bad
+    csession = _optional(_CSESSION, row["csession_id"])
+    stamps = [_stamp(row["created_at"])]
+    started, finished = _maybe_stamp(row["started_at"]), _maybe_stamp(row["finished_at"])
+    model = row["model"]
+    if model is not None and (
+        not isinstance(model, str)
+        or not 1 <= len(model) <= 128
+        or any(ord(c) < 32 or ord(c) == 127 for c in model)
+    ):
+        raise _Bad
+    stamps += [s for s in (started, finished) if s is not None]
+    return {
+        "id": _match(_RETRO_ID, row["id"]),
+        "state": state,
+        "reason": reason,
+        "key": _match(_KEY, row["key"]),
+        "scope": _scope(flags, resolved),
+        "scope_resolved": {
+            "since": _maybe_stamp_text(resolved.get("since")),
+            "until": _maybe_stamp_text(resolved.get("until")),
+        },
+        "sessions": _sessions(mapping["sessions"]),
+        "skill": _match(_SKILL, row["skill"]),
+        "model": model,
+        "created_at": stamps[0],
+        "updated_at": max(stamps),
+        "finished_at": finished,
+        "csession_id": csession,
+        "cost_usd": None if cost is None else float(cost),
+        "num_turns": None if turns is None else _count(turns),
+        "outcome": _optional(_TOKEN, row["outcome"]),
+        "sandbox_active": None if sandbox is None else bool(sandbox),
+        "warnings": warnings,
+        "redacted": _count(row["redacted"]),
+        "again_of": _optional(_RETRO_ID, row["again_of"]),
+        "counts": counts,
+        "dropped": dropped,
+    }
+
+
+def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    f = _check_row(row)
     stored = _document(conn, row["id"])
     if stored is None:
-        if state == "done":
+        if f["state"] == "done":
             raise _Bad
         # No artifact row (every retro that did not finish ``done``): the artifact fields are
         # empty and the coverage says nothing was recorded.
@@ -451,110 +511,75 @@ def _build(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         skipped = _skipped(envelope["skipped"])
         coverage = _coverage(envelope["coverage"])
         metrics = _metrics(envelope["metrics"])
-    warnings = _list(_json(row["warnings"]), 8)
-    if any(w not in _WARNINGS for w in warnings) or len(set(warnings)) != len(warnings):
-        raise _Bad
-    dropped = _counts(_json(row["dropped"]), ("findings", "candidates"))
-    cost = row["cost_usd"]
-    if cost is not None and (
-        isinstance(cost, bool) or not isinstance(cost, (int, float)) or not 0 <= cost < 1e12
-    ):
-        raise _Bad
-    turns = row["turns"]
-    sandbox = row["sandbox"]
-    if sandbox is not None and sandbox not in (0, 1):
-        raise _Bad
     cleanup = None
-    csession = _optional(_CSESSION, row["csession_id"])
-    if csession is not None:
+    if f["csession_id"] is not None:
         found = conn.execute(
-            "SELECT cleanup_state FROM retro_sessions WHERE csession_id = ?", (csession,)
+            "SELECT cleanup_state FROM retro_sessions WHERE csession_id = ?", (f["csession_id"],)
         ).fetchone()
         if found is not None:
             if found[0] not in _CLEANUP:
                 raise _Bad
             cleanup = found[0]
-    stamps = [_stamp(row["created_at"])]
-    started, finished = _maybe_stamp(row["started_at"]), _maybe_stamp(row["finished_at"])
-    model = row["model"]
-    if model is not None and (
-        not isinstance(model, str)
-        or not 1 <= len(model) <= 128
-        or any(ord(c) < 32 or ord(c) == 127 for c in model)
-    ):
-        raise _Bad
-    stamps += [s for s in (started, finished) if s is not None]
     return {
-        "id": _match(_RETRO_ID, row["id"]),
-        "state": state,
-        "reason": reason,
-        "key": _match(_KEY, row["key"]),
-        "scope": _scope(flags, resolved),
-        "scope_resolved": {
-            "since": _maybe_stamp_text(resolved.get("since")),
-            "until": _maybe_stamp_text(resolved.get("until")),
-        },
+        "id": f["id"],
+        "state": f["state"],
+        "reason": f["reason"],
+        "key": f["key"],
+        "scope": f["scope"],
+        "scope_resolved": f["scope_resolved"],
         "coverage": coverage,
         "skipped": skipped,
-        "sessions": _sessions(mapping["sessions"]),
-        "skill": _match(_SKILL, row["skill"]),
-        "model": model,
-        "created_at": stamps[0],
-        "updated_at": max(stamps),
-        "finished_at": finished,
-        "csession_id": csession,
-        "cost_usd": None if cost is None else float(cost),
-        "num_turns": None if turns is None else _count(turns),
-        "outcome": _optional(_TOKEN, row["outcome"]),
-        "sandbox_active": None if sandbox is None else bool(sandbox),
+        "sessions": f["sessions"],
+        "skill": f["skill"],
+        "model": f["model"],
+        "created_at": f["created_at"],
+        "updated_at": f["updated_at"],
+        "finished_at": f["finished_at"],
+        "csession_id": f["csession_id"],
+        "cost_usd": f["cost_usd"],
+        "num_turns": f["num_turns"],
+        "outcome": f["outcome"],
+        "sandbox_active": f["sandbox_active"],
         "cleanup": cleanup,
-        "warnings": warnings,
-        "redacted": _count(row["redacted"]),
-        "again_of": _optional(_RETRO_ID, row["again_of"]),
-        "counts": counts,
+        "warnings": f["warnings"],
+        "redacted": f["redacted"],
+        "again_of": f["again_of"],
+        "counts": f["counts"],
         "metrics": metrics,
-        "dropped": dropped,
+        "dropped": f["dropped"],
         "summary": summary,
         "findings": findings,
         "candidates": candidates,
     }
 
 
-def list_row(row: Sequence[Any]) -> dict[str, Any] | None:
-    """A ``retro list`` row (``defs.json`` ``retro_row``) from the columns ``id, key, state,
-    reason, created_at, started_at, finished_at, scope, resolved_scope, counts, superseded``, or
-    None when they do not fit the layout. Built from columns only: no model text."""
+def list_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A ``retro list`` row (``defs.json`` ``retro_row``) from a mapping of the ``retros`` columns
+    plus ``superseded``, ``has_artifact``, ``summary`` and ``cleanup_state`` (the artifact row's
+    summary and the retro's cleanup state), or None when the retro would not load: the row goes
+    through the same ``_check_row`` as ``load_retro``, a ``done`` retro needs its artifact row and
+    every artifact row a valid summary. The artifact body is not read (no model text)."""
     try:
-        retro_id, key, state, reason, created, started, finished, text, resolved, counts, sup = row
-        if state not in _STATES:
+        f = _check_row(row)
+        if row["has_artifact"]:
+            _text(row["summary"], 1, 2000)
+        elif f["state"] == "done":
             raise _Bad
-        allowed = _REASONS.get(state)
-        if (allowed is None and reason is not None) or (
-            allowed is not None and reason not in allowed
-        ):
-            raise _Bad
-        _text(text, 0, SCOPE_TEXT_MAX)
-        found = _object(_json(resolved))
-        flags = _object(found.get("flags"))
-        counted = _counts(_json(counts), _COUNT_KEYS)
-        if counted["findings"] > 50 or counted["candidates"] > 20:
-            raise _Bad
-        stamps = [_stamp(created)]
-        shown_finished = _maybe_stamp(finished)
-        shown_started = _maybe_stamp(started)
-        stamps += [s for s in (shown_started, shown_finished) if s is not None]
+        if f["csession_id"] is not None and row["cleanup_state"] is not None:
+            if row["cleanup_state"] not in _CLEANUP:
+                raise _Bad
         return {
-            "id": _match(_RETRO_ID, retro_id),
-            "state": state,
-            "reason": reason,
-            "created_at": stamps[0],
-            "updated_at": max(stamps),
-            "finished_at": shown_finished,
-            "scope": _scope(flags, found),
-            "findings": counted["findings"],
-            "candidates": counted["candidates"],
-            "key": _match(_KEY, key),
-            "superseded": bool(sup),
+            "id": f["id"],
+            "state": f["state"],
+            "reason": f["reason"],
+            "created_at": f["created_at"],
+            "updated_at": f["updated_at"],
+            "finished_at": f["finished_at"],
+            "scope": f["scope"],
+            "findings": f["counts"]["findings"],
+            "candidates": f["counts"]["candidates"],
+            "key": f["key"],
+            "superseded": bool(row["superseded"]),
         }
     except (_Bad, ValueError):
         return None

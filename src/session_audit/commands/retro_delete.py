@@ -9,9 +9,12 @@ The flow, all or nothing:
    live run: exit 20 ``in_use``), the digest directory and the retro's local files go through the
    shared removal rules (``retrofiles.remove_digest`` and ``delete_local``: the id is checked
    against the id grammar before any path is built, nothing is followed through a symlink) BEFORE
-   the rows, a removal that is not complete keeps every retro, and the artifact and retro rows
-   go in one ``DELETE ... IN`` per page.
-4. One ``retro_delete`` log entry per retro after the commit, then the ``TRUNCATE`` checkpoint
+   the rows. A planning pass over ALL ids (``apply=False``) runs first: when any removal would not
+   be complete, nothing is removed and every retro is kept (exit 12). Only then are the files
+   removed (a failure after that point, a race or an I/O error, keeps the rows and may leave
+   files already removed), and the artifact and retro rows go in one ``DELETE ... IN`` per page.
+4. One ``retro_delete`` log entry per retro after the commit (every entry is attempted; a failed
+   one is exit 12 naming the ids that were deleted), then the ``TRUNCATE`` checkpoint
    (a busy one is a retryable exit 12; it is attempted on every path, a failure included).
 
 ``retro_starts`` and ``retro_sessions`` rows are never touched: a pending cleanup of a deleted
@@ -81,7 +84,7 @@ def _confirm(ctx: Context, ids: list[str]) -> None:
 def _removal_failed() -> errors.CliError:
     return errors.CliError(
         "failed",
-        "a digest or run file could not be removed completely; no retro was deleted",
+        "a digest or run file could not be removed completely; the retros are kept",
         details={"reason": "store_unwritable", "retryable": True},
     )
 
@@ -109,6 +112,11 @@ def _delete(ctx: Context, store: Store, ids: list[str]) -> list[str | None]:
                     details={"reason": "in_use", "retro_id": retro_id},
                 )
             keys.append(key if isinstance(key, str) and _KEY.fullmatch(key) else None)
+        for retro_id in ids:  # plan everything first: nothing is removed unless all can be
+            if not retrofiles.remove_digest(gateway, store.directory, retro_id, apply=False):
+                raise _removal_failed()
+            if not retrofiles.delete_local(gateway, store.directory, retro_id, apply=False):
+                raise _removal_failed()
         for retro_id in ids:
             if not retrofiles.remove_digest(gateway, store.directory, retro_id):
                 raise _removal_failed()
@@ -122,15 +130,31 @@ def _delete(ctx: Context, store: Store, ids: list[str]) -> list[str | None]:
     return keys
 
 
+def _log(ctx: Context, store: Store, ids: list[str], keys: list[str | None]) -> None:
+    """One log entry per deleted retro. The rows are gone: every entry is attempted, and a failed
+    one is reported after the others, naming the ids that were deleted."""
+    assert ctx.actor is not None
+    failed = False
+    for retro_id, key in zip(ids, keys, strict=True):
+        try:
+            store.log.append(ctx.actor, "retro_delete", retro_id=retro_id, key=key)
+        except errors.CliError:
+            failed = True
+    if failed:
+        raise errors.CliError(
+            "failed",
+            "the retros were deleted but some log entries could not be written",
+            details={"reason": "store_unwritable", "retryable": False, "deleted": ids},
+        )
+
+
 def run(ctx: Context, args: argparse.Namespace) -> int:
     ids = _resolve(ctx, args.retro_ids)
     _confirm(ctx, ids)
     store = ctx.store()
     try:
         keys = _delete(ctx, store, ids)
-        assert ctx.actor is not None
-        for retro_id, key in zip(ids, keys, strict=True):
-            store.log.append(ctx.actor, "retro_delete", retro_id=retro_id, key=key)
+        _log(ctx, store, ids, keys)
     except BaseException:
         with contextlib.suppress(errors.CliError, sqlite3.Error):
             store.checkpoint()  # the bytes deleted so far leave the disk; the failure wins
