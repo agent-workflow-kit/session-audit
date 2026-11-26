@@ -211,6 +211,27 @@ def _open_root(gateway: Gateway, configured: str, seen: set[tuple[int, int]]) ->
     return Root(configured, handle, None, identity)
 
 
+def _classify(
+    rel: tuple[bytes, ...],
+) -> tuple[Kind, bytes, bytes | None, bytes | None] | None:
+    """``(kind, session, agent, workflow)`` of the components below a root when they name a
+    transcript by Ingest rules 2 (the same patterns the listing uses), else None."""
+    if not rel[0] or rel[0] in _DOTS:
+        return None
+    if len(rel) == 2:
+        main = _MAIN_FILE.fullmatch(rel[1])
+        return ("main", main.group(1), None, None) if main is not None else None
+    if len(rel) not in (4, 6) or not _UUID_NAME.fullmatch(rel[1]) or rel[2] != b"subagents":
+        return None
+    if len(rel) == 4:
+        agent = _AGENT_FILE.fullmatch(rel[3])
+        return ("subagent", rel[1], agent.group(1), None) if agent is not None else None
+    if rel[3] != b"workflows" or not _WORKFLOW_NAME.fullmatch(rel[4]) or rel[4] in _DOTS:
+        return None
+    agent = _AGENT_FILE.fullmatch(rel[5])
+    return ("workflow", rel[1], agent.group(1), rel[4]) if agent is not None else None
+
+
 def _components(path: bytes) -> list[bytes]:
     return [part for part in path.split(b"/") if part and part != b"."]
 
@@ -499,6 +520,38 @@ class Discovery:
             and info.st_nlink == 1
             and info.st_uid == self.gateway.uid()
         )
+
+    def candidate_for(self, path: bytes) -> Candidate | None:
+        """The ``Candidate`` a stored path (``files.path``) names, or None when it is not below a
+        usable root or its name is not a transcript name of rule 2. No file is touched: the result
+        is only as good as the names, so open it with ``open`` (which walks it safely). ``size``,
+        ``mtime_ns``, ``dev`` and ``ino`` are 0 (a listing's facts are only hints)."""
+        for index, root in enumerate(self.roots):
+            if root.handle is None or root.reason is not None:
+                continue
+            base = os.fsencode(root.configured).rstrip(b"/") + b"/"
+            if not path.startswith(base):
+                continue
+            rel = tuple(path[len(base) :].split(b"/"))
+            found = _classify(rel)
+            if found is None:
+                continue
+            kind, session, agent, workflow = found
+            return Candidate(
+                root_index=index,
+                rel=rel,
+                path=path,
+                kind=kind,
+                session_id=session.decode("ascii"),
+                agent_id=agent.decode("ascii") if agent is not None else None,
+                workflow=workflow.decode("ascii") if workflow is not None else None,
+                project=rel[0],
+                size=0,
+                mtime_ns=0,
+                dev=0,
+                ino=0,
+            )
+        return None
 
     # --- opening -------------------------------------------------------------------------------
 

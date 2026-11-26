@@ -603,7 +603,9 @@ def test_rejection_item_and_denial_event():
     assert [e.kind for e in r.events] == [Kind.DENIAL]
     assert [(i.kind, i.text) for i in r.digest] == [(DigestKind.REJECTION, "no")]
     other = parse(user(content, toolDenialKind="auto"), DCTX)
-    assert other.digest == ()
+    assert [(i.kind, i.text, i.tool_use_id) for i in other.digest] == [
+        (DigestKind.DENIAL, "no", "t")
+    ]
 
 
 def test_tool_call_argument_summaries():
@@ -868,3 +870,78 @@ def test_chunked_reads_give_the_same_events(tmp_path: Path, seed: int):
     part_events, part_facts = read_all(tmp_path / "b.jsonl", cuts, blob)
     assert whole_events and part_events == whole_events
     assert part_facts == whole_facts
+
+
+# --- digest items for errors, denials, interruptions and compactions (issue #21) ---------------
+
+
+def test_tool_error_item_per_error_block_with_the_result_text():
+    content = [
+        {"type": "tool_result", "tool_use_id": "t1", "is_error": True, "content": "boom"},
+        {"type": "tool_result", "tool_use_id": "t2", "content": "fine, never included"},
+        {
+            "type": "tool_result",
+            "tool_use_id": "t3",
+            "is_error": True,
+            "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+        },
+        {"type": "tool_result", "tool_use_id": "t4", "is_error": True},
+    ]
+    items = parse(user(content), DCTX).digest
+    assert [(i.kind, i.block, i.tool_use_id, i.text) for i in items] == [
+        (DigestKind.TOOL_ERROR, 0, "t1", "boom"),
+        (DigestKind.TOOL_ERROR, 2, "t3", "a b"),
+        (DigestKind.TOOL_ERROR, 3, "t4", ""),
+    ]
+    assert parse(user(content)).digest == ()  # only when the context asks
+
+
+def test_denial_item_takes_the_first_result_text_else_the_message_text():
+    with_result = [{"type": "tool_result", "tool_use_id": "t", "content": "denied here"}]
+    (item,) = parse(user(with_result, toolDenialKind="auto"), DCTX).digest
+    assert (item.kind, item.text, item.tool_use_id) == (DigestKind.DENIAL, "denied here", "t")
+    (item,) = parse(user("plain text", toolDenialKind="auto"), DCTX).digest
+    assert (item.kind, item.text, item.tool_use_id) == (DigestKind.DENIAL, "plain text", None)
+    decision = {"decision": "reject"}
+    (item,) = parse(user("x", permissionDecision=decision), DCTX).digest
+    assert item.kind is DigestKind.DENIAL
+    (item,) = parse(user(None, toolDenialKind="auto"), DCTX).digest
+    assert (item.kind, item.text) == (DigestKind.DENIAL, "")
+
+
+def test_a_user_rejected_line_gives_a_rejection_item_and_no_denial_item():
+    content = [{"type": "tool_result", "tool_use_id": "t", "content": "no"}]
+    items = parse(user(content, toolDenialKind="user-rejected"), DCTX).digest
+    assert [(i.kind, i.text, i.tool_use_id) for i in items] == [(DigestKind.REJECTION, "no", "t")]
+    (item,) = parse(user(None, toolDenialKind="user-rejected"), DCTX).digest
+    assert (item.kind, item.text) == (DigestKind.REJECTION, "")
+
+
+def test_interruption_item_and_the_line_is_not_a_prompt():
+    items = parse(user("[Request interrupted]", interruptedMessageId="m"), DCTX).digest
+    assert [(i.kind, i.text) for i in items] == [(DigestKind.INTERRUPTION, "[Request interrupted]")]
+    (item,) = parse(user(None, interruptedMessageId="m"), DCTX).digest
+    assert (item.kind, item.text) == (DigestKind.INTERRUPTION, "")
+
+
+def test_compaction_item_has_no_text():
+    obj = {"type": "system", "subtype": "compact_boundary", "uuid": "u4", "timestamp": TS}
+    (item,) = parse(obj, DCTX).digest
+    assert (item.kind, item.text, item.uuid, item.ts) == (DigestKind.COMPACTION, "", "u4", TS_MS)
+    assert parse(obj).digest == ()
+    other = {"type": "system", "subtype": "turn_duration", "durationMs": 5}
+    assert parse(other, DCTX).digest == ()
+
+
+def test_tool_call_item_carries_the_tool_use_id():
+    content = [{"type": "tool_use", "id": "toolu_9", "name": "Bash", "input": {"command": "ls"}}]
+    (item,) = parse(assistant(None, content), DCTX).digest
+    assert (item.kind, item.tool_use_id, item.text) == (DigestKind.TOOL_CALL, "toolu_9", "ls")
+
+
+def test_error_item_texts_are_cut_and_fixed_like_every_digest_text():
+    big = "e" * (TEXT_CAP + 10) + "\ud800"
+    content = [{"type": "tool_result", "tool_use_id": "t", "is_error": True, "content": big}]
+    (item,) = parse(user(content), DCTX).digest
+    assert len(item.text) == TEXT_CAP
+    assert "SECRET" not in repr(parse(user([{**content[0], "content": "SECRET"}]), DCTX))
