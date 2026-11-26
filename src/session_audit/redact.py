@@ -4,7 +4,8 @@
 redaction, the cut (at a code point, never inside a ``[REDACTED:<kind>]`` marker), the sanitizer
 and the fence-tag neutralizer (``</untrusted``, ``<untrusted``). The
 output is deterministic. Redaction reads a window of twice the work bound, so a secret that
-starts inside the bound and ends after it is redacted whole; the output ends at the bound, or after the marker of a match that starts inside it.
+starts inside the bound and ends after it is redacted whole; the output ends at the
+bound, or after the marker of a match that starts inside it.
 
 Redaction finds spans (built-in patterns from ``redact_patterns.toml``, private-key blocks,
 literal masks, configured token prefixes), merges overlapping spans and writes one marker per
