@@ -213,17 +213,16 @@ def test_without_a_manifest_the_base_name_is_the_plugin_name(home: Path) -> None
     assert run(Counting(), "tool:audit", home, dirs=(str(plugin),)).found == str(plugin.resolve())
 
 
-def test_an_empty_manifest_name_falls_back_to_the_base_name(home: Path) -> None:
-    plugin = make_plugin(home / "tool", manifest='{"name": ""}')
-    assert run(Counting(), "tool:audit", home, dirs=(str(plugin),)).found
-
-
 @pytest.mark.parametrize(
     "manifest",
     [
         "not json",
         "[]",
         '{"name": 7}',
+        "{}",  # a present manifest without a name is no match (fail closed)
+        '{"name": null}',
+        '{"name": ""}',
+        '{"name": 5}',
         '{"name": ["tool"]}',
         '{"name": "tool", "name": "tool"}',  # a duplicate key
         '{"name": "tool", "x": NaN}',
@@ -542,6 +541,18 @@ def locations(home: Path) -> Mapping[str, Path]:
         "xdg_state": xdg / "s",
         "inside_xdg_state": xdg / "s" / "p",
         "git_credentials": home / ".git-credentials",
+        "kube": home / ".kube",
+        "docker": home / ".docker",
+        "netrc": home / ".netrc",
+        "keyrings": home / ".local" / "share" / "keyrings",
+        "xdg_keyrings": xdg / "d" / "keyrings",
+        "inside_xdg_keyrings": xdg / "d" / "keyrings" / "p",
+        "cargo_credentials": home / ".cargo" / "credentials",
+        "cargo_credentials_toml": home / ".cargo" / "credentials.toml",
+        "gem_credentials": home / ".gem" / "credentials",
+        "gradle_properties": home / ".gradle" / "gradle.properties",
+        "m2_settings": home / ".m2" / "settings.xml",
+        "m2_settings_security": home / ".m2" / "settings-security.xml",
     }
 
 
@@ -552,6 +563,7 @@ def test_a_directory_in_or_at_a_credential_location_is_refused(name: str, home: 
     environ = {
         "XDG_CONFIG_HOME": str(home.parent / "xdg" / "c"),
         "XDG_STATE_HOME": str(home.parent / "xdg" / "s"),
+        "XDG_DATA_HOME": str(home.parent / "xdg" / "d"),
     }
     error = refusal(lambda: run(Counting(), "demo:audit", home, dirs=(str(plugin),), **environ))
     assert reason(error) == "unsafe_plugin_dir"
@@ -600,6 +612,55 @@ def test_a_location_reached_through_a_symlink_is_refused(home: Path) -> None:
 def test_a_sibling_whose_name_only_starts_like_a_location_is_accepted(home: Path) -> None:
     for sibling in (".sshx", ".claude-plugins", ".configs", ".local/state2"):
         plugin = make_plugin(home / sibling / "p")
+        assert run(Counting(), "demo:audit", home, dirs=(str(plugin),)).found
+
+
+def test_the_account_home_is_protected_when_it_differs_from_home(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = tmp_path / "account"
+    account.mkdir()
+    monkeypatch.setattr(
+        plugins.pwd, "getpwuid", lambda uid: type("E", (), {"pw_dir": str(account)})()
+    )
+    for where in (account / ".ssh" / "p", account / ".config", account, account.parent):
+        plugin = make_plugin(where, name="demo") if where != account.parent else account.parent
+        error = refusal(lambda p=plugin: run(Counting(), "demo:audit", home, dirs=(str(p),)))
+        assert reason(error) == "unsafe_plugin_dir"
+    fine = make_plugin(account / "code" / "p")
+    assert run(Counting(), "demo:audit", home, dirs=(str(fine),)).found
+
+
+def test_an_account_home_equal_to_home_or_root_adds_nothing(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for pw_dir in (str(home), "/"):
+        monkeypatch.setattr(
+            plugins.pwd, "getpwuid", lambda uid, d=pw_dir: type("E", (), {"pw_dir": d})()
+        )
+        plugin = make_plugin(home / "code" / "p")
+        assert run(Counting(), "demo:audit", home, dirs=(str(plugin),)).found
+
+
+def test_a_missing_passwd_entry_is_ignored(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(uid: int) -> Any:
+        raise KeyError(uid)
+
+    monkeypatch.setattr(plugins.pwd, "getpwuid", missing)
+    plugin = make_plugin(home / "code" / "p")
+    assert run(Counting(), "demo:audit", home, dirs=(str(plugin),)).found
+
+
+@pytest.mark.parametrize("insensitive", [True, False])
+def test_credential_names_are_compared_case_folded_on_a_case_insensitive_platform(
+    insensitive: bool, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plugins, "CASE_INSENSITIVE", insensitive)
+    plugin = make_plugin(home / ".CONFIG" / "pl")
+    if insensitive:
+        error = refusal(lambda: run(Counting(), "demo:audit", home, dirs=(str(plugin),)))
+        assert reason(error) == "unsafe_plugin_dir"
+    else:
         assert run(Counting(), "demo:audit", home, dirs=(str(plugin),)).found
 
 

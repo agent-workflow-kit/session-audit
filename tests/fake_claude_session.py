@@ -166,6 +166,8 @@ def plan_doc(changes: dict[str, Any] | None = None) -> dict[str, Any]:
             "setting_sources": "flag-implied",
             "mcp": "flag-implied",
             "env.inherit": "flag-implied",
+            "env.set_names": "builtin",
+            "env.path_prepend": "builtin",
             "reads_third_party": "flag",
             "implicit_done": "flag",
             "tools": "flag",

@@ -22,8 +22,8 @@ entry, in this order:
    directories are not special: the same rule holds below ``node_modules`` or ``.venv``;
 3. the plugin name is the ``name`` of ``.claude-plugin/plugin.json`` (at most 64 KiB, strict JSON)
    or, when the manifest is absent, the directory's base name. A manifest that is present but
-   unreadable, too large, not strict JSON or without a string ``name`` makes the directory not a
-   match (never a fall back to the base name);
+   unreadable, too large, not strict JSON or without a non-empty string ``name`` makes the
+   directory not a match (never a fall back to the base name);
 4. a match needs ``skills/<name>/SKILL.md`` as a regular file (no symlink on the way).
 
 No match anywhere is exit 12 ``skill_not_found``. The directories for ``--plugin-dir`` are the
@@ -39,8 +39,11 @@ from __future__ import annotations
 
 import importlib.resources
 import os
+import pwd
 import re
 import stat as statmod
+import sys
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -69,7 +72,7 @@ MAX_DEPTH = 32
 MANIFEST_CAP = 64 * 1024
 MANIFEST_DIR = b".claude-plugin"
 MANIFEST_FILE = b"plugin.json"
-BUNDLED_NAME = "session-audit"
+CASE_INSENSITIVE = sys.platform == "darwin"  # a function reads it at call time (tests set it)
 
 # Relative to $HOME: claude-session's credential paths (its Path rules), which a plugin directory
 # may not be, contain or be inside, plus ``~/.local/state`` where the state directory lives.
@@ -170,8 +173,30 @@ def _is_file(gateway: Gateway, path: str) -> bool:
 # --- credential and state locations ----------------------------------------------------------
 
 
+def _key(component: str) -> str:
+    """The comparison key of a path component: on a case-insensitive platform (macOS) NFD and
+    case-folded, as claude-session compares, so ``.CONFIG`` and ``.config`` are one name."""
+    if not CASE_INSENSITIVE:
+        return component
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", component).casefold())
+
+
 def _parts(path: str) -> tuple[str, ...]:
-    return tuple(p for p in os.path.normpath(path).split("/") if p)
+    return tuple(_key(p) for p in os.path.normpath(path).split("/") if p)
+
+
+def home_directories(env: Mapping[str, str]) -> tuple[str, ...]:
+    """``$HOME`` and, when it is another directory, the account home of the passwd entry (what
+    claude-session protects too). Skipped for a failed lookup, a relative one, ``/`` or the
+    same directory as ``$HOME``."""
+    home = home_dir(env)
+    try:
+        account = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return (home,)
+    if not os.path.isabs(account) or os.path.realpath(account) in ("/", os.path.realpath(home)):
+        return (home,)
+    return (home, os.path.normpath(account))
 
 
 def _related(one: tuple[str, ...], other: tuple[str, ...]) -> bool:
@@ -181,11 +206,11 @@ def _related(one: tuple[str, ...], other: tuple[str, ...]) -> bool:
 
 
 def credential_locations(
-    env: Mapping[str, str], home: str, state_directory: str | None = None
+    env: Mapping[str, str], homes: Sequence[str], state_directory: str | None = None
 ) -> list[str]:
     """The locations a configured plugin directory may not overlap (``$HOME`` and its ancestors
     are a separate rule). Each is listed as written and as ``realpath`` sees it."""
-    found = [os.path.join(home, name) for name in HOME_CREDENTIALS]
+    found = [os.path.join(home, name) for home in homes for name in HOME_CREDENTIALS]
     for variable in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
         value = env.get(variable, "")
         if value.startswith("/") and "\x00" not in value:
@@ -198,13 +223,15 @@ def credential_locations(
     return list(dict.fromkeys([*found, *(os.path.realpath(p) for p in found)]))
 
 
-def _refused_location(path: str, locations: Sequence[str], home: str) -> bool:
+def _refused_location(path: str, locations: Sequence[str], homes: Sequence[str]) -> bool:
     """True when ``path`` (checked as written and by its realpath) is, contains or is inside a
     credential location, or is ``$HOME`` or an ancestor of it (``/`` included)."""
-    homes = {_parts(home), _parts(os.path.realpath(home))}
+    home_parts = {_parts(h) for home in homes for h in (home, os.path.realpath(home))}
     for form in (path, os.path.realpath(path)):
         mine = _parts(form)
-        if any(mine == h[: len(mine)] for h in homes):  # the root, an ancestor of home, or home
+        if any(
+            mine == h[: len(mine)] for h in home_parts
+        ):  # the root, an ancestor of home, or home
             return True
         if any(_related(mine, _parts(location)) for location in locations):
             return True
@@ -274,8 +301,9 @@ _INVALID = object()
 
 
 def _manifest_name(gateway: Gateway, root: DirHandle) -> object:
-    """The manifest's ``name`` (a non-empty string), ``_ABSENT`` for no manifest file (or an empty
-    name: the base name then counts) and ``_INVALID`` for a manifest that cannot be trusted."""
+    """The manifest's ``name`` (a non-empty string), ``_ABSENT`` for no manifest file (the base
+    name then counts) and ``_INVALID`` for a manifest that cannot be trusted (unreadable, too
+    large, not strict JSON, or with a missing, null, non-string or empty ``name``)."""
     try:
         directory = root.open_dir(MANIFEST_DIR)
     except FileNotFoundError:
@@ -309,9 +337,7 @@ def _manifest_name(gateway: Gateway, root: DirHandle) -> object:
     if not isinstance(document, dict):
         return _INVALID
     name = document.get("name")
-    if name is None or name == "":
-        return _ABSENT
-    return name if isinstance(name, str) else _INVALID
+    return name if isinstance(name, str) and name != "" else _INVALID
 
 
 def _has_skill(root: DirHandle, name: str) -> bool:
@@ -365,14 +391,14 @@ def skill_preflight(
     if bundled is None:
         bundled = bundled_plugin_dir(gateway)
     bundled_dirs = (os.path.realpath(bundled),) if bundled is not None else ()
-    home = home_dir(env)
-    locations = credential_locations(env, home, state_directory)
+    homes = home_directories(env)
+    locations = credential_locations(env, homes, state_directory)
     uid = gateway.uid()
     for directory, configured in [(b, False) for b in bundled_dirs] + [
         (d, True) for d in plugin_dirs
     ]:
         if configured:
-            if _refused_location(directory, locations, home):
+            if _refused_location(directory, locations, homes):
                 raise unsafe_plugin_dir()
             try:
                 if statmod.S_ISLNK(gateway.lstat(directory).st_mode):
@@ -387,7 +413,7 @@ def skill_preflight(
             real = os.fsdecode(root.path)
             if configured:
                 # The entry is checked where it really is, as well as where it was written.
-                if _refused_location(real, locations, home):
+                if _refused_location(real, locations, homes):
                     raise unsafe_plugin_dir()
                 try:
                     _check_tree(gateway, root, uid)

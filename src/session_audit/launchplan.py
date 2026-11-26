@@ -20,7 +20,8 @@ compares the returned plan with the required settings, exactly:
   ``would_fail`` is exit 12 ``session_not_started`` with ``details.end_reason``;
 * every safety setting must have the required value (``settings_mismatches`` names each one that
   does not) and every ``origins`` key outside ``OPEN_ORIGIN_KEYS`` must be ``builtin``, ``flag``
-  or ``flag-implied``, so a key claude-session adds later fails closed;
+  or ``flag-implied``, so a key claude-session adds later fails closed; every key of
+  ``REQUIRED_ORIGIN_KEYS`` must be present (a missing key fails closed too);
 * the session directory path must be ASCII and its project directory name at most 200 characters.
 
 The plan document is validated here by hand (the closed field list this check reads): the pinned
@@ -48,6 +49,7 @@ from .store import DIR_MODE, FILE_MODE, unwritable
 __all__ = [
     "OPEN_ORIGIN_KEYS",
     "PLAN_TIMEOUT",
+    "REQUIRED_ORIGIN_KEYS",
     "PLACEHOLDER_FILES",
     "PLACEHOLDER_RETRO_ID",
     "Launch",
@@ -63,6 +65,24 @@ __all__ = [
 ]
 
 OPEN_ORIGIN_KEYS = ("model", "timeout", "max_turns")  # the only origins config may set
+# The origins of every setting the check reads: a plan that does not show one of them cannot
+# show that no config changed it, so a missing key is a mismatch like a changed one.
+REQUIRED_ORIGIN_KEYS = (
+    "tools",
+    "implicit_done",
+    "reads_third_party",
+    "sandbox",
+    "setting_sources",
+    "mcp",
+    "env.inherit",
+    "env.set_names",
+    "env.path_prepend",
+    "write_dirs",
+    "notes_context",
+    "claude_args",
+    "permission_profile",
+    "cwd",
+)
 ORIGIN_OK = frozenset({"builtin", "flag", "flag-implied"})
 PLAN_TIMEOUT = 120.0
 PLAN_OUTPUT_LIMIT = 4 * 1024 * 1024
@@ -302,7 +322,8 @@ def settings_mismatches(plan: Plan, settings: RetroSettings) -> list[str]:
         "sandbox": plan.sandbox_mode == settings.sandbox,
         "sandbox_lowered": plan.sandbox_lowered == (settings.sandbox != "required"),
         "repo": plan.repo is None,
-        "origins": all(
+        "origins": all(key in plan.origins for key in REQUIRED_ORIGIN_KEYS)
+        and all(
             origin in ORIGIN_OK
             for key, origin in plan.origins.items()
             if key not in OPEN_ORIGIN_KEYS
@@ -347,14 +368,14 @@ class _Placeholders:
         self.files: list[str] = []
         tmp = os.path.join(state, "tmp")
         try:
-            for path in self._missing(tmp):
-                gateway.mkdir(path, DIR_MODE)
-                self.created.append(path)
-            _check_private(gateway, state)
-            _check_private(gateway, tmp)
+            self._ensure(tmp)
             name = "plan-" + gateway.token_hex(8)
             self.directory = os.path.join(tmp, name)
-            gateway.mkdir(self.directory, DIR_MODE)
+            try:
+                gateway.mkdir(self.directory, DIR_MODE)
+            except FileNotFoundError:
+                self._ensure(tmp)  # a concurrent check removed the tmp directory: once more
+                gateway.mkdir(self.directory, DIR_MODE)
             self.created.append(self.directory)
             for file in PLACEHOLDER_FILES:
                 path = os.path.join(self.directory, file)
@@ -363,6 +384,19 @@ class _Placeholders:
         except BaseException:
             self.remove()
             raise
+
+    def _ensure(self, tmp: str) -> None:
+        """Create the missing directories down to ``tmp`` (0700) and check that the state and tmp
+        directories are private. One a concurrent check made first (FileExistsError) exists: it
+        is not ours to remove and is checked like any existing one."""
+        for path in self._missing(tmp):
+            try:
+                self.gateway.mkdir(path, DIR_MODE)
+            except FileExistsError:
+                continue
+            self.created.append(path)
+        _check_private(self.gateway, os.path.dirname(tmp))
+        _check_private(self.gateway, tmp)
 
     def _missing(self, directory: str) -> list[str]:
         missing: list[str] = []

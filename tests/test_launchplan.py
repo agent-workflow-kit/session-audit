@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import re
@@ -350,6 +351,58 @@ def test_the_placeholders_are_removed_when_the_call_raises_or_is_interrupted(
     assert list(existing.iterdir()) == []
 
 
+class Racing(SystemGateway):
+    """A concurrent plan check: the directory named by ``lose`` is created by the other process
+    just before this one's ``mkdir`` (so it raises FileExistsError once); ``vanish`` removes the
+    tmp directory just before the first ``plan-`` directory is made (FileNotFoundError once)."""
+
+    def __init__(self, lose: str | None = None, vanish: bool = False) -> None:
+        super().__init__(kill_grace=1)
+        self.lose = lose
+        self.vanish = vanish
+
+    def mkdir(self, path: Any, mode: int) -> None:
+        if self.lose is not None and os.fspath(path) == self.lose:
+            self.lose = None
+            super().mkdir(path, mode)  # the other process made it first
+        elif self.vanish and os.path.basename(os.fspath(path)).startswith("plan-"):
+            self.vanish = False
+            os.rmdir(os.path.dirname(os.fspath(path)))  # the other process's cleanup took tmp
+        super().mkdir(path, mode)
+
+
+@pytest.mark.parametrize("which", ["state", "tmp"])
+def test_a_directory_made_by_a_concurrent_check_counts_as_existing(
+    which: str, fake: FakeClaudeSession, tmp_path: Path
+) -> None:
+    script(fake, plan_doc())
+    fresh = tmp_path / "fresh"
+    lose = fresh if which == "state" else fresh / "tmp"
+    check(fake, fresh, gateway=Racing(lose=str(lose)))
+    assert fresh.is_dir()  # not ours to remove: the other check owns it
+    assert [c["key"] for c in fake.calls()] == ["start --dry-run"]
+
+
+def test_the_plan_directory_is_made_again_once_when_tmp_vanishes(
+    fake: FakeClaudeSession, state: Path
+) -> None:
+    script(fake, plan_doc())
+    (state / "tmp").mkdir(mode=0o700)
+    check(fake, state, gateway=Racing(vanish=True))
+    assert [c["key"] for c in fake.calls()] == ["start --dry-run"]
+
+
+def test_a_second_vanish_is_not_retried_again(fake: FakeClaudeSession, state: Path) -> None:
+    class Always(Racing):
+        def mkdir(self, path: Any, mode: int) -> None:
+            self.vanish = True
+            super().mkdir(path, mode)
+
+    (state / "tmp").mkdir(mode=0o700)
+    with pytest.raises(FileNotFoundError):
+        check(fake, state, gateway=Always())
+
+
 # --- exact values for every safety setting -----------------------------------------------------
 
 MISMATCHES: list[tuple[str, dict[str, Any]]] = [
@@ -379,6 +432,7 @@ MISMATCHES: list[tuple[str, dict[str, Any]]] = [
     ("origins", {"origins.setting_sources": "derived"}),
     ("origins", {"origins.auto_exit": "config"}),  # a key the tool does not know: closed
     ("origins", {"origins.a_future_safety_field": "repo"}),
+    ("origins", {"origins": {}}),  # nothing shown: not vacuously fine
     ("cwd", {"cwd": "/state/sessions/cs-aaaaaaaa/wörk"}),
     ("cwd", {"cwd": "/état/sessions/cs-aaaaaaaa/work"}),
     ("cwd", {"cwd": "/state/sessions/😀/work"}),
@@ -398,13 +452,15 @@ def test_each_safety_setting_changed_is_exit_12_launch_settings_mismatch(
     error = refusal(fake, state)
     assert error.exit_code == 12 and error.code == "failed"
     assert error.details == {"reason": "launch_settings_mismatch", "retryable": False}
-    assert name in (error.hint or "")
+    plan = launchplan.parse_plan(json.dumps(plan_doc(changes)))
+    expected = [name, "sandbox_lowered"] if name == "sandbox" else [name]  # lowered goes with it
+    assert launchplan.settings_mismatches(plan, RetroSettings()) == expected
     only_the_plan_call(fake)
     assert list(state.iterdir()) == []  # nothing stored, nothing left
 
 
 def test_each_check_is_named_exactly_once_and_the_clean_plan_has_none() -> None:
-    clean = launchplan.parse_plan(__import__("json").dumps(plan_doc()))
+    clean = launchplan.parse_plan(json.dumps(plan_doc()))
     assert launchplan.settings_mismatches(clean, RetroSettings()) == []
     names = {name for name, _ in MISMATCHES}
     assert names == {
@@ -412,6 +468,27 @@ def test_each_check_is_named_exactly_once_and_the_clean_plan_has_none() -> None:
         "env.set_names", "env.path_prepend", "write_dirs", "notes_context", "claude_args",
         "sandbox", "sandbox_lowered", "repo", "origins", "cwd", "project_dir",
     }  # fmt: skip
+
+
+@pytest.mark.parametrize("key", launchplan.REQUIRED_ORIGIN_KEYS)
+def test_a_safety_key_missing_from_origins_fails_closed(key: str) -> None:
+    document = plan_doc()
+    del document["origins"][key]
+    plan = launchplan.parse_plan(json.dumps(document))
+    assert launchplan.settings_mismatches(plan, RetroSettings()) == ["origins"]
+
+
+def test_the_required_origin_keys_are_those_of_a_clean_plan_and_exclude_the_open_ones() -> None:
+    assert set(launchplan.REQUIRED_ORIGIN_KEYS) <= set(plan_doc()["origins"])
+    assert not set(launchplan.REQUIRED_ORIGIN_KEYS) & set(launchplan.OPEN_ORIGIN_KEYS)
+
+
+@pytest.mark.parametrize("key", ["model", "timeout", "max_turns"])
+def test_the_open_origin_keys_may_be_absent(key: str) -> None:
+    document = plan_doc()
+    del document["origins"][key]
+    plan = launchplan.parse_plan(json.dumps(document))
+    assert launchplan.settings_mismatches(plan, RetroSettings()) == []
 
 
 @pytest.mark.parametrize("key", ["model", "timeout", "max_turns"])
@@ -609,7 +686,7 @@ def test_output_that_is_not_a_document_is_a_failed_call(
 def test_a_duplicate_key_is_refused_even_when_the_last_value_would_pass(
     fake: FakeClaudeSession, state: Path
 ) -> None:
-    text = __import__("json").dumps(plan_doc())
+    text = json.dumps(plan_doc())
     text = text.replace(
         '"implicit_done": false', '"implicit_done": true, "implicit_done": false', 1
     )
