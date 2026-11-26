@@ -19,13 +19,14 @@ from typing import Any
 
 import pytest
 
-from session_audit import launchplan, retrolaunch
+from session_audit import launchplan, retrofiles, retrolaunch
 from session_audit import retrostate as retrostate_module
 
 from .fake_claude_session import FakeClaudeSession, exec_doc, step
 from .ingesthelp import Corpus, state_dir_of
 from .procs import wait_until_gone
-from .retrohelp import RetroGateway
+from .retrohelp import RetroGateway, add_retro
+from .retrohelp import retro as run_retro
 from .schemas import validate
 from .signalhelp import (
     RealMonotonicGateway,
@@ -498,3 +499,137 @@ def test_a_signal_inside_a_transaction_does_not_break_it(
     assert rows(corpus.home, "retro_starts") == []  # canceled before exec: refunded
     assert write_lock_is_free(corpus.home)
     assert keys(cs) == []  # the start was never called
+
+
+# --- the review of the retro limit and the signal handling ---------------------------------------
+
+
+def test_the_signal_waits_and_bounds_are_the_documented_ones() -> None:
+    assert retrolaunch.FORWARD_WAIT == 30.0
+    assert retrolaunch.STOP_WAIT == 15.0
+    assert retrolaunch.END_GRACE == 5.0
+    assert retrolaunch.CLEANUP_BOUND == 30.0
+
+
+def test_a_signal_as_the_validating_write_begins_cancels_before_the_artifact_check(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "done")
+    real = retrostate_module.Retro.write
+
+    def write(self: Any, state: str, *args: Any, **kwargs: Any) -> None:
+        if state == "validating":
+            fire(signal.SIGINT)
+        real(self, state, *args, **kwargs)
+
+    checked: list[bool] = []
+    monkeypatch.setattr(retrostate_module.Retro, "write", write)
+    monkeypatch.setattr(
+        retrolaunch, "validate_and_store_artifact", lambda *a, **k: checked.append(True)
+    )
+    result = launch(capsys, gw)
+    assert (result.code, result.out) == (130, "")  # exit by signal, no envelope
+    assert checked == []  # the artifact check never started
+    [row] = rows(corpus.home)
+    assert (row["state"], row["reason"]) == ("canceled", "interrupted")
+    [session] = rows(corpus.home, "retro_sessions")
+    assert session["cleanup_state"] == "done"
+
+
+def test_a_reused_retro_interrupted_at_step_13_prints_nothing(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    key = str(run_retro(capsys, gw, "--project", "/work", "--dry-run").doc["key"])
+    real = retrolaunch.insert_retro
+
+    def racing(*args: Any, **kwargs: Any) -> Any:
+        add_retro(corpus.home, key)  # another run finished between step 10 and step 13
+        fire(signal.SIGINT)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(retrolaunch, "insert_retro", racing)
+    result = launch(capsys, gw)
+    assert (result.code, result.out) == (130, "")
+
+
+def test_a_signal_between_the_top_check_and_the_watch_never_starts_the_pre_retro_hook(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "blocked")
+    marker = tmp_path / "hook.ran"
+    write_config(corpus.home, hook_config(pre_retro=f"touch {marker}; sleep 15"))
+    monkeypatch.setattr(
+        retrolaunch.fencing,
+        "finish_digest",
+        firing(retrolaunch.fencing.finish_digest, signal.SIGINT),
+    )
+    started = time.monotonic()
+    result = launch(capsys, gw)
+    assert (result.code, result.out) == (130, "")
+    assert time.monotonic() - started < 10  # not the hook's 15 s
+    assert not marker.exists()  # the hook was never started
+    [row] = rows(corpus.home)
+    assert (row["state"], row["reason"]) == ("canceled", "interrupted")
+    assert keys(cs) == []
+    assert not (state_dir_of(corpus.home) / "digests" / row["id"]).exists()
+
+
+def test_a_signal_wins_over_a_files_error(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "blocked")
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        fire(signal.SIGINT)
+        raise retrofiles.FilesError("a directory of the retro already exists")
+
+    monkeypatch.setattr(retrofiles, "write_run_files", refuse)
+    result = launch(capsys, gw)
+    assert (result.code, result.out) == (130, "")
+    [row] = rows(corpus.home)
+    assert (row["state"], row["reason"]) == ("canceled", "interrupted")
+    assert rows(corpus.home, "retro_starts") == []  # refunded
+    assert keys(cs) == []
+
+
+def test_a_signal_before_the_cleanup_still_bounds_a_slow_call_from_the_cleanup_start(
+    corpus: Corpus,
+    gw: RetroGateway,
+    cs: FakeClaudeSession,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_corpus(gw, corpus, capsys)
+    session_run(cs, "blocked")
+    cs.script("forget", step("{}", sleep=40, unvalidated=True))  # a forget that hangs
+    monkeypatch.setattr(retrolaunch, "CLEANUP_BOUND", 0.8)
+    arm(monkeypatch, gw, "final_write", signal.SIGINT)  # the signal is pending before the cleanup
+    started = time.monotonic()
+    result = launch(capsys, gw)
+    assert (result.code, result.out) == (130, "")
+    assert time.monotonic() - started < 30  # not the 40 s sleep
+    [row] = rows(corpus.home)
+    assert (row["state"], row["reason"]) == ("escalated", "session_blocked")
+    [session] = rows(corpus.home, "retro_sessions")
+    assert session["cleanup_state"] == "pending"  # housekeeping finishes it

@@ -1,7 +1,8 @@
-"""``retro run --json`` exits 11, 13, 14 to 18 and 22 print ONLY the error envelope, with the retro
-id in ``details`` (Exit codes, "With ``--json``, a non-zero exit prints only the envelope"); exit
-20 ``daily_limit`` too, and exits 129, 130 and 143 print nothing (issue #28). Each document is
-checked against its schema and against a golden file."""
+"""``retro run --json`` exits 11, 12 (a retro exists), 13, 14 to 18 and 22 print ONLY the error
+envelope, with the retro id in ``details`` (Exit codes, "With ``--json``, a non-zero exit prints
+only the envelope"); exit 20 ``daily_limit`` too, and exits 129, 130 and 143 print nothing (issue
+#28). Each document is checked against ``schemas/cli/error.json`` (the envelope) and against a
+golden file."""
 
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .fake_claude_session import FakeClaudeSession
+from .fake_claude_session import FakeClaudeSession, error_doc, step
 from .golden import assert_golden
 from .ingesthelp import Corpus
 from .retrohelp import RetroGateway
@@ -59,6 +60,7 @@ CASES = [
     ("error-session_ended-lost", 17, "session", "lost"),
     ("error-session_ended-failed", 18, "session", "failed"),
     ("error-artifact_invalid-no_artifact", 22, "session", "done"),
+    ("error-failed-claude_session_error-retro-run", 12, "exec_error", None),
 ]
 
 
@@ -79,6 +81,8 @@ def test_a_failing_run_prints_only_the_envelope_with_the_retro_id(
         write_config(corpus.home, hook_config(pre_retro="exit 1"))
     elif how == "escalate":
         write_config(corpus.home, hook_config(pre_retro="exit 13"))
+    elif how == "exec_error":  # an exec outside the outcome table: exit 12 with the retro id
+        cs.script("exec", step(error_doc("internal", "boom"), exit=1))
     result = launch(capsys, gw)
     assert result.code == code, result.err
     assert result.out.count("\n") == 1 and result.out.endswith("\n")  # one line, nothing else

@@ -44,9 +44,10 @@ class Interrupted(BaseException):
 
 
 class Bound(threading.Event):
-    """An event that reads as set once ``seconds`` have passed since the first signal, when that
-    signal came after this object was made (a signal that was already handled earlier does not
-    shorten the work that starts now). It never blocks: ``is_set`` is all the callers use."""
+    """An event that reads as set once ``seconds`` have passed since the first signal or since this
+    object was made, whichever is later (a signal that was handled earlier does not shorten the
+    work that starts now, and does not leave it unbounded either). It never blocks: ``is_set`` is
+    all the callers use."""
 
     def __init__(self, signals: Signals, seconds: float) -> None:
         super().__init__()
@@ -56,9 +57,9 @@ class Bound(threading.Event):
 
     def is_set(self) -> bool:
         first = self._signals.first_at
-        if first is None or first < self._born:
+        if first is None:
             return super().is_set()
-        return self._signals.clock() - first >= self._seconds or super().is_set()
+        return self._signals.clock() - max(first, self._born) >= self._seconds or super().is_set()
 
 
 class Signals:
@@ -106,12 +107,17 @@ class Signals:
             self._deferred = previous
 
     @contextlib.contextmanager
-    def watch(self) -> Iterator[threading.Event]:
-        """An event set by the first signal while the block runs (not set when that signal has
-        already happened: whoever runs afterwards is not cut short by it, only by a second
-        signal, which raises). Used to end a hook's process group promptly."""
+    def watch(self, *, preset: bool = False) -> Iterator[threading.Event]:
+        """An event set by the first signal while the block runs. Not set when that signal has
+        already happened (whoever runs afterwards, such as a post hook, is not cut short by it, only
+        by a second signal, which raises), unless ``preset``: then a signal that is already
+        pending, or that arrives while this is entered, hands out a set event, so work that must
+        not start after a signal (the ``pre-retro`` hook) never does. Used to end a hook's process
+        group promptly."""
         event = threading.Event()
         self._events.append(event)
+        if preset and self._first is not None:
+            event.set()
         try:
             yield event
         finally:
@@ -119,8 +125,8 @@ class Signals:
                 self._events.remove(event)
 
     def bound(self, seconds: float) -> Bound:
-        """``Bound`` for work that starts now: set ``seconds`` after a signal that arrives from now
-        on."""
+        """``Bound`` for work that starts now: set ``seconds`` after the first signal or after now,
+        whichever is later."""
         return Bound(self, seconds)
 
     # -- the handler ---------------------------------------------------------------------------

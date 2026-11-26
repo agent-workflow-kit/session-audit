@@ -167,7 +167,17 @@ def test_watch_events_are_set_by_the_first_signal_only_while_the_block_runs() ->
     assert signals._events == []
 
 
-def test_a_bound_is_set_a_while_after_a_signal_that_came_after_it_was_made() -> None:
+def test_a_preset_watch_event_is_set_when_a_signal_is_already_pending() -> None:
+    signals = Signals()
+    with signals.defer():
+        with signals.watch(preset=True) as before:
+            assert not before.is_set()  # nothing happened yet
+        signals.handle(signal.SIGINT)
+        with signals.watch(preset=True) as after:
+            assert after.is_set()  # a hook is never started after a signal
+
+
+def test_a_bound_is_set_30_s_after_the_signal_or_its_own_start_whichever_is_later() -> None:
     now = [100.0]
     signals = Signals(clock=lambda: now[0])
     bound = signals.bound(30)
@@ -178,9 +188,11 @@ def test_a_bound_is_set_a_while_after_a_signal_that_came_after_it_was_made() -> 
     assert not bound.is_set()
     now[0] = 130.0
     assert bound.is_set()
-    later = signals.bound(30)  # made after the signal: the old signal does not shorten it
-    now[0] = 500.0
+    later = signals.bound(30)  # made after the signal: counted from its own start
+    now[0] = 159.0
     assert not later.is_set()
+    now[0] = 160.0
+    assert later.is_set()
     assert isinstance(bound, threading.Event)
 
 

@@ -215,3 +215,12 @@ def test_a_cancel_event_ends_the_group_like_a_timeout(tmp_path: Path) -> None:
         timer.cancel()
         if grandchild and not gone(grandchild):
             os.kill(grandchild, signal.SIGKILL)
+
+
+def test_a_hook_is_not_started_when_the_cancel_event_is_already_set(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    cancel = threading.Event()
+    cancel.set()
+    result = hook(f"touch '{marker}'", cancel=cancel)
+    assert result.status is CallStatus.TIMEOUT and not result.ok
+    assert not marker.exists()  # nothing was spawned

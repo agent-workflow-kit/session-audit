@@ -269,3 +269,15 @@ def test_without_an_ignored_signal_no_preexec_function_is_used(
     finally:
         for sig, old in saved.items():
             signal.signal(sig, old)
+
+
+def test_an_output_over_the_cap_that_arrives_with_the_exit_is_an_output_limit() -> None:
+    with gateway().spawn(python("print('x' * 200)"), timeout=30, stdout_limit=50) as h:
+        popen = h._popen  # type: ignore[attr-defined]
+        assert popen is not None
+        popen.wait(30)  # the child is gone with its output still unread
+        selector = h._selector  # type: ignore[attr-defined]
+        selector.select = lambda step: []  # the loop never drains: only the final drain reads
+        assert h.wait(30) is True
+        result = h.result()
+    assert result.status is CallStatus.OUTPUT_LIMIT

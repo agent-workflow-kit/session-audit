@@ -444,14 +444,33 @@ def test_a_pre_retro_hook_that_runs_retro_run_again_is_bounded_by_the_limit(
 
 
 GATE_SCRIPT = """\
+import contextlib
 import os
 import sys
 import time
 
 from session_audit import cli, retrolaunch
+from session_audit.store import Store
 
 ready, total, name = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 real = retrolaunch.insert_retro
+real_transaction = Store.transaction
+inside = []
+
+
+@contextlib.contextmanager
+def slow_transaction(self):
+    # After every commit made by step 13 the process idles for a while WITHOUT the write lock: a
+    # limit check that was moved into a transaction of its own (before the insert) leaves this
+    # window for the other processes to pass their own checks too. Inside one transaction the
+    # sleep is harmless: the lock is released first.
+    with real_transaction(self) as conn:
+        yield conn
+    if inside:
+        time.sleep(0.3)
+
+
+Store.transaction = slow_transaction
 
 
 def gated(*args, **kwargs):
@@ -459,7 +478,11 @@ def gated(*args, **kwargs):
     end = time.monotonic() + 60
     while len(os.listdir(ready)) < total and time.monotonic() < end:
         time.sleep(0.01)
-    return real(*args, **kwargs)
+    inside.append(True)
+    try:
+        return real(*args, **kwargs)
+    finally:
+        inside.clear()
 
 
 retrolaunch.insert_retro = gated

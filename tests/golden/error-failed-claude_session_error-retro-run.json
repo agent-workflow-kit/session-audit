@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "failed",
+    "details": {
+      "reason": "claude_session_error",
+      "retro_id": "ra-aaaaaaaa",
+      "retryable": false
+    },
+    "message": "a claude-session call failed"
+  }
+}

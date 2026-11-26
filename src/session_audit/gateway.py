@@ -483,7 +483,10 @@ class _SystemHandle:
                         self._out if stream is popen.stdout else self._err,
                         self._limit,
                     )
-                self._finish(None)
+                if len(self._out) > self._limit:
+                    self._finish(CallStatus.OUTPUT_LIMIT)
+                else:
+                    self._finish(None)
                 return True
             if time.monotonic() >= end:
                 return False
@@ -673,6 +676,12 @@ class SystemGateway:
         decoded and stdin encoded with ``surrogateescape`` (the crontab, which holds the user's
         own lines and must come back byte for byte)."""
         data = _check_call(argv, timeout, stdin, env, stdout_limit, kill_grace, escape)
+        if cancel is not None and cancel.is_set():
+            # Already cancelled (a signal): nothing is spawned, like a call ended by its timeout.
+            return CallResult(
+                CallStatus.TIMEOUT,
+                detail="cancelled before it started",
+            )
         try:
             popen = subprocess.Popen(
                 list(argv),
