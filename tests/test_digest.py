@@ -603,3 +603,29 @@ def test_a_read_error_is_a_changed_transcript(
     monkeypatch.setattr(digest, "_stored_items", failing)
     out = build(capsys, gw, corpus, ingest_first=False)
     assert [(s.session_id, s.reason) for s in out.skipped] == [(S1, "transcript_changed")]
+
+
+def test_dollars_are_exact_and_a_total_is_rounded_from_the_exact_sum(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    haiku = "claude-haiku-4-5"  # 1 USD per million input tokens: 40 tokens are 0.00004 USD
+    write(corpus, S1, [say("a", "x", 1, inp=40, out=0, model=haiku)], project="p1")
+    write(corpus, S2, [say("b", "y", 2, inp=40, out=0, model=haiku)], project="p2")
+    write(corpus, S3, [say("c", "z", 3, inp=50, out=0, model=haiku)], project="p3")
+    out = build(capsys, gw, corpus)
+    shown = [dict(s.metrics.pairs())["estimated_usd"] for s in out.sections]
+    assert shown == ["0.0000", "0.0000", "0.0001"]  # 0.00004, 0.00004, 0.00005 (half up)
+    assert dict(out.totals.pairs())["estimated_usd"] == "0.0001"  # 0.00013 from the exact sum
+    assert "estimated_usd=0.0001" in render(out).split("\n")[2]
+
+
+def test_a_session_with_no_recorded_turn_has_null_active_seconds_and_totals_sum_the_rest(
+    corpus: Corpus, gw: TickGateway, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(corpus, S1, [prompt("a", 1), turn_line(1500, 2)], project="p1")
+    write(corpus, S2, [prompt("b", 1), turn_line(2750, 2)], project="p2")
+    write(corpus, S3, [prompt("c", 1)], project="p3")
+    out = build(capsys, gw, corpus)
+    got = {s.session_id: dict(s.metrics.pairs())["active_seconds"] for s in out.sections}
+    assert got == {S1: "1.5", S2: "2.75", S3: "null"}
+    assert dict(out.totals.pairs())["active_seconds"] == "4.25"

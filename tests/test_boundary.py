@@ -41,7 +41,7 @@ FORBIDDEN_OS_CALLS = frozenset(
     {"open", "fdopen", "scandir", "listdir", "walk", "system", "popen", "fork", "forkpty"}
 )
 FORBIDDEN_OS_PREFIXES = ("exec", "spawn", "posix_spawn")
-SAFE_OPEN_USERS = frozenset({"commands/ingest.py"})
+SAFE_OPEN_USERS = frozenset({"commands/ingest.py", "digest.py"})
 FORBIDDEN_METHODS = frozenset({"open", "read_text", "read_bytes", "iterdir", "glob", "rglob"})
 # Dotted names (after import aliases are resolved) that are forbidden to call or to import.
 FORBIDDEN_NAMES = frozenset(
@@ -164,8 +164,13 @@ def violations(source: str, filename: str) -> list[str]:
                         add(node, f"{'.'.join(dotted)}() with a name that is not a literal")
                     elif _forbidden(target.value.split(".")):
                         add(node, f"{'.'.join(dotted)}({target.value!r})")
-            # reader.Discovery.open, the safe open, is called only by the ingest command.
-            sanctioned = chain == ["discovery", "open"] and filename in SAFE_OPEN_USERS
+            # reader.Discovery.open, the safe open, is called only by the ingest command and the
+            # digest (which reads the stored bytes of a transcript through it).
+            sanctioned = (
+                chain is not None
+                and chain[-2:] == ["discovery", "open"]
+                and filename in SAFE_OPEN_USERS
+            )
             if (
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr in FORBIDDEN_METHODS
