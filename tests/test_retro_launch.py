@@ -679,7 +679,8 @@ def test_a_session_id_another_retro_already_recorded_is_never_forgotten_here(
     conn.execute(
         "INSERT INTO retro_sessions (csession_id, retro_id, csession_dir, private_dir, "
         "project_dir, cleanup_state, created_at) "
-        "VALUES (?, 'ra-zzzzzzzz', '/x', '/y', 'p', 'pending', 1)",
+        # skipped: housekeeping (step 5) leaves a settled row alone, so the run's own calls show
+        "VALUES (?, 'ra-zzzzzzzz', '/x', '/y', 'p', 'skipped', 1)",
         (CSID,),
     )
     conn.commit()
