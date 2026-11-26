@@ -207,7 +207,7 @@ class _Run:
         retro.actor = RECOVER_ACTOR
         retro.state = state
         retro.digest_sha256 = digest_sha256
-        retro.csession_id = csid
+        retro.csession_id = csid if is_csession_id(csid) else None  # only a valid id is logged
         retro.cost_usd = cost_usd
         skipped = False
         if csid is not None:
@@ -248,7 +248,7 @@ class _Run:
     ) -> None:
         gw, state_dir = self.gw, self.ctx.state_path()
         retrofiles.delete_local(gw, state_dir, retro.id)
-        if retro.csession_id is None and digest_sha256 is not None:
+        if retro.csession_id is None:
             retrofiles.remove_digest(gw, state_dir, retro.id)  # never launched: no use for it
         columns: dict[str, Any] = {}
         if skipped:

@@ -29,6 +29,7 @@ from .retrohelp import KEY_A, RETRO, add_retro, retro_ctx
 CSID = "cs-aaaaaaab"
 OTHER = "cs-aaaaaaac"
 PROJECT = "-state-sessions-cs-aaaaaaab-work"
+RECENT_MS = 1_767_225_000_000  # shortly before the fake clock starts (2026-01-01)
 UUIDS = ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 __all__ = ["KEY_A", "RETRO"]  # re-exported for the tests
 
@@ -119,7 +120,7 @@ def orphan(
     *,
     state: str = "running",
     csid: str | None = None,
-    created: int = 1_000,
+    created: int = RECENT_MS,
     lease: tuple[Any, Any, Any] = (None, None, None),
     key: str = KEY_A,
     digest: bool = False,
@@ -190,8 +191,43 @@ def not_found() -> dict[str, Any]:
     return step(error_doc("not_found", "gone"), exit=10)
 
 
-def housekeep(gw: TickGateway, corpus: Corpus, **settings: Any) -> retrorecovery.Result:
+def hook_settings(tmp_path: Path) -> tuple[Any, Path, Path]:
+    """``HookSettings`` whose post-retro and post-attention entries append their stdin payload (one
+    line) to files; returns them and the two file paths."""
+    from session_audit.config import HookSettings
+
+    retro_log, attention_log = tmp_path / "post-retro.log", tmp_path / "post-attention.log"
+    settings = HookSettings.model_validate(
+        {
+            "post-retro": [{"cmd": f"tr -d '\\n' >> {retro_log}; echo >> {retro_log}"}],
+            "post-attention": [{"cmd": f"tr -d '\\n' >> {attention_log}; echo >> {attention_log}"}],
+        }
+    )
+    return settings, retro_log, attention_log
+
+
+def payloads(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def housekeep(
+    gw: TickGateway,
+    corpus: Corpus,
+    *,
+    hooks: Any = None,
+    harness_enabled: str | None = None,
+    quiet: bool = True,
+    **settings: Any,
+) -> retrorecovery.Result:
     ctx = retro_ctx(gw, corpus, retro_settings=settings or None)
+    ctx.quiet = quiet
+    update: dict[str, Any] = {}
+    if hooks is not None:
+        update["hooks"] = hooks
+    if harness_enabled is not None:
+        update["harness"] = ctx.settings.harness.model_copy(update={"enabled": harness_enabled})
+    if update:
+        ctx.settings = ctx.settings.model_copy(update=update)
     try:
         return retrorecovery.run_housekeeping(ctx)
     finally:
