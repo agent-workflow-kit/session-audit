@@ -42,6 +42,7 @@ SCHEMA_FOR_KEY = {
     "list": "claude-session/cli/list.json",
     "forget": "claude-session/cli/forget.json",
     "stop": "claude-session/cli/stop.json",
+    "kinds": "claude-session/cli/kinds.json",
 }
 ERROR_SCHEMA = "claude-session/cli/error.json"
 
@@ -68,6 +69,7 @@ EXITS_FOR_KEY = {
     "list": frozenset({0, 12}) | _ANY_EXITS,
     "forget": frozenset({0, 12}) | _ANY_EXITS,
     "stop": frozenset({0, 12}) | _ANY_EXITS,
+    "kinds": frozenset({0, 12}) | _ANY_EXITS,
 }
 
 
@@ -410,6 +412,42 @@ def status_doc(
         },
     )
     return doc
+
+
+def kinds_doc(
+    *,
+    sandbox_available: bool | None = None,
+    review_sandbox_available: bool | None = True,
+    names: tuple[str, ...] = ("audit", "review"),
+    **top: Any,
+) -> dict[str, Any]:
+    """A valid ``kinds --json`` document of a stock install: one profile per name. The ``audit``
+    profile has the sandbox off, so its ``sandbox_available`` is null (pass a boolean to make it
+    sandboxed); the sandbox-capable ``review`` profile's is ``review_sandbox_available``. ``top``
+    replaces top-level fields."""
+    profile = plan_doc()["profile"]
+    kinds = []
+    for name in names:
+        one = {**profile, "name": name, "fallback": False}
+        available = sandbox_available if name == "audit" else review_sandbox_available
+        if name == "audit" and sandbox_available is None:
+            one["sandbox"] = "off"
+        one["sandbox_available"] = available
+        if available is False:
+            one["sandbox_problems"] = ["the sandbox helper is not installed"]
+        kinds.append(one)
+    return {
+        "default_kind": "review",
+        "repo": None,
+        "claude_bin_resolved": "/usr/bin/claude",
+        "claude_version": "2.0.0",
+        "claude_version_ok": True,
+        "state_dir_warnings": [],
+        "min_claude_version": "2.0.0",
+        "kinds": kinds,
+        "warnings": [],
+        **top,
+    }
 
 
 def version_step(version: str = "0.45.3", *, exit: int = 0) -> dict[str, Any]:  # noqa: A002

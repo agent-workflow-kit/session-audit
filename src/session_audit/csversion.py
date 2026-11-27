@@ -12,7 +12,7 @@ none is read from an exit code of a failed call:
 - ``FAILED``: the call timed out, was killed, or exited non-zero (it may be a program that is
   not claude-session at all).
 
-Shared by ``ingest`` (``harness``), ``retro run`` and ``validate`` (TODO(#33)); the
+Shared by ``ingest`` (``harness``), ``retro run`` and ``validate``; the
 mapping of an outcome to an exit code belongs to each caller.
 """
 

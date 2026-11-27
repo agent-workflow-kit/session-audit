@@ -1,0 +1,46 @@
+{
+  "checks": [
+    {
+      "name": "config",
+      "ok": false,
+      "reason": "config_invalid"
+    },
+    {
+      "name": "config_ownership",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "transcript_roots",
+      "ok": false,
+      "reason": "config_invalid"
+    },
+    {
+      "name": "store",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "price_table",
+      "ok": false,
+      "reason": "config_invalid"
+    },
+    {
+      "name": "permission_profile",
+      "ok": false,
+      "reason": "config_invalid"
+    },
+    {
+      "name": "plugin",
+      "ok": false,
+      "reason": "config_invalid"
+    },
+    {
+      "name": "claude_session",
+      "ok": true,
+      "reason": null
+    }
+  ],
+  "ok": false,
+  "warnings": []
+}

@@ -89,6 +89,7 @@ PLAN_OUTPUT_LIMIT = 4 * 1024 * 1024
 PLACEHOLDER_RETRO_ID = "ra-aaaaaaaa"  # the plan check runs before any row (and id) exists
 PLACEHOLDER_FILES = ("prompt.md", "digest.md", "manifest.json")
 PROJECT_DIR_MAX = 200
+RETRO_KIND = "audit"  # the claude-session kind of every retro session
 PROFILE_RELATIVE = "profiles/audit-retro.yaml"  # in the bundled plugin
 _END_REASON = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _RETRYABLE_END_REASONS = frozenset({"launch_interrupted", "never_adopted"})
@@ -165,7 +166,7 @@ def launch_flags(
     """The flags of ``claude-session start`` (without ``--json``, ``--dry-run``), Retro launch
     item 4, in a fixed order."""
     s = launch.settings
-    flags = ["--kind", "audit", "--reads-third-party", "--no-implicit-done"]
+    flags = ["--kind", RETRO_KIND, "--reads-third-party", "--no-implicit-done"]
     flags += ["--skill", launch.skill]
     for directory in launch.plugin_dirs:
         flags += ["--plugin-dir", directory]

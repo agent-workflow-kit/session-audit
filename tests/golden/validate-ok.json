@@ -1,0 +1,46 @@
+{
+  "checks": [
+    {
+      "name": "config",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "config_ownership",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "transcript_roots",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "store",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "price_table",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "permission_profile",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "plugin",
+      "ok": true,
+      "reason": null
+    },
+    {
+      "name": "claude_session",
+      "ok": true,
+      "reason": null
+    }
+  ],
+  "ok": true,
+  "warnings": []
+}
